@@ -536,6 +536,66 @@ impl GameInstance {
             events: Vec::new(),
         })
     }
+
+    pub fn get_spectator_observation(&mut self) -> SpectatorObservation {
+        let mut players = Vec::new();
+        let mut entities = Vec::new();
+
+        {
+            let mut query = self.world.query::<(&Player, &Transform, &Health)>();
+            for (player, transform, health) in query.iter(&self.world) {
+                players.push(SpectatorPlayerInfo {
+                    id: player.agent_id,
+                    position: transform.translation.to_array(),
+                    health: health.current,
+                    ammo: player.ammo,
+                    score: player.score,
+                });
+            }
+        }
+
+        {
+            let mut query = self.world.query::<(Entity, &Transform, &Health, &AiEnemy)>();
+            for (e, t, h, _) in query.iter(&self.world) {
+                entities.push(SpectatorEntity {
+                    id: e.index(),
+                    entity_type: "enemy".to_string(),
+                    position: t.translation.to_array(),
+                    health: Some(h.current),
+                    pickup_type: None,
+                });
+            }
+        }
+
+        {
+            let mut query = self.world.query::<(Entity, &Transform, &Pickup)>();
+            for (e, t, pickup) in query.iter(&self.world) {
+                if pickup.respawn_timer <= 0.0 {
+                    entities.push(SpectatorEntity {
+                        id: e.index(),
+                        entity_type: "pickup".to_string(),
+                        position: t.translation.to_array(),
+                        health: None,
+                        pickup_type: Some(match pickup.pickup_type {
+                            PickupType::Health => "health".to_string(),
+                            PickupType::Ammo => "ammo".to_string(),
+                        }),
+                    });
+                }
+            }
+        }
+
+        SpectatorObservation {
+            tick: self.tick,
+            game_status: match self.status {
+                GameStatus::Waiting => "waiting".to_string(),
+                GameStatus::Playing => "playing".to_string(),
+                GameStatus::Finished => "finished".to_string(),
+            },
+            players,
+            entities,
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -582,4 +642,33 @@ pub struct GameEvent {
     pub item: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub amount: Option<i32>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SpectatorObservation {
+    pub tick: u64,
+    pub game_status: String,
+    pub players: Vec<SpectatorPlayerInfo>,
+    pub entities: Vec<SpectatorEntity>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SpectatorPlayerInfo {
+    pub id: Uuid,
+    pub position: [f32; 3],
+    pub health: i32,
+    pub ammo: i32,
+    pub score: i32,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SpectatorEntity {
+    pub id: u32,
+    #[serde(rename = "type")]
+    pub entity_type: String,
+    pub position: [f32; 3],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pickup_type: Option<String>,
 }

@@ -135,6 +135,19 @@ pub fn get_observation(
         .ok_or_else(|| "Not in game".to_string())
 }
 
+pub fn get_spectator_observation(
+    state: &GameManagerHandle,
+    game_id: Uuid,
+) -> Result<instance::SpectatorObservation, String> {
+    let mut state = state.write().unwrap();
+    let game = state
+        .games
+        .get_mut(&game_id)
+        .ok_or_else(|| "Game not found".to_string())?;
+
+    Ok(game.get_spectator_observation())
+}
+
 pub fn list_games(state: &GameManagerHandle) -> Vec<GameInfo> {
     let state = state.read().unwrap();
     state

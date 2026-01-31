@@ -8,7 +8,7 @@ use serde::Serialize;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::game::{self, actions::GameAction, instance::PlayerObservation, GameManagerHandle};
+use crate::game::{self, actions::GameAction, instance::{PlayerObservation, SpectatorObservation}, GameManagerHandle};
 
 use super::agents::extract_api_key;
 
@@ -23,6 +23,7 @@ pub fn routes(pool: PgPool, game_manager: GameManagerHandle) -> Router {
 
     Router::new()
         .route("/games/{id}/observe", get(observe))
+        .route("/games/{id}/spectate", get(spectate))
         .route("/games/{id}/action", post(action))
         .with_state(state)
 }
@@ -46,6 +47,16 @@ async fn observe(
 
     let observation = game::get_observation(&state.game_manager, game_id, agent_id)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    Ok(Json(observation))
+}
+
+async fn spectate(
+    State(state): State<GameplayState>,
+    Path(game_id): Path<Uuid>,
+) -> Result<Json<SpectatorObservation>, (StatusCode, String)> {
+    let observation = game::get_spectator_observation(&state.game_manager, game_id)
+        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
 
     Ok(Json(observation))
 }
