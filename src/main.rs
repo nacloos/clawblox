@@ -17,7 +17,11 @@ async fn main() {
         .nest_service("/static", ServeDir::new("static"))
         .layer(cors);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
+    let port: u16 = std::env::var("PORT")
+        .unwrap_or_else(|_| "8080".to_string())
+        .parse()
+        .unwrap();
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     println!("Server running on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
