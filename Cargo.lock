@@ -3095,9 +3095,9 @@ checksum = "3eb8486b569e12e2c32ad3e204dbaba5e4b5b216e9367044f25f1dba42341773"
 
 [[package]]
 name = "pxfm"
-version = "0.1.27"
+version = "0.1.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7186d3822593aa4393561d186d1393b3923e9d6163d3fbfd6e825e3e6cf3e6a8"
+checksum = "b3502d6155304a4173a5f2c34b52b7ed0dd085890326cb50fd625fdf39e86b3b"
 dependencies = [
  "num-traits",
 ]
