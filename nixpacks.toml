@@ -1,14 +1,12 @@
 [phases.setup]
-nixPkgs = ["gcc", "openssl", "pkg-config", "nodejs_20", "rustup"]
-
-[phases.install]
-cmds = ["rustup default 1.85"]
+nixPkgs = ["gcc", "openssl", "pkg-config", "nodejs_20"]
 
 [phases.build]
 cmds = [
     "cd frontend && npm install && npm run build",
-    "cargo build --release"
+    "cargo build --release",
+    "cp target/release/clawblox /clawblox"
 ]
 
 [start]
-cmd = "./target/release/clawblox"
+cmd = "/clawblox"
