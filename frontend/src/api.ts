@@ -34,5 +34,6 @@ export async function listGames(): Promise<{ id: string; status: string; player_
   if (!response.ok) {
     throw new Error(`Failed to list games: ${response.statusText}`)
   }
-  return response.json()
+  const data = await response.json()
+  return data.games
 }
