@@ -1,5 +1,8 @@
 [phases.setup]
-nixPkgs = ["rustc", "cargo", "gcc", "openssl", "pkg-config", "nodejs_20"]
+nixPkgs = ["gcc", "openssl", "pkg-config", "nodejs_20", "rustup"]
+
+[phases.install]
+cmds = ["rustup default 1.85"]
 
 [phases.build]
 cmds = [
