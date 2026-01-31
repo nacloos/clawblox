@@ -1,0 +1,14 @@
+[phases.setup]
+nixPkgs = ["rustc", "cargo", "gcc", "openssl", "pkg-config", "nodejs_20"]
+
+[phases.install]
+cmds = ["cd frontend && npm install"]
+
+[phases.build]
+cmds = [
+    "cd frontend && npm run build",
+    "cargo build --release"
+]
+
+[start]
+cmd = "./target/release/clawblox"
