@@ -5,22 +5,44 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-// In-memory store (replace with DB later)
-pub type AgentStore = Arc<RwLock<HashMap<String, Agent>>>;
+use crate::db::models::Agent;
 
-#[derive(Clone, Serialize)]
-pub struct Agent {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub api_key: String,
-    pub claim_token: String,
-    pub verification_code: String,
-    pub status: String, // "pending_claim" or "claimed"
+pub fn routes(pool: PgPool) -> Router {
+    Router::new()
+        .route("/agents/register", post(register))
+        .route("/agents/me", get(me))
+        .route("/agents/status", get(status))
+        .with_state(pool)
+}
+
+fn generate_api_key() -> String {
+    format!("clawblox_{}", Uuid::new_v4().to_string().replace("-", ""))
+}
+
+fn generate_claim_token() -> String {
+    format!(
+        "clawblox_claim_{}",
+        Uuid::new_v4().to_string().replace("-", "")
+    )
+}
+
+fn generate_verification_code() -> String {
+    use rand::Rng;
+    let words = [
+        "block", "cube", "mesh", "voxel", "pixel", "grid", "node", "edge",
+    ];
+    let mut rng = rand::thread_rng();
+    let word = words[rng.gen_range(0..words.len())];
+    let code: String = (0..4)
+        .map(|_| {
+            let chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+            chars.chars().nth(rng.gen_range(0..chars.len())).unwrap()
+        })
+        .collect();
+    format!("{}-{}", word, code)
 }
 
 #[derive(Deserialize)]
@@ -42,46 +64,17 @@ struct AgentPublic {
     verification_code: String,
 }
 
-pub fn routes() -> Router {
-    let store: AgentStore = Arc::new(RwLock::new(HashMap::new()));
-
-    Router::new()
-        .route("/agents/register", post(register))
-        .route("/agents/me", get(me))
-        .route("/agents/status", get(status))
-        .with_state(store)
-}
-
-fn generate_api_key() -> String {
-    format!("clawblox_{}", Uuid::new_v4().to_string().replace("-", ""))
-}
-
-fn generate_claim_token() -> String {
-    format!("clawblox_claim_{}", Uuid::new_v4().to_string().replace("-", ""))
-}
-
-fn generate_verification_code() -> String {
-    use rand::Rng;
-    let words = ["block", "cube", "mesh", "voxel", "pixel", "grid", "node", "edge"];
-    let mut rng = rand::thread_rng();
-    let word = words[rng.gen_range(0..words.len())];
-    let code: String = (0..4)
-        .map(|_| {
-            let chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-            chars.chars().nth(rng.gen_range(0..chars.len())).unwrap()
-        })
-        .collect();
-    format!("{}-{}", word, code)
-}
-
 async fn register(
-    State(store): State<AgentStore>,
+    State(pool): State<PgPool>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<Json<RegisterResponse>, (StatusCode, String)> {
-    let mut agents = store.write().unwrap();
+    let existing = sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM agents WHERE name = $1")
+        .bind(&req.name)
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Check if name already taken
-    if agents.values().any(|a| a.name == req.name) {
+    if existing.0 > 0 {
         return Err((StatusCode::CONFLICT, "Name already taken".to_string()));
     }
 
@@ -89,17 +82,20 @@ async fn register(
     let claim_token = generate_claim_token();
     let verification_code = generate_verification_code();
 
-    let agent = Agent {
-        id: Uuid::new_v4().to_string(),
-        name: req.name,
-        description: req.description,
-        api_key: api_key.clone(),
-        claim_token: claim_token.clone(),
-        verification_code: verification_code.clone(),
-        status: "pending_claim".to_string(),
-    };
-
-    agents.insert(api_key.clone(), agent);
+    sqlx::query(
+        r#"
+        INSERT INTO agents (name, api_key, description, claim_token, verification_code, status)
+        VALUES ($1, $2, $3, $4, $5, 'pending_claim')
+        "#,
+    )
+    .bind(&req.name)
+    .bind(&api_key)
+    .bind(&req.description)
+    .bind(&claim_token)
+    .bind(&verification_code)
+    .execute(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(RegisterResponse {
         agent: AgentPublic {
@@ -111,7 +107,7 @@ async fn register(
     }))
 }
 
-fn extract_api_key(headers: &HeaderMap) -> Option<String> {
+pub fn extract_api_key(headers: &HeaderMap) -> Option<String> {
     headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -119,19 +115,36 @@ fn extract_api_key(headers: &HeaderMap) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+#[derive(Serialize)]
+struct AgentResponse {
+    id: Uuid,
+    name: String,
+    description: Option<String>,
+    status: String,
+}
+
 async fn me(
-    State(store): State<AgentStore>,
+    State(pool): State<PgPool>,
     headers: HeaderMap,
-) -> Result<Json<Agent>, (StatusCode, String)> {
+) -> Result<Json<AgentResponse>, (StatusCode, String)> {
     let api_key = extract_api_key(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
 
-    let agents = store.read().unwrap();
-    let agent = agents
-        .get(&api_key)
-        .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
+    let agent = sqlx::query_as::<_, Agent>(
+        "SELECT id, name, api_key, description, claim_token, verification_code, status, created_at FROM agents WHERE api_key = $1",
+    )
+    .bind(&api_key)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
 
-    Ok(Json(agent.clone()))
+    Ok(Json(AgentResponse {
+        id: agent.id,
+        name: agent.name,
+        description: agent.description,
+        status: agent.status,
+    }))
 }
 
 #[derive(Serialize)]
@@ -140,18 +153,18 @@ struct StatusResponse {
 }
 
 async fn status(
-    State(store): State<AgentStore>,
+    State(pool): State<PgPool>,
     headers: HeaderMap,
 ) -> Result<Json<StatusResponse>, (StatusCode, String)> {
     let api_key = extract_api_key(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
 
-    let agents = store.read().unwrap();
-    let agent = agents
-        .get(&api_key)
+    let agent = sqlx::query_as::<_, (String,)>("SELECT status FROM agents WHERE api_key = $1")
+        .bind(&api_key)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
 
-    Ok(Json(StatusResponse {
-        status: agent.status.clone(),
-    }))
+    Ok(Json(StatusResponse { status: agent.0 }))
 }
