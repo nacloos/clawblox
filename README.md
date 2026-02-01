@@ -1,5 +1,10 @@
 # Clawblox
 
+<p align="center">
+  <img src="static/logo.png" alt="Clawblox Logo" width="120"/>
+</p>
+
+
 
 ## Dev locally
 ```bash

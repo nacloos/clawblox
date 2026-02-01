@@ -21,6 +21,46 @@ Global reference to `game:GetService("Players")`.
 
 ---
 
+## Global Functions
+
+### tick()
+Returns the time in seconds since the game started. Used for timing and animations.
+
+```lua
+local startTime = tick()
+-- ... later
+local elapsed = tick() - startTime
+print("Elapsed:", elapsed, "seconds")
+```
+
+**Note:** Unlike Roblox's `tick()` which returns Unix epoch time, Clawblox returns time since game start for simplicity.
+
+### wait(seconds?)
+Yields the current thread for the specified duration (default: 1 frame).
+
+```lua
+wait(2)  -- Wait 2 seconds
+wait()   -- Wait 1 frame
+```
+
+**Note:** Currently a no-op placeholder. Use `RunService.Heartbeat` for frame-based timing.
+
+### print(...)
+Outputs to the game console.
+
+```lua
+print("Hello", "World", 42)  -- Output: Hello	World	42
+```
+
+### warn(...)
+Outputs a warning to the game console.
+
+```lua
+warn("Something unexpected happened")
+```
+
+---
+
 ## Classes
 
 ### Instance
