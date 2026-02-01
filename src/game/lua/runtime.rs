@@ -1,5 +1,6 @@
 use mlua::{Lua, MultiValue, ObjectLike, Result, UserData, UserDataMethods, Value};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use super::instance::{Instance, InstanceData};
 use super::services::{register_raycast_params, PlayersService, RunService, WorkspaceService};
@@ -147,6 +148,13 @@ impl LuaRuntime {
             })?;
         math_table.set("random", random_fn)?;
 
+        // Add tick() global - returns time since game start
+        let start_time = Instant::now();
+        let tick_fn = lua.create_function(move |_, ()| {
+            Ok(start_time.elapsed().as_secs_f64())
+        })?;
+        lua.globals().set("tick", tick_fn)?;
+
         let table_table = lua.globals().get::<mlua::Table>("table")?;
 
         let insert_fn = lua.create_function(
@@ -206,10 +214,49 @@ impl LuaRuntime {
         Ok(())
     }
 
-    pub fn add_player(&self, user_id: u64, name: &str) -> Instance {
+    /// Adds a player and returns (Player instance, HumanoidRootPart lua_id)
+    pub fn add_player(&self, user_id: u64, name: &str) -> (Instance, u64) {
         let player = Instance::from_data(InstanceData::new_player(user_id, name));
+
+        // Create character model (Roblox-compatible)
+        let character = Instance::from_data(InstanceData::new_model(name));
+
+        // Create HumanoidRootPart
+        let mut hrp_data = InstanceData::new_part("HumanoidRootPart");
+        if let Some(part) = &mut hrp_data.part_data {
+            part.size = super::types::Vector3::new(2.0, 2.0, 1.0);
+            part.position = super::types::Vector3::new(0.0, 5.0, 0.0); // Spawn above floor
+            part.anchored = false;
+        }
+        let hrp = Instance::from_data(hrp_data);
+        let hrp_id = hrp.data.lock().unwrap().id.0;
+        hrp.set_parent(Some(&character));
+
+        // Create Humanoid
+        let humanoid = Instance::from_data(InstanceData::new_humanoid("Humanoid"));
+        humanoid.set_parent(Some(&character));
+
+        // Set HumanoidRootPart as PrimaryPart
+        {
+            let mut char_data = character.data.lock().unwrap();
+            if let Some(model) = &mut char_data.model_data {
+                model.primary_part = Some(std::sync::Arc::downgrade(&hrp.data));
+            }
+        }
+
+        // Link character to player
+        {
+            let mut player_data = player.data.lock().unwrap();
+            if let Some(pdata) = &mut player_data.player_data {
+                pdata.character = Some(std::sync::Arc::downgrade(&character.data));
+            }
+        }
+
+        // Parent character to workspace
+        self.game.workspace().add_child(character);
+
         self.game.players().add_player(player.clone());
-        player
+        (player, hrp_id)
     }
 
     pub fn remove_player(&self, user_id: u64) {
@@ -324,4 +371,50 @@ mod tests {
             .unwrap();
         assert_eq!(tick_count, 10);
     }
+
+    #[test]
+    fn test_tick_function() {
+        let runtime = LuaRuntime::new().expect("Failed to create runtime");
+        let result: f64 = runtime.lua().load("return tick()").eval().unwrap();
+        assert!(result >= 0.0);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let result2: f64 = runtime.lua().load("return tick()").eval().unwrap();
+        assert!(result2 > result);
+    }
+
+    #[test]
+    fn test_player_has_character() {
+        let runtime = LuaRuntime::new().expect("Failed to create runtime");
+        let (player, hrp_id) = runtime.add_player(12345, "TestPlayer");
+
+        // Verify HRP ID is valid
+        assert!(hrp_id > 0);
+
+        // Check player has a character
+        let char = player
+            .data
+            .lock()
+            .unwrap()
+            .player_data
+            .as_ref()
+            .unwrap()
+            .character
+            .clone();
+        assert!(char.is_some());
+
+        let char_ref = char.unwrap().upgrade().unwrap();
+        let char_inst = Instance::from_ref(char_ref);
+
+        // Check character has HumanoidRootPart
+        let hrp = char_inst.find_first_child("HumanoidRootPart", false);
+        assert!(hrp.is_some());
+
+        // Check character has Humanoid
+        let humanoid = char_inst.find_first_child("Humanoid", false);
+        assert!(humanoid.is_some());
+
+        // Check character is in workspace
+        assert!(char_inst.parent().is_some());
+    }
 }
+

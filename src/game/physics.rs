@@ -1,5 +1,15 @@
+use rapier3d::control::{CharacterAutostep, CharacterLength, KinematicCharacterController};
 use rapier3d::prelude::*;
 use std::collections::HashMap;
+
+/// State for a character controller (player or NPC)
+pub struct CharacterControllerState {
+    pub controller: KinematicCharacterController,
+    pub collider_handle: ColliderHandle,
+    pub body_handle: RigidBodyHandle,
+    pub vertical_velocity: f32,
+    pub target_position: Option<[f32; 3]>,
+}
 
 /// Wrapper around Rapier3D physics world for game physics simulation.
 /// Syncs with Lua Workspace parts to simulate physics for non-anchored parts.
@@ -21,6 +31,8 @@ pub struct PhysicsWorld {
     pub lua_to_body: HashMap<u64, RigidBodyHandle>,
     /// Maps Rapier rigid body handle to Lua instance ID (reverse lookup)
     pub body_to_lua: HashMap<RigidBodyHandle, u64>,
+    /// Character controllers for player movement
+    pub character_controllers: HashMap<u64, CharacterControllerState>,
 }
 
 impl PhysicsWorld {
@@ -41,6 +53,7 @@ impl PhysicsWorld {
             query_pipeline: QueryPipeline::new(),
             lua_to_body: HashMap::new(),
             body_to_lua: HashMap::new(),
+            character_controllers: HashMap::new(),
         }
     }
 
@@ -217,6 +230,173 @@ impl PhysicsWorld {
             }
         }
     }
+
+    /// Adds a character controller for player movement
+    /// Uses a capsule shape for smooth collisions with environment
+    pub fn add_character(
+        &mut self,
+        lua_id: u64,
+        position: [f32; 3],
+        radius: f32,
+        height: f32,
+    ) -> RigidBodyHandle {
+        // Create kinematic body for character
+        let body = RigidBodyBuilder::kinematic_position_based()
+            .translation(vector![position[0], position[1], position[2]])
+            .build();
+        let body_handle = self.rigid_body_set.insert(body);
+
+        // Create capsule collider (half-height is the cylinder part, total height = 2*half_height + 2*radius)
+        let half_height = (height - 2.0 * radius).max(0.0) / 2.0;
+        let collider = ColliderBuilder::capsule_y(half_height, radius).build();
+        let collider_handle = self
+            .collider_set
+            .insert_with_parent(collider, body_handle, &mut self.rigid_body_set);
+
+        // Create character controller with Roblox-like settings
+        let mut controller = KinematicCharacterController::default();
+        controller.autostep = Some(CharacterAutostep {
+            max_height: CharacterLength::Absolute(0.5),
+            min_width: CharacterLength::Absolute(0.3),
+            include_dynamic_bodies: false,
+        });
+        controller.max_slope_climb_angle = 45.0_f32.to_radians();
+        controller.snap_to_ground = Some(CharacterLength::Absolute(0.1));
+        controller.offset = CharacterLength::Absolute(0.01);
+
+        let state = CharacterControllerState {
+            controller,
+            collider_handle,
+            body_handle,
+            vertical_velocity: 0.0,
+            target_position: None,
+        };
+
+        self.character_controllers.insert(lua_id, state);
+        self.lua_to_body.insert(lua_id, body_handle);
+        self.body_to_lua.insert(body_handle, lua_id);
+
+        body_handle
+    }
+
+    /// Sets the target position for a character (for Goto action)
+    pub fn set_character_target(&mut self, lua_id: u64, target: Option<[f32; 3]>) {
+        if let Some(state) = self.character_controllers.get_mut(&lua_id) {
+            state.target_position = target;
+        }
+    }
+
+    /// Gets the current position of a character
+    pub fn get_character_position(&self, lua_id: u64) -> Option<[f32; 3]> {
+        let state = self.character_controllers.get(&lua_id)?;
+        let body = self.rigid_body_set.get(state.body_handle)?;
+        let pos = body.translation();
+        Some([pos.x, pos.y, pos.z])
+    }
+
+    /// Gets the character controller state (for checking grounded, target, etc.)
+    pub fn get_character_state(&self, lua_id: u64) -> Option<&CharacterControllerState> {
+        self.character_controllers.get(&lua_id)
+    }
+
+    /// Gets mutable character controller state
+    pub fn get_character_state_mut(&mut self, lua_id: u64) -> Option<&mut CharacterControllerState> {
+        self.character_controllers.get_mut(&lua_id)
+    }
+
+    /// Removes a character controller
+    pub fn remove_character(&mut self, lua_id: u64) -> bool {
+        if let Some(state) = self.character_controllers.remove(&lua_id) {
+            self.lua_to_body.remove(&lua_id);
+            self.body_to_lua.remove(&state.body_handle);
+            self.rigid_body_set.remove(
+                state.body_handle,
+                &mut self.island_manager,
+                &mut self.collider_set,
+                &mut self.impulse_joint_set,
+                &mut self.multibody_joint_set,
+                true,
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Checks if a Lua instance has a character controller
+    pub fn has_character(&self, lua_id: u64) -> bool {
+        self.character_controllers.contains_key(&lua_id)
+    }
+
+    /// Casts a ray downward from a position to detect ground
+    /// Returns (hit_distance, hit_y) if ground is found within max_distance
+    pub fn raycast_down(&self, origin: [f32; 3], max_distance: f32, exclude_body: Option<RigidBodyHandle>) -> Option<(f32, f32)> {
+        let ray = Ray::new(
+            point![origin[0], origin[1], origin[2]],
+            vector![0.0, -1.0, 0.0],
+        );
+
+        let filter = if let Some(body_handle) = exclude_body {
+            QueryFilter::default().exclude_rigid_body(body_handle)
+        } else {
+            QueryFilter::default()
+        };
+
+        if let Some((_, hit)) = self.query_pipeline.cast_ray(
+            &self.rigid_body_set,
+            &self.collider_set,
+            &ray,
+            max_distance,
+            true, // solid
+            filter,
+        ) {
+            let hit_point = ray.point_at(hit);
+            Some((hit, hit_point.y))
+        } else {
+            None
+        }
+    }
+
+    /// Moves a character horizontally (with wall collision) and sets Y position directly
+    /// This combines horizontal movement and vertical positioning in one operation
+    pub fn move_character_and_set_y(&mut self, lua_id: u64, dx: f32, dz: f32, new_y: f32, dt: f32) -> Option<[f32; 3]> {
+        let state = self.character_controllers.get(&lua_id)?;
+        let body_handle = state.body_handle;
+        let collider_handle = state.collider_handle;
+
+        let body = self.rigid_body_set.get(body_handle)?;
+        let collider = self.collider_set.get(collider_handle)?;
+
+        let current_pos = *body.translation();
+
+        // Calculate horizontal movement with collision
+        let desired = vector![dx, 0.0, dz];
+        let filter = QueryFilter::default().exclude_rigid_body(body_handle);
+
+        let movement = state.controller.move_shape(
+            dt,
+            &self.rigid_body_set,
+            &self.collider_set,
+            &self.query_pipeline,
+            collider.shape(),
+            &Isometry::translation(current_pos.x, current_pos.y, current_pos.z),
+            desired,
+            filter,
+            |_| {},
+        );
+
+        // Combine: horizontal from controller, vertical set directly
+        let new_pos = vector![
+            current_pos.x + movement.translation.x,
+            new_y,
+            current_pos.z + movement.translation.z
+        ];
+
+        let body = self.rigid_body_set.get_mut(body_handle)?;
+        body.set_next_kinematic_translation(new_pos);
+
+        Some([new_pos.x, new_pos.y, new_pos.z])
+    }
 }
 
 impl Default for PhysicsWorld {
@@ -277,5 +457,47 @@ mod tests {
 
         // Y position should be lower due to gravity
         assert!(final_pos[1] < initial_pos[1]);
+    }
+
+    #[test]
+    fn test_character_raycast_and_move() {
+        let mut world = PhysicsWorld::new();
+
+        // Add a floor
+        world.add_part(
+            1,
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [100.0, 1.0, 100.0],
+            true,
+            true,
+        );
+
+        // Add character above floor
+        let char_id = 100;
+        world.add_character(char_id, [0.0, 5.0, 0.0], 0.5, 2.0);
+
+        world.step(1.0 / 60.0);
+        world.query_pipeline.update(&world.collider_set);
+
+        // Test raycast finds ground
+        let pos = world.get_character_position(char_id).unwrap();
+        let state = world.get_character_state(char_id).unwrap();
+        let hit = world.raycast_down(pos, 10.0, Some(state.body_handle));
+        assert!(hit.is_some(), "Should detect floor");
+
+        let (distance, ground_y) = hit.unwrap();
+        // Character at Y=5, floor top at Y=0.5, distance = 4.5
+        assert!(distance > 4.0 && distance < 5.0, "Distance to floor should be ~4.5, got {}", distance);
+        assert!((ground_y - 0.5).abs() < 0.1, "Ground Y should be ~0.5 (floor top), got {}", ground_y);
+
+        // Test horizontal movement with Y positioning
+        let new_y = ground_y + 1.0; // half-height
+        world.move_character_and_set_y(char_id, 1.0, 0.0, new_y, 1.0 / 60.0);
+        world.step(1.0 / 60.0);
+
+        let final_pos = world.get_character_position(char_id).unwrap();
+        assert!(final_pos[0] > 0.5, "Should have moved in X");
+        assert!((final_pos[1] - new_y).abs() < 0.1, "Y should be set directly");
     }
 }
