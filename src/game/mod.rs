@@ -151,6 +151,29 @@ pub fn queue_action(
     Ok(())
 }
 
+/// Queue an agent input for processing by the Lua AgentInputService
+pub fn queue_input(
+    state: &GameManagerHandle,
+    game_id: Uuid,
+    agent_id: Uuid,
+    input_type: String,
+    data: serde_json::Value,
+) -> Result<(), String> {
+    let state = state.read().unwrap();
+    let game = state
+        .games
+        .get(&game_id)
+        .ok_or_else(|| "Game not found".to_string())?;
+
+    let user_id = game
+        .players
+        .get(&agent_id)
+        .ok_or_else(|| "Not in game".to_string())?;
+
+    game.queue_agent_input(*user_id, input_type, data);
+    Ok(())
+}
+
 pub fn get_observation(
     state: &GameManagerHandle,
     game_id: Uuid,

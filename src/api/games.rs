@@ -24,9 +24,10 @@ pub fn routes(pool: PgPool, game_manager: GameManagerHandle) -> Router {
 
     Router::new()
         .route("/games", get(list_games).post(create_game))
-        .route("/games/{id}", get(get_game))
+        .route("/games/{id}", get(get_game).put(update_game))
         .route("/games/{id}/join", post(join_game))
         .route("/games/{id}/leave", post(leave_game))
+        .route("/games/{id}/publish", post(publish_game))
         .route("/matchmake", post(matchmake))
         .with_state(state)
 }
@@ -41,6 +42,9 @@ struct GameListItem {
     max_players: i32,
     player_count: Option<usize>,
     is_running: bool,
+    published: bool,
+    plays: i32,
+    likes: i32,
 }
 
 #[derive(Serialize)]
@@ -78,6 +82,9 @@ async fn list_games(
                 max_players: g.max_players,
                 player_count: running.map(|r| r.player_count),
                 is_running: running.is_some(),
+                published: g.published,
+                plays: g.plays,
+                likes: g.likes,
             }
         })
         .collect();
@@ -92,6 +99,7 @@ struct CreateGameRequest {
     #[serde(default = "default_game_type")]
     game_type: String,
     script_code: Option<String>,
+    skill_md: Option<String>,
 }
 
 fn default_game_type() -> String {
@@ -124,7 +132,7 @@ async fn create_game(
 
     // Create game definition in database only (no memory instance yet)
     sqlx::query(
-        "INSERT INTO games (id, name, description, game_type, creator_id, status, script_code) VALUES ($1, $2, $3, $4, $5, 'waiting', $6)",
+        "INSERT INTO games (id, name, description, game_type, creator_id, status, script_code, skill_md) VALUES ($1, $2, $3, $4, $5, 'waiting', $6, $7)",
     )
     .bind(game_id)
     .bind(&payload.name)
@@ -132,6 +140,7 @@ async fn create_game(
     .bind(&payload.game_type)
     .bind(agent.0)
     .bind(&payload.script_code)
+    .bind(&payload.skill_md)
     .execute(&state.pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -170,6 +179,168 @@ async fn get_game(
         max_players: db_game.max_players,
         player_count: running_info.as_ref().map(|r| r.player_count),
         is_running: running_info.is_some(),
+        published: db_game.published,
+        plays: db_game.plays,
+        likes: db_game.likes,
+    }))
+}
+
+#[derive(Deserialize)]
+struct UpdateGameRequest {
+    name: Option<String>,
+    description: Option<String>,
+    game_type: Option<String>,
+    script_code: Option<String>,
+    skill_md: Option<String>,
+}
+
+#[derive(Serialize)]
+struct UpdateGameResponse {
+    success: bool,
+    message: String,
+}
+
+async fn update_game(
+    State(state): State<GamesState>,
+    Path(game_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateGameRequest>,
+) -> Result<Json<UpdateGameResponse>, (StatusCode, String)> {
+    let api_key = extract_api_key(&headers)
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
+
+    let agent = sqlx::query_as::<_, (Uuid,)>("SELECT id FROM agents WHERE api_key = $1")
+        .bind(&api_key)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
+
+    // Check if agent owns the game
+    let game: Game = sqlx::query_as("SELECT * FROM games WHERE id = $1")
+        .bind(game_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Game not found".to_string()))?;
+
+    if game.creator_id != Some(agent.0) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "You don't own this game".to_string(),
+        ));
+    }
+
+    // Build dynamic update query
+    let mut updates = Vec::new();
+    let mut param_idx = 1;
+
+    if payload.name.is_some() {
+        param_idx += 1;
+        updates.push(format!("name = ${}", param_idx));
+    }
+    if payload.description.is_some() {
+        param_idx += 1;
+        updates.push(format!("description = ${}", param_idx));
+    }
+    if payload.game_type.is_some() {
+        param_idx += 1;
+        updates.push(format!("game_type = ${}", param_idx));
+    }
+    if payload.script_code.is_some() {
+        param_idx += 1;
+        updates.push(format!("script_code = ${}", param_idx));
+    }
+    if payload.skill_md.is_some() {
+        param_idx += 1;
+        updates.push(format!("skill_md = ${}", param_idx));
+    }
+
+    if updates.is_empty() {
+        return Ok(Json(UpdateGameResponse {
+            success: true,
+            message: "No changes".to_string(),
+        }));
+    }
+
+    let query = format!("UPDATE games SET {} WHERE id = $1", updates.join(", "));
+
+    let mut q = sqlx::query(&query).bind(game_id);
+
+    if let Some(ref name) = payload.name {
+        q = q.bind(name);
+    }
+    if let Some(ref description) = payload.description {
+        q = q.bind(description);
+    }
+    if let Some(ref game_type) = payload.game_type {
+        q = q.bind(game_type);
+    }
+    if let Some(ref script_code) = payload.script_code {
+        q = q.bind(script_code);
+    }
+    if let Some(ref skill_md) = payload.skill_md {
+        q = q.bind(skill_md);
+    }
+
+    q.execute(&state.pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(UpdateGameResponse {
+        success: true,
+        message: "Game updated".to_string(),
+    }))
+}
+
+#[derive(Serialize)]
+struct PublishGameResponse {
+    success: bool,
+    published_at: chrono::DateTime<chrono::Utc>,
+}
+
+async fn publish_game(
+    State(state): State<GamesState>,
+    Path(game_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<PublishGameResponse>, (StatusCode, String)> {
+    let api_key = extract_api_key(&headers)
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
+
+    let agent = sqlx::query_as::<_, (Uuid,)>("SELECT id FROM agents WHERE api_key = $1")
+        .bind(&api_key)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
+
+    // Check if agent owns the game
+    let game: Game = sqlx::query_as("SELECT * FROM games WHERE id = $1")
+        .bind(game_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Game not found".to_string()))?;
+
+    if game.creator_id != Some(agent.0) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "You don't own this game".to_string(),
+        ));
+    }
+
+    let now = chrono::Utc::now();
+
+    sqlx::query("UPDATE games SET published = true, published_at = $1 WHERE id = $2")
+        .bind(now)
+        .bind(game_id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(PublishGameResponse {
+        success: true,
+        published_at: now,
     }))
 }
 

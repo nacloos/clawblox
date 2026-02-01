@@ -196,8 +196,13 @@ end
 -- PLAYER MANAGEMENT
 --------------------------------------------------------------------------------
 
+local function setWeapon(player, weaponIndex)
+    player:SetAttribute("CurrentWeapon", weaponIndex)
+    player:SetAttribute("WeaponName", WEAPONS[weaponIndex].name)
+end
+
 local function initializePlayer(player)
-    player:SetAttribute("CurrentWeapon", 1)
+    setWeapon(player, 1)
     player:SetAttribute("Kills", 0)
     player:SetAttribute("Deaths", 0)
     player:SetAttribute("MeleeKills", 0)
@@ -340,7 +345,7 @@ local function onPlayerKilled(killer, victim, wasMelee)
     if wasMelee and killerWeapon ~= 15 then
         -- Melee kill with non-final weapon: demote victim, no advance
         local newVictimWeapon = math.max(1, victimWeapon - 1)
-        victim:SetAttribute("CurrentWeapon", newVictimWeapon)
+        setWeapon(victim, newVictimWeapon)
         killer:SetAttribute("MeleeKills", killer:GetAttribute("MeleeKills") + 1)
         print("[KNIFE] " .. killer.Name .. " DEMOTED " .. victim.Name .. " to " .. WEAPONS[newVictimWeapon].name)
     else
@@ -352,7 +357,7 @@ local function onPlayerKilled(killer, victim, wasMelee)
             print("=== " .. killer.Name .. " WINS WITH THE GOLDEN KNIFE! ===")
         else
             local newWeapon = killerWeapon + 1
-            killer:SetAttribute("CurrentWeapon", newWeapon)
+            setWeapon(killer, newWeapon)
             print("[" .. weaponName .. "] " .. killer.Name .. " -> " .. victim.Name .. " | Now using: " .. WEAPONS[newWeapon].name)
         end
     end
@@ -859,6 +864,35 @@ end)
 Players.PlayerRemoving:Connect(function(player)
     playerData[player] = nil
 end)
+
+-- Handle agent inputs (AI players via HTTP API)
+local AgentInputService = game:GetService("AgentInputService")
+if AgentInputService then
+    AgentInputService.InputReceived:Connect(function(player, inputType, data)
+        if gameState ~= "active" then return end
+        if not playerData[player] then return end
+
+        if inputType == "Fire" then
+            -- Set aim direction from data.direction
+            if data and data.direction then
+                local dir = data.direction
+                player:SetAttribute("AimDirection", Vector3.new(dir[1], dir[2], dir[3]))
+            end
+            tryFire(player)
+
+        elseif inputType == "MoveTo" then
+            -- Move character to position
+            local humanoid = getHumanoid(player)
+            if humanoid and data and data.position then
+                local pos = data.position
+                humanoid:MoveTo(Vector3.new(pos[1], pos[2], pos[3]))
+            end
+
+        elseif inputType == "Melee" then
+            tryMelee(player)
+        end
+    end)
+end
 
 -- Main game loop
 RunService.Heartbeat:Connect(function(dt)

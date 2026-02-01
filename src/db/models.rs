@@ -28,6 +28,11 @@ pub struct Game {
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
     pub script_code: Option<String>,
+    pub skill_md: Option<String>,
+    pub published: bool,
+    pub published_at: Option<DateTime<Utc>>,
+    pub plays: i32,
+    pub likes: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

@@ -2,6 +2,7 @@ use crossbeam_channel::{Receiver, Sender};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+use super::lua::services::AgentInput;
 use super::lua::LuaRuntime;
 use super::physics::PhysicsWorld;
 
@@ -146,6 +147,14 @@ impl GameInstance {
         let _ = self.action_sender.send(QueuedAction { agent_id, action });
     }
 
+    /// Queues an agent input for the AgentInputService in Lua
+    pub fn queue_agent_input(&self, user_id: u64, input_type: String, data: serde_json::Value) {
+        if let Some(runtime) = &self.lua_runtime {
+            let input = AgentInput::new(input_type, data);
+            runtime.queue_agent_input(user_id, input);
+        }
+    }
+
     /// Main game loop tick - called at 60 Hz
     pub fn tick(&mut self) {
         let dt = 1.0 / 60.0;
@@ -172,6 +181,13 @@ impl GameInstance {
 
         // Sync physics results back to Lua (for Anchored=false parts and characters)
         self.sync_physics_to_lua();
+
+        // Process agent inputs (fire InputReceived events)
+        if let Some(runtime) = &self.lua_runtime {
+            if let Err(e) = runtime.process_agent_inputs() {
+                eprintln!("[Lua Error] Failed to process agent inputs: {}", e);
+            }
+        }
 
         // Run Lua Heartbeat
         if let Some(runtime) = &self.lua_runtime {
@@ -389,28 +405,117 @@ impl GameInstance {
 
     /// Gets the observation for a specific player
     pub fn get_player_observation(&mut self, agent_id: Uuid) -> Option<PlayerObservation> {
-        let _user_id = *self.players.get(&agent_id)?;
+        let user_id = *self.players.get(&agent_id)?;
 
-        // For now, return a basic observation
-        // TODO: Implement proper per-player observations based on Lua state
+        let runtime = self.lua_runtime.as_ref()?;
+        let player = runtime.players().get_player_by_user_id(user_id)?;
+
+        // Get position from character's HumanoidRootPart
+        let position = self.get_player_position(agent_id).unwrap_or([0.0, 3.0, 0.0]);
+
+        // Get health from humanoid
+        let health = self.get_player_health(agent_id).unwrap_or(100);
+
+        // Read all player attributes generically
+        let player_data = player.data.lock().unwrap();
+        let attributes = player_data.attributes.clone();
+        drop(player_data);
+
+        // Get other players
+        let other_players = self.get_other_players(agent_id);
+
         Some(PlayerObservation {
             tick: self.tick,
-            game_status: match self.status {
-                GameStatus::Waiting => "waiting".to_string(),
-                GameStatus::Playing => "playing".to_string(),
-                GameStatus::Finished => "finished".to_string(),
-            },
+            game_status: self.get_game_status_from_lua(),
             player: PlayerInfo {
                 id: agent_id,
-                position: [0.0, 0.0, 0.0],
-                facing: [1.0, 0.0, 0.0],
-                health: 100,
-                ammo: 0,
-                score: 0,
+                position,
+                health,
+                attributes,
             },
-            visible_entities: Vec::new(),
+            other_players,
             events: Vec::new(),
         })
+    }
+
+    /// Get the game status from Lua if available
+    fn get_game_status_from_lua(&self) -> String {
+        // Default to instance status
+        match self.status {
+            GameStatus::Waiting => "waiting".to_string(),
+            GameStatus::Playing => "active".to_string(),
+            GameStatus::Finished => "finished".to_string(),
+        }
+    }
+
+    /// Get player position from their HumanoidRootPart
+    fn get_player_position(&self, agent_id: Uuid) -> Option<[f32; 3]> {
+        let hrp_id = *self.player_hrp_ids.get(&agent_id)?;
+        self.physics.get_character_position(hrp_id)
+    }
+
+    /// Get player health from their Humanoid
+    fn get_player_health(&self, agent_id: Uuid) -> Option<i32> {
+        let user_id = *self.players.get(&agent_id)?;
+        let runtime = self.lua_runtime.as_ref()?;
+        let player = runtime.players().get_player_by_user_id(user_id)?;
+
+        let player_data = player.data.lock().unwrap();
+        let character = player_data
+            .player_data
+            .as_ref()?
+            .character
+            .as_ref()?
+            .upgrade()?;
+        drop(player_data);
+
+        let char_data = character.lock().unwrap();
+        for child in &char_data.children {
+            if let Some(child_ref) = child.upgrade() {
+                let child_data = child_ref.lock().unwrap();
+                if child_data.name == "Humanoid" {
+                    if let Some(humanoid) = &child_data.humanoid_data {
+                        return Some(humanoid.health as i32);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Get info about other players
+    fn get_other_players(&self, exclude_agent_id: Uuid) -> Vec<OtherPlayerInfo> {
+        let mut others = Vec::new();
+
+        for (&agent_id, &user_id) in &self.players {
+            if agent_id == exclude_agent_id {
+                continue;
+            }
+
+            let position = self.get_player_position(agent_id).unwrap_or([0.0, 0.0, 0.0]);
+            let health = self.get_player_health(agent_id).unwrap_or(100);
+
+            // Get all attributes generically
+            let attributes = if let Some(runtime) = &self.lua_runtime {
+                if let Some(player) = runtime.players().get_player_by_user_id(user_id) {
+                    let data = player.data.lock().unwrap();
+                    data.attributes.clone()
+                } else {
+                    std::collections::HashMap::new()
+                }
+            } else {
+                std::collections::HashMap::new()
+            };
+
+            others.push(OtherPlayerInfo {
+                id: agent_id,
+                position,
+                health,
+                attributes,
+            });
+        }
+
+        others
     }
 
     /// Gets the spectator observation (full world state from Lua Workspace)
@@ -495,7 +600,7 @@ pub struct PlayerObservation {
     pub tick: u64,
     pub game_status: String,
     pub player: PlayerInfo,
-    pub visible_entities: Vec<VisibleEntity>,
+    pub other_players: Vec<OtherPlayerInfo>,
     pub events: Vec<GameEvent>,
 }
 
@@ -503,10 +608,18 @@ pub struct PlayerObservation {
 pub struct PlayerInfo {
     pub id: Uuid,
     pub position: [f32; 3],
-    pub facing: [f32; 3],
     pub health: i32,
-    pub ammo: i32,
-    pub score: i32,
+    /// Game-specific attributes set by Lua scripts
+    pub attributes: std::collections::HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OtherPlayerInfo {
+    pub id: Uuid,
+    pub position: [f32; 3],
+    pub health: i32,
+    /// Game-specific attributes set by Lua scripts
+    pub attributes: std::collections::HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

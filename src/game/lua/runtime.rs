@@ -3,13 +3,17 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use super::instance::{Instance, InstanceData};
-use super::services::{register_raycast_params, PlayersService, RunService, WorkspaceService};
+use super::services::{
+    register_raycast_params, AgentInput, AgentInputService, PlayersService, RunService,
+    WorkspaceService,
+};
 use super::types::register_all_types;
 
 pub struct GameDataModel {
     pub workspace: WorkspaceService,
     pub players: PlayersService,
     pub run_service: RunService,
+    pub agent_input_service: AgentInputService,
 }
 
 impl GameDataModel {
@@ -18,6 +22,7 @@ impl GameDataModel {
             workspace: WorkspaceService::new(),
             players: PlayersService::new(),
             run_service: RunService::new(true),
+            agent_input_service: AgentInputService::new(),
         }
     }
 }
@@ -45,6 +50,10 @@ impl Game {
     pub fn run_service(&self) -> RunService {
         self.data_model.lock().unwrap().run_service.clone()
     }
+
+    pub fn agent_input_service(&self) -> AgentInputService {
+        self.data_model.lock().unwrap().agent_input_service.clone()
+    }
 }
 
 impl UserData for Game {
@@ -55,6 +64,9 @@ impl UserData for Game {
                 "Workspace" => Ok(Value::UserData(lua.create_userdata(dm.workspace.clone())?)),
                 "Players" => Ok(Value::UserData(lua.create_userdata(dm.players.clone())?)),
                 "RunService" => Ok(Value::UserData(lua.create_userdata(dm.run_service.clone())?)),
+                "AgentInputService" => Ok(Value::UserData(
+                    lua.create_userdata(dm.agent_input_service.clone())?,
+                )),
                 _ => Ok(Value::Nil),
             }
         });
@@ -281,8 +293,47 @@ impl LuaRuntime {
         self.game.run_service()
     }
 
+    pub fn agent_input_service(&self) -> AgentInputService {
+        self.game.agent_input_service()
+    }
+
     pub fn game(&self) -> &Game {
         &self.game
+    }
+
+    /// Queue an agent input for a player
+    pub fn queue_agent_input(&self, user_id: u64, input: AgentInput) {
+        self.agent_input_service().queue_input(user_id, input);
+    }
+
+    /// Process pending agent inputs by firing InputReceived events
+    pub fn process_agent_inputs(&self) -> Result<()> {
+        let agent_input_service = self.agent_input_service();
+        let players = self.players().get_players();
+
+        for player in players {
+            let user_id = player
+                .data
+                .lock()
+                .unwrap()
+                .player_data
+                .as_ref()
+                .map(|pd| pd.user_id)
+                .unwrap_or(0);
+
+            // Get and process all pending inputs for this player
+            let inputs = agent_input_service.get_inputs(user_id);
+            for input in inputs {
+                agent_input_service.fire_input_received(
+                    &self.lua,
+                    &player,
+                    &input.input_type,
+                    &input.data,
+                )?;
+            }
+        }
+
+        Ok(())
     }
 
     pub fn lua(&self) -> &Lua {
