@@ -87,7 +87,7 @@ impl UserData for Vector3 {
         fields.add_field_method_get("Y", |_, this| Ok(this.y));
         fields.add_field_method_get("Z", |_, this| Ok(this.z));
         fields.add_field_method_get("Magnitude", |_, this| Ok(this.magnitude()));
-        fields.add_field_method_get("Unit", |_, this| Ok(this.unit()));
+        // Note: Unit is implemented as a method to support both v.Unit and v:Unit() syntax
     }
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
@@ -102,6 +102,8 @@ impl UserData for Vector3 {
                 Ok(this.fuzzy_eq(&other, epsilon.unwrap_or(1e-5)))
             },
         );
+        // Also expose Unit as a method for scripts that use v:Unit() syntax
+        methods.add_method("Unit", |_, this, ()| Ok(this.unit()));
 
         methods.add_meta_method(MetaMethod::Add, |_, this, other: Vector3| {
             Ok(Vector3::new(
@@ -125,6 +127,10 @@ impl UserData for Vector3 {
                     let n = n as f32;
                     Ok(Vector3::new(this.x * n, this.y * n, this.z * n))
                 }
+                mlua::Value::Integer(n) => {
+                    let n = n as f32;
+                    Ok(Vector3::new(this.x * n, this.y * n, this.z * n))
+                }
                 mlua::Value::UserData(ud) => {
                     let other = ud.borrow::<Vector3>()?;
                     Ok(Vector3::new(
@@ -140,6 +146,10 @@ impl UserData for Vector3 {
         methods.add_meta_method(MetaMethod::Div, |_, this, value: mlua::Value| {
             match value {
                 mlua::Value::Number(n) => {
+                    let n = n as f32;
+                    Ok(Vector3::new(this.x / n, this.y / n, this.z / n))
+                }
+                mlua::Value::Integer(n) => {
                     let n = n as f32;
                     Ok(Vector3::new(this.x / n, this.y / n, this.z / n))
                 }
