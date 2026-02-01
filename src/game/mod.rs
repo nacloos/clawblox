@@ -215,7 +215,7 @@ pub fn matchmake(state: &GameManagerHandle) -> (Uuid, bool) {
     {
         let state_read = state.read().unwrap();
         for (id, game) in state_read.games.iter() {
-            if game.status == GameStatus::Waiting && game.players.len() < 4 {
+            if game.status == GameStatus::Waiting {
                 return (*id, false);
             }
         }

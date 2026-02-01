@@ -18,7 +18,7 @@ impl PlayersServiceData {
         Self {
             players: Vec::new(),
             local_player: None,
-            max_players: 4,
+            max_players: 100,
             player_added: create_signal("PlayerAdded"),
             player_removing: create_signal("PlayerRemoving"),
         }

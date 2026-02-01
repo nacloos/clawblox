@@ -299,13 +299,11 @@ async fn matchmake(
             game_id,
             db_game.script_code.as_deref(),
         );
-        if let Some(info) = game::get_game_info(&state.game_manager, game_id) {
-            if info.player_count < 4 {
-                return Ok(Json(MatchmakeResponse {
-                    game_id,
-                    created: false,
-                }));
-            }
+        if game::get_game_info(&state.game_manager, game_id).is_some() {
+            return Ok(Json(MatchmakeResponse {
+                game_id,
+                created: false,
+            }));
         }
     }
 

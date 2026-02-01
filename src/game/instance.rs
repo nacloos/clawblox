@@ -57,7 +57,7 @@ impl GameInstance {
             players: HashMap::new(),
             action_receiver,
             action_sender,
-            status: GameStatus::Waiting,
+            status: GameStatus::Playing,
         }
     }
 
@@ -99,10 +99,6 @@ impl GameInstance {
             if let Err(e) = runtime.fire_player_added(&player) {
                 eprintln!("[Lua Error] Failed to fire PlayerAdded: {}", e);
             }
-        }
-
-        if self.players.len() >= 1 && self.status == GameStatus::Waiting {
-            self.status = GameStatus::Playing;
         }
 
         true
