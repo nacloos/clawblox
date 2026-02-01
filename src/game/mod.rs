@@ -72,6 +72,26 @@ pub fn create_game(state: &GameManagerHandle) -> Uuid {
     game_id
 }
 
+/// Gets an existing running instance or creates a new one for the given game ID.
+/// Returns true if a new instance was created, false if using existing.
+pub fn get_or_create_instance(state: &GameManagerHandle, game_id: Uuid) -> bool {
+    let mut state = state.write().unwrap();
+
+    if state.games.contains_key(&game_id) {
+        return false;
+    }
+
+    let game = GameInstance::new(game_id);
+    state.games.insert(game_id, game);
+    true
+}
+
+/// Checks if a game instance is currently running in memory.
+pub fn is_instance_running(state: &GameManagerHandle, game_id: Uuid) -> bool {
+    let state = state.read().unwrap();
+    state.games.contains_key(&game_id)
+}
+
 pub fn join_game(state: &GameManagerHandle, game_id: Uuid, agent_id: Uuid) -> Result<(), String> {
     let mut state = state.write().unwrap();
     let game = state

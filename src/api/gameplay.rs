@@ -55,6 +55,25 @@ async fn spectate(
     State(state): State<GameplayState>,
     Path(game_id): Path<Uuid>,
 ) -> Result<Json<SpectatorObservation>, (StatusCode, String)> {
+    // First verify game exists in database
+    sqlx::query_as::<_, (Uuid,)>("SELECT id FROM games WHERE id = $1")
+        .bind(game_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Game not found".to_string()))?;
+
+    // Check if instance is running
+    if !game::is_instance_running(&state.game_manager, game_id) {
+        // Return empty observation for non-running games
+        return Ok(Json(SpectatorObservation {
+            tick: 0,
+            game_status: "not_running".to_string(),
+            players: vec![],
+            entities: vec![],
+        }));
+    }
+
     let observation = game::get_spectator_observation(&state.game_manager, game_id)
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
 

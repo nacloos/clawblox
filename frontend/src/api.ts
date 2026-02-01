@@ -29,7 +29,18 @@ export async function fetchGameState(gameId: string): Promise<SpectatorObservati
   return response.json()
 }
 
-export async function listGames(): Promise<{ id: string; status: string; player_count: number; tick: number }[]> {
+export interface GameListItem {
+  id: string
+  name: string
+  description: string | null
+  game_type: string
+  status: string
+  max_players: number
+  player_count: number | null
+  is_running: boolean
+}
+
+export async function listGames(): Promise<GameListItem[]> {
   const response = await fetch('/api/v1/games')
   if (!response.ok) {
     throw new Error(`Failed to list games: ${response.statusText}`)

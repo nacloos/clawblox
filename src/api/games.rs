@@ -4,10 +4,11 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::db::models::Game;
 use crate::game::{self, GameManagerHandle};
 
 use super::agents::extract_api_key;
@@ -31,45 +32,111 @@ pub fn routes(pool: PgPool, game_manager: GameManagerHandle) -> Router {
 }
 
 #[derive(Serialize)]
-struct ListGamesResponse {
-    games: Vec<game::GameInfo>,
+struct GameListItem {
+    id: Uuid,
+    name: String,
+    description: Option<String>,
+    game_type: String,
+    status: String,
+    max_players: i32,
+    player_count: Option<usize>,
+    is_running: bool,
 }
 
-async fn list_games(State(state): State<GamesState>) -> Json<ListGamesResponse> {
-    let games = game::list_games(&state.game_manager);
-    Json(ListGamesResponse { games })
+#[derive(Serialize)]
+struct ListGamesResponse {
+    games: Vec<GameListItem>,
+}
+
+async fn list_games(
+    State(state): State<GamesState>,
+) -> Result<Json<ListGamesResponse>, (StatusCode, String)> {
+    // Query game definitions from database
+    let db_games: Vec<Game> = sqlx::query_as("SELECT * FROM games ORDER BY created_at DESC")
+        .fetch_all(&state.pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Get running instance info from memory
+    let running_games = game::list_games(&state.game_manager);
+    let running_map: std::collections::HashMap<Uuid, &game::GameInfo> = running_games
+        .iter()
+        .map(|g| (g.id, g))
+        .collect();
+
+    // Merge DB definitions with runtime info
+    let games = db_games
+        .into_iter()
+        .map(|g| {
+            let running = running_map.get(&g.id);
+            GameListItem {
+                id: g.id,
+                name: g.name,
+                description: g.description,
+                game_type: g.game_type,
+                status: running.map(|r| r.status.clone()).unwrap_or(g.status),
+                max_players: g.max_players,
+                player_count: running.map(|r| r.player_count),
+                is_running: running.is_some(),
+            }
+        })
+        .collect();
+
+    Ok(Json(ListGamesResponse { games }))
+}
+
+#[derive(Deserialize)]
+struct CreateGameRequest {
+    name: String,
+    description: Option<String>,
+    #[serde(default = "default_game_type")]
+    game_type: String,
+}
+
+fn default_game_type() -> String {
+    "shooter".to_string()
 }
 
 #[derive(Serialize)]
 struct CreateGameResponse {
     game_id: Uuid,
+    name: String,
     status: String,
 }
 
 async fn create_game(
     State(state): State<GamesState>,
     headers: HeaderMap,
+    Json(payload): Json<CreateGameRequest>,
 ) -> Result<Json<CreateGameResponse>, (StatusCode, String)> {
     let api_key = extract_api_key(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
 
-    sqlx::query_as::<_, (Uuid,)>("SELECT id FROM agents WHERE api_key = $1")
+    let agent = sqlx::query_as::<_, (Uuid,)>("SELECT id FROM agents WHERE api_key = $1")
         .bind(&api_key)
         .fetch_optional(&state.pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
 
-    let game_id = game::create_game(&state.game_manager);
+    let game_id = Uuid::new_v4();
 
-    sqlx::query("INSERT INTO games (id, status) VALUES ($1, 'waiting')")
-        .bind(game_id)
-        .execute(&state.pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Create game definition in database only (no memory instance yet)
+    sqlx::query(
+        "INSERT INTO games (id, name, description, game_type, creator_id, status) VALUES ($1, $2, $3, $4, $5, 'waiting')",
+    )
+    .bind(game_id)
+    .bind(&payload.name)
+    .bind(&payload.description)
+    .bind(&payload.game_type)
+    .bind(agent.0)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(CreateGameResponse {
         game_id,
+        name: payload.name,
         status: "waiting".to_string(),
     }))
 }
@@ -77,11 +144,31 @@ async fn create_game(
 async fn get_game(
     State(state): State<GamesState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<game::GameInfo>, (StatusCode, String)> {
-    let info = game::get_game_info(&state.game_manager, id)
+) -> Result<Json<GameListItem>, (StatusCode, String)> {
+    // Get from database first
+    let db_game: Game = sqlx::query_as("SELECT * FROM games WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Game not found".to_string()))?;
 
-    Ok(Json(info))
+    // Check if running instance exists
+    let running_info = game::get_game_info(&state.game_manager, id);
+
+    Ok(Json(GameListItem {
+        id: db_game.id,
+        name: db_game.name,
+        description: db_game.description,
+        game_type: db_game.game_type,
+        status: running_info
+            .as_ref()
+            .map(|r| r.status.clone())
+            .unwrap_or(db_game.status),
+        max_players: db_game.max_players,
+        player_count: running_info.as_ref().map(|r| r.player_count),
+        is_running: running_info.is_some(),
+    }))
 }
 
 #[derive(Serialize)]
@@ -107,6 +194,18 @@ async fn join_game(
 
     let agent_id = agent.0;
 
+    // Verify game exists in database
+    sqlx::query_as::<_, (Uuid,)>("SELECT id FROM games WHERE id = $1")
+        .bind(game_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Game not found".to_string()))?;
+
+    // Get or create the running instance
+    game::get_or_create_instance(&state.game_manager, game_id);
+
+    // Join the instance
     game::join_game(&state.game_manager, game_id, agent_id)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
@@ -178,15 +277,41 @@ async fn matchmake(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
 
-    let (game_id, created) = game::matchmake(&state.game_manager);
+    // First check for games with waiting status and room for players
+    let waiting_game: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM games WHERE status = 'waiting' ORDER BY created_at ASC LIMIT 1",
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    if created {
-        sqlx::query("INSERT INTO games (id, status) VALUES ($1, 'waiting')")
-            .bind(game_id)
-            .execute(&state.pool)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some((game_id,)) = waiting_game {
+        // Check if instance has room (create if needed)
+        game::get_or_create_instance(&state.game_manager, game_id);
+        if let Some(info) = game::get_game_info(&state.game_manager, game_id) {
+            if info.player_count < 4 {
+                return Ok(Json(MatchmakeResponse {
+                    game_id,
+                    created: false,
+                }));
+            }
+        }
     }
 
-    Ok(Json(MatchmakeResponse { game_id, created }))
+    // No suitable game found, create a new one
+    let game_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO games (id, name, status) VALUES ($1, 'Matchmade Game', 'waiting')",
+    )
+    .bind(game_id)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    game::get_or_create_instance(&state.game_manager, game_id);
+
+    Ok(Json(MatchmakeResponse {
+        game_id,
+        created: true,
+    }))
 }

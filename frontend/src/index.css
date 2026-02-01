@@ -1,0 +1,11 @@
+@import "tailwindcss";
+
+body {
+  @apply text-gray-900 antialiased;
+  background-color: #fefefc;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+#root {
+  @apply min-h-screen;
+}

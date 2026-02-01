@@ -1,6 +1,7 @@
 mod api;
 mod db;
 mod game;
+mod storage;
 
 use axum::Router;
 use std::net::SocketAddr;

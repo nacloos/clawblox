@@ -18,8 +18,12 @@ pub struct Agent {
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Game {
     pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub game_type: String,
     pub status: String,
     pub max_players: i32,
+    pub creator_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
