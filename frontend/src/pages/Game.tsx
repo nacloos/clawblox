@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
+import { ArrowLeft, Users } from 'lucide-react'
 import { fetchGameState, SpectatorObservation } from '../api'
 import GameScene from '../components/GameScene'
+import { Button } from '@/components/ui/button'
 
 export default function Game() {
   const { id } = useParams<{ id: string }>()
@@ -27,26 +29,28 @@ export default function Game() {
   }, [id])
 
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className="h-full flex flex-col bg-background">
       {/* Header */}
-      <div className="flex items-center gap-4 p-4 border-b border-gray-200 bg-white">
-        <Link
-          to="/"
-          className="text-sm text-gray-500 hover:text-gray-900 transition-colors"
-        >
-          Back
+      <div className="flex items-center gap-4 px-4 py-3 border-b border-border bg-card">
+        <Link to="/">
+          <Button variant="ghost" size="icon" className="h-8 w-8">
+            <ArrowLeft className="h-4 w-4" />
+          </Button>
         </Link>
 
         {gameState && (
           <div className="flex items-center gap-4 ml-auto text-sm">
-            <span className="text-gray-500">{gameState.players.length} players</span>
-            <span className="text-gray-500">Tick {gameState.tick}</span>
+            <span className="text-muted-foreground flex items-center gap-1.5">
+              <Users className="h-4 w-4" />
+              {gameState.players.length}
+            </span>
+            <span className="text-muted-foreground">Tick {gameState.tick}</span>
             <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
               gameState.game_status === 'playing'
-                ? 'bg-green-100 text-green-700'
+                ? 'bg-green-500/20 text-green-400'
                 : gameState.game_status === 'waiting'
-                ? 'bg-yellow-100 text-yellow-700'
-                : 'bg-gray-100 text-gray-600'
+                ? 'bg-yellow-500/20 text-yellow-400'
+                : 'bg-muted text-muted-foreground'
             }`}>
               {gameState.game_status}
             </span>
@@ -54,13 +58,13 @@ export default function Game() {
         )}
       </div>
 
-      {/* Game view */}
-      <div className="flex-1 relative bg-gray-50">
+      {/* Game view - flex-1 with min-h-0 to allow proper sizing */}
+      <div className="flex-1 min-h-0 relative">
         {error ? (
           <div className="flex items-center justify-center h-full">
             <div className="text-center">
-              <p className="text-red-500">{error}</p>
-              <Link to="/" className="text-sm text-gray-500 hover:text-gray-900 mt-2 inline-block">
+              <p className="text-destructive">{error}</p>
+              <Link to="/" className="text-sm text-muted-foreground hover:text-foreground mt-2 inline-block">
                 Return to home
               </Link>
             </div>
@@ -69,8 +73,8 @@ export default function Game() {
           gameState.game_status === 'not_running' ? (
             <div className="flex items-center justify-center h-full">
               <div className="text-center">
-                <p className="text-gray-500 mb-2">This game is not running yet.</p>
-                <p className="text-sm text-gray-400">
+                <p className="text-muted-foreground mb-2">This game is not running yet.</p>
+                <p className="text-sm text-muted-foreground/60">
                   Join with an agent to start playing.
                 </p>
               </div>
@@ -80,7 +84,7 @@ export default function Game() {
           )
         ) : (
           <div className="flex items-center justify-center h-full">
-            <div className="text-gray-400">Loading...</div>
+            <div className="text-muted-foreground">Loading...</div>
           </div>
         )}
       </div>
