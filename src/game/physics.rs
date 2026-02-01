@@ -328,6 +328,49 @@ impl PhysicsWorld {
         self.character_controllers.contains_key(&lua_id)
     }
 
+    /// Checks if there is a clear line of sight between two positions
+    /// Returns true if no obstacle blocks the view
+    pub fn has_line_of_sight(
+        &self,
+        from: [f32; 3],
+        to: [f32; 3],
+        exclude_body: Option<RigidBodyHandle>,
+    ) -> bool {
+        let direction = vector![to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+        let max_dist = direction.magnitude();
+
+        if max_dist < 0.001 {
+            return true; // Same position
+        }
+
+        let normalized = direction / max_dist;
+        let ray = Ray::new(
+            point![from[0], from[1], from[2]],
+            normalized,
+        );
+
+        let filter = if let Some(body_handle) = exclude_body {
+            QueryFilter::default().exclude_rigid_body(body_handle)
+        } else {
+            QueryFilter::default()
+        };
+
+        // Cast ray and check if we hit something before reaching the target
+        if let Some((_, hit_dist)) = self.query_pipeline.cast_ray(
+            &self.rigid_body_set,
+            &self.collider_set,
+            &ray,
+            max_dist,
+            true, // solid
+            filter,
+        ) {
+            // Hit something before reaching target
+            hit_dist >= max_dist - 0.1 // Small tolerance
+        } else {
+            true // No obstacle hit
+        }
+    }
+
     /// Casts a ray downward from a position to detect ground
     /// Returns (hit_distance, hit_y) if ground is found within max_distance
     pub fn raycast_down(&self, origin: [f32; 3], max_distance: f32, exclude_body: Option<RigidBodyHandle>) -> Option<(f32, f32)> {

@@ -153,19 +153,14 @@ pub struct AgentInputRequest {
     pub data: serde_json::Value,
 }
 
-#[derive(Serialize)]
-struct InputResponse {
-    success: bool,
-    message: String,
-}
-
 /// POST /games/{id}/input - Send an input from an agent
+/// Returns the player's observation after queuing the input
 async fn send_input(
     State(state): State<GameplayState>,
     Path(game_id): Path<Uuid>,
     headers: HeaderMap,
     Json(input): Json<AgentInputRequest>,
-) -> Result<Json<InputResponse>, (StatusCode, String)> {
+) -> Result<Json<PlayerObservation>, (StatusCode, String)> {
     let api_key = extract_api_key(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
 
@@ -188,8 +183,9 @@ async fn send_input(
     game::queue_input(&state.game_manager, game_id, agent_id, input.input_type, input.data)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
-    Ok(Json(InputResponse {
-        success: true,
-        message: "Input queued".to_string(),
-    }))
+    // Return observation instead of simple success message (reduces round-trips)
+    let observation = game::get_observation(&state.game_manager, game_id, agent_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    Ok(Json(observation))
 }

@@ -470,8 +470,11 @@ impl GameInstance {
         let attributes = attributes_to_json(&player_data.attributes);
         drop(player_data);
 
-        // Get other players
-        let other_players = self.get_other_players(agent_id);
+        // Get other players (with LOS filtering)
+        let other_players = self.get_other_players(agent_id, position);
+
+        // Get world entities
+        let world = self.get_world_info();
 
         Some(PlayerObservation {
             tick: self.tick,
@@ -483,6 +486,7 @@ impl GameInstance {
                 attributes,
             },
             other_players,
+            world,
             events: Vec::new(),
         })
     }
@@ -530,9 +534,40 @@ impl GameInstance {
         None
     }
 
-    /// Get info about other players
-    fn get_other_players(&self, exclude_agent_id: Uuid) -> Vec<OtherPlayerInfo> {
+    /// Get world info (all visible parts from Workspace)
+    fn get_world_info(&self) -> WorldInfo {
+        let mut entities = Vec::new();
+
+        if let Some(runtime) = &self.lua_runtime {
+            for part in runtime.workspace().get_descendants() {
+                let data = part.data.lock().unwrap();
+
+                if let Some(part_data) = &data.part_data {
+                    entities.push(WorldEntity {
+                        id: data.id.0,
+                        name: data.name.clone(),
+                        position: [part_data.position.x, part_data.position.y, part_data.position.z],
+                        size: [part_data.size.x, part_data.size.y, part_data.size.z],
+                        color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
+                        anchored: part_data.anchored,
+                    });
+                }
+            }
+        }
+
+        WorldInfo { entities }
+    }
+
+    /// Get info about other players with distance and line-of-sight filtering
+    fn get_other_players(&self, exclude_agent_id: Uuid, observer_pos: [f32; 3]) -> Vec<OtherPlayerInfo> {
+        const MAX_VISIBILITY_DISTANCE: f32 = 100.0;
+
         let mut others = Vec::new();
+
+        // Get observer's body handle for LOS exclusion
+        let observer_body = self.player_hrp_ids.get(&exclude_agent_id)
+            .and_then(|&hrp_id| self.physics.get_character_state(hrp_id))
+            .map(|state| state.body_handle);
 
         for (&agent_id, &user_id) in &self.players {
             if agent_id == exclude_agent_id {
@@ -540,6 +575,22 @@ impl GameInstance {
             }
 
             let position = self.get_player_position(agent_id).unwrap_or([0.0, 0.0, 0.0]);
+
+            // Distance culling
+            let dx = position[0] - observer_pos[0];
+            let dy = position[1] - observer_pos[1];
+            let dz = position[2] - observer_pos[2];
+            let distance = (dx * dx + dy * dy + dz * dz).sqrt();
+
+            if distance > MAX_VISIBILITY_DISTANCE {
+                continue;
+            }
+
+            // Line-of-sight check (only for nearby players)
+            if !self.physics.has_line_of_sight(observer_pos, position, observer_body) {
+                continue;
+            }
+
             let health = self.get_player_health(agent_id).unwrap_or(100);
 
             // Get all attributes generically and convert to JSON
@@ -648,7 +699,24 @@ pub struct PlayerObservation {
     pub game_status: String,
     pub player: PlayerInfo,
     pub other_players: Vec<OtherPlayerInfo>,
+    pub world: WorldInfo,
     pub events: Vec<GameEvent>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorldInfo {
+    pub entities: Vec<WorldEntity>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorldEntity {
+    pub id: u64,
+    pub name: String,
+    pub position: [f32; 3],
+    pub size: [f32; 3],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<[f32; 3]>,
+    pub anchored: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -781,5 +849,156 @@ mod tests {
         // At 16 studs/sec for 2 seconds, should move up to 32 studs
         // Target is ~14.14 studs away horizontally, should reach it
         assert!(horizontal_distance > 5.0, "Player should have moved significantly towards target");
+    }
+
+    #[test]
+    fn test_observation_includes_world_entities() {
+        let mut instance = GameInstance::new(Uuid::new_v4());
+
+        // Load a script that creates some geometry
+        instance.load_script(r#"
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(100, 1, 100)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            local platform = Instance.new("Part")
+            platform.Name = "CenterPlatform"
+            platform.Size = Vector3.new(10, 1, 10)
+            platform.Position = Vector3.new(0, 5, 0)
+            platform.Anchored = true
+            platform.Parent = Workspace
+        "#);
+
+        let agent_id = Uuid::new_v4();
+        instance.add_player(agent_id);
+
+        // Run a tick to sync physics
+        instance.tick();
+
+        let obs = instance.get_player_observation(agent_id).unwrap();
+
+        // Should have world entities
+        assert!(!obs.world.entities.is_empty(), "World should contain entities");
+
+        // Should have Floor and CenterPlatform
+        let names: Vec<&str> = obs.world.entities.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"Floor"), "Should contain Floor");
+        assert!(names.contains(&"CenterPlatform"), "Should contain CenterPlatform");
+
+        // Check Floor properties
+        let floor = obs.world.entities.iter().find(|e| e.name == "Floor").unwrap();
+        assert_eq!(floor.size, [100.0, 1.0, 100.0]);
+        assert!(floor.anchored);
+    }
+
+    #[test]
+    fn test_los_blocked_by_wall() {
+        let mut instance = GameInstance::new(Uuid::new_v4());
+
+        // Create a wall between two player spawn points
+        instance.load_script(r#"
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(100, 1, 100)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            local wall = Instance.new("Part")
+            wall.Name = "Wall"
+            wall.Size = Vector3.new(20, 10, 2)
+            wall.Position = Vector3.new(0, 5, 0)
+            wall.Anchored = true
+            wall.Parent = Workspace
+        "#);
+
+        let agent_a = Uuid::new_v4();
+        let agent_b = Uuid::new_v4();
+        instance.add_player(agent_a);
+        instance.add_player(agent_b);
+
+        // Run a tick to sync physics
+        instance.tick();
+
+        // Position players on opposite sides of the wall
+        // Player A at z=-10, Player B at z=+10, wall at z=0
+        let hrp_a = *instance.player_hrp_ids.get(&agent_a).unwrap();
+        let hrp_b = *instance.player_hrp_ids.get(&agent_b).unwrap();
+
+        // Use set_character_target and tick to move them (or directly set position)
+        instance.physics.move_character_and_set_y(hrp_a, 0.0, 0.0, 2.0, 0.0);
+        instance.physics.move_character_and_set_y(hrp_b, 0.0, 0.0, 2.0, 0.0);
+
+        // Manually set positions behind the wall
+        if let Some(state) = instance.physics.get_character_state(hrp_a) {
+            if let Some(body) = instance.physics.rigid_body_set.get_mut(state.body_handle) {
+                body.set_translation(rapier3d::prelude::vector![0.0, 2.0, -10.0], true);
+            }
+        }
+        if let Some(state) = instance.physics.get_character_state(hrp_b) {
+            if let Some(body) = instance.physics.rigid_body_set.get_mut(state.body_handle) {
+                body.set_translation(rapier3d::prelude::vector![0.0, 2.0, 10.0], true);
+            }
+        }
+
+        // Update query pipeline
+        instance.physics.query_pipeline.update(&instance.physics.collider_set);
+
+        let obs = instance.get_player_observation(agent_a).unwrap();
+
+        // Agent A should NOT see Agent B (blocked by wall)
+        assert!(obs.other_players.is_empty(), "Should not see player through wall");
+    }
+
+    #[test]
+    fn test_los_clear() {
+        let mut instance = GameInstance::new(Uuid::new_v4());
+
+        // Just a floor, no obstructions
+        instance.load_script(r#"
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(100, 1, 100)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+        "#);
+
+        let agent_a = Uuid::new_v4();
+        let agent_b = Uuid::new_v4();
+        instance.add_player(agent_a);
+        instance.add_player(agent_b);
+
+        // Run several ticks to sync physics
+        for _ in 0..5 {
+            instance.tick();
+        }
+
+        // Position players at same height on the floor with clear LOS
+        let hrp_a = *instance.player_hrp_ids.get(&agent_a).unwrap();
+        let hrp_b = *instance.player_hrp_ids.get(&agent_b).unwrap();
+
+        if let Some(state) = instance.physics.get_character_state(hrp_a) {
+            if let Some(body) = instance.physics.rigid_body_set.get_mut(state.body_handle) {
+                body.set_translation(rapier3d::prelude::vector![-10.0, 2.0, 0.0], true);
+            }
+        }
+        if let Some(state) = instance.physics.get_character_state(hrp_b) {
+            if let Some(body) = instance.physics.rigid_body_set.get_mut(state.body_handle) {
+                body.set_translation(rapier3d::prelude::vector![10.0, 2.0, 0.0], true);
+            }
+        }
+
+        // Update query pipeline
+        instance.physics.query_pipeline.update(&instance.physics.collider_set);
+
+        let obs = instance.get_player_observation(agent_a).unwrap();
+
+        // Agent A should see Agent B (clear LOS)
+        assert_eq!(obs.other_players.len(), 1, "Should see other player with clear LOS");
+        assert_eq!(obs.other_players[0].id, agent_b);
     }
 }

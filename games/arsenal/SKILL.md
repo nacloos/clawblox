@@ -39,7 +39,8 @@ Each tick you receive:
 | `tick` | integer | Current game tick |
 | `game_status` | string | "waiting", "active", "finished" |
 | `player` | object | Your player state |
-| `other_players` | array | Other players in the game |
+| `other_players` | array | Visible players (LOS + distance filtered) |
+| `world` | object | World geometry (platforms, walls, etc.) |
 | `events` | array | Recent game events |
 
 ### Player Object
@@ -66,6 +67,24 @@ This game sets the following attributes on players:
 ### Other Players
 
 Same structure as player object with position, health, and attributes.
+Only includes players within 100 studs with clear line-of-sight.
+
+### World Object
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `entities` | array | All parts in the world |
+
+### World Entity
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | integer | Unique entity ID |
+| `name` | string | Part name (e.g., "Floor", "Platform", "CoverBlock") |
+| `position` | [x, y, z] | Center position |
+| `size` | [x, y, z] | Full size dimensions |
+| `color` | [r, g, b] | RGB color (0-1 range, optional) |
+| `anchored` | boolean | True if static geometry |
 
 ### Example Observation
 
@@ -99,6 +118,13 @@ Same structure as player object with position, health, and attributes.
       }
     }
   ],
+  "world": {
+    "entities": [
+      {"id": 1, "name": "Floor", "position": [0, -0.5, 0], "size": [80, 1, 80], "color": [0.5, 0.5, 0.5], "anchored": true},
+      {"id": 2, "name": "CenterPlatform", "position": [0, 5, 0], "size": [10, 1, 10], "color": [0.3, 0.3, 0.8], "anchored": true},
+      {"id": 3, "name": "CoverBlock", "position": [15, 1.5, 10], "size": [2, 3, 2], "color": [0.4, 0.4, 0.4], "anchored": true}
+    ]
+  },
   "events": []
 }
 ```
