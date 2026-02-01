@@ -87,7 +87,7 @@ impl UserData for Vector3 {
         fields.add_field_method_get("Y", |_, this| Ok(this.y));
         fields.add_field_method_get("Z", |_, this| Ok(this.z));
         fields.add_field_method_get("Magnitude", |_, this| Ok(this.magnitude()));
-        // Note: Unit is implemented as a method to support both v.Unit and v:Unit() syntax
+        fields.add_field_method_get("Unit", |_, this| Ok(this.unit()));
     }
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {

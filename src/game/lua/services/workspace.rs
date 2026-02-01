@@ -156,77 +156,114 @@ impl WorkspaceService {
         let mut closest: Option<(f32, Instance, Vector3)> = None;
 
         for descendant in self.get_descendants() {
-            let data = descendant.data.lock().unwrap();
-            if let Some(part) = &data.part_data {
-                if !part.can_collide {
-                    continue;
+            // Extract part data while holding the lock
+            let part_info = {
+                let data = descendant.data.lock().unwrap();
+                data.part_data.as_ref().map(|part| {
+                    (part.can_collide, part.size, part.position)
+                })
+            }; // Lock released here
+
+            let Some((can_collide, size, position)) = part_info else {
+                continue;
+            };
+
+            if !can_collide {
+                continue;
+            }
+
+            // Now check filtering without holding any lock
+            let should_filter = params.filter_instances.iter().any(|i| {
+                i.id() == descendant.id() || descendant.is_descendant_of(i)
+            });
+
+            let skip = match params.filter_type {
+                RaycastFilterType::Exclude => should_filter,
+                RaycastFilterType::Include => !should_filter,
+            };
+
+            if skip {
+                continue;
+            }
+
+            let half_size = Vector3::new(
+                size.x / 2.0,
+                size.y / 2.0,
+                size.z / 2.0,
+            );
+
+            let center = position;
+
+            // Slab intersection with proper handling for zero direction components
+            // When ray is parallel to a slab (dir component = 0):
+            // - If origin is outside the slab, no intersection (t_near > t_far)
+            // - If origin is inside the slab, the slab doesn't constrain t (use -inf to +inf)
+            let (t1_x, t2_x) = if ray_dir.x.abs() < 1e-10 {
+                // Ray parallel to YZ plane
+                if origin.x < center.x - half_size.x || origin.x > center.x + half_size.x {
+                    (f32::INFINITY, f32::NEG_INFINITY) // No intersection
+                } else {
+                    (f32::NEG_INFINITY, f32::INFINITY) // Always inside this slab
                 }
+            } else {
+                let t_min = (center.x - half_size.x - origin.x) / ray_dir.x;
+                let t_max = (center.x + half_size.x - origin.x) / ray_dir.x;
+                (t_min.min(t_max), t_min.max(t_max))
+            };
 
-                let should_filter = params.filter_instances.iter().any(|i| {
-                    i.id() == descendant.id() || descendant.is_descendant_of(i)
-                });
-
-                let skip = match params.filter_type {
-                    RaycastFilterType::Exclude => should_filter,
-                    RaycastFilterType::Include => !should_filter,
-                };
-
-                if skip {
-                    continue;
+            let (t1_y, t2_y) = if ray_dir.y.abs() < 1e-10 {
+                // Ray parallel to XZ plane
+                if origin.y < center.y - half_size.y || origin.y > center.y + half_size.y {
+                    (f32::INFINITY, f32::NEG_INFINITY) // No intersection
+                } else {
+                    (f32::NEG_INFINITY, f32::INFINITY) // Always inside this slab
                 }
+            } else {
+                let t_min = (center.y - half_size.y - origin.y) / ray_dir.y;
+                let t_max = (center.y + half_size.y - origin.y) / ray_dir.y;
+                (t_min.min(t_max), t_min.max(t_max))
+            };
 
-                let half_size = Vector3::new(
-                    part.size.x / 2.0,
-                    part.size.y / 2.0,
-                    part.size.z / 2.0,
+            let (t1_z, t2_z) = if ray_dir.z.abs() < 1e-10 {
+                // Ray parallel to XY plane
+                if origin.z < center.z - half_size.z || origin.z > center.z + half_size.z {
+                    (f32::INFINITY, f32::NEG_INFINITY) // No intersection
+                } else {
+                    (f32::NEG_INFINITY, f32::INFINITY) // Always inside this slab
+                }
+            } else {
+                let t_min = (center.z - half_size.z - origin.z) / ray_dir.z;
+                let t_max = (center.z + half_size.z - origin.z) / ray_dir.z;
+                (t_min.min(t_max), t_min.max(t_max))
+            };
+
+            let t_near = t1_x.max(t1_y).max(t1_z);
+            let t_far = t2_x.min(t2_y).min(t2_z);
+
+            if t_near <= t_far && t_near >= 0.0 && t_near <= ray_length {
+                let hit_pos = Vector3::new(
+                    origin.x + ray_dir.x * t_near,
+                    origin.y + ray_dir.y * t_near,
+                    origin.z + ray_dir.z * t_near,
                 );
 
-                let center = part.position;
+                let epsilon = 0.001;
+                let normal = if (hit_pos.x - (center.x - half_size.x)).abs() < epsilon {
+                    Vector3::new(-1.0, 0.0, 0.0)
+                } else if (hit_pos.x - (center.x + half_size.x)).abs() < epsilon {
+                    Vector3::new(1.0, 0.0, 0.0)
+                } else if (hit_pos.y - (center.y - half_size.y)).abs() < epsilon {
+                    Vector3::new(0.0, -1.0, 0.0)
+                } else if (hit_pos.y - (center.y + half_size.y)).abs() < epsilon {
+                    Vector3::new(0.0, 1.0, 0.0)
+                } else if (hit_pos.z - (center.z - half_size.z)).abs() < epsilon {
+                    Vector3::new(0.0, 0.0, -1.0)
+                } else {
+                    Vector3::new(0.0, 0.0, 1.0)
+                };
 
-                let t_min_x = (center.x - half_size.x - origin.x) / ray_dir.x;
-                let t_max_x = (center.x + half_size.x - origin.x) / ray_dir.x;
-                let t_min_y = (center.y - half_size.y - origin.y) / ray_dir.y;
-                let t_max_y = (center.y + half_size.y - origin.y) / ray_dir.y;
-                let t_min_z = (center.z - half_size.z - origin.z) / ray_dir.z;
-                let t_max_z = (center.z + half_size.z - origin.z) / ray_dir.z;
-
-                let t1_x = t_min_x.min(t_max_x);
-                let t2_x = t_min_x.max(t_max_x);
-                let t1_y = t_min_y.min(t_max_y);
-                let t2_y = t_min_y.max(t_max_y);
-                let t1_z = t_min_z.min(t_max_z);
-                let t2_z = t_min_z.max(t_max_z);
-
-                let t_near = t1_x.max(t1_y).max(t1_z);
-                let t_far = t2_x.min(t2_y).min(t2_z);
-
-                if t_near <= t_far && t_near >= 0.0 && t_near <= ray_length {
-                    let hit_pos = Vector3::new(
-                        origin.x + ray_dir.x * t_near,
-                        origin.y + ray_dir.y * t_near,
-                        origin.z + ray_dir.z * t_near,
-                    );
-
-                    let epsilon = 0.001;
-                    let normal = if (hit_pos.x - (center.x - half_size.x)).abs() < epsilon {
-                        Vector3::new(-1.0, 0.0, 0.0)
-                    } else if (hit_pos.x - (center.x + half_size.x)).abs() < epsilon {
-                        Vector3::new(1.0, 0.0, 0.0)
-                    } else if (hit_pos.y - (center.y - half_size.y)).abs() < epsilon {
-                        Vector3::new(0.0, -1.0, 0.0)
-                    } else if (hit_pos.y - (center.y + half_size.y)).abs() < epsilon {
-                        Vector3::new(0.0, 1.0, 0.0)
-                    } else if (hit_pos.z - (center.z - half_size.z)).abs() < epsilon {
-                        Vector3::new(0.0, 0.0, -1.0)
-                    } else {
-                        Vector3::new(0.0, 0.0, 1.0)
-                    };
-
-                    if closest.is_none() || t_near < closest.as_ref().unwrap().0 {
-                        drop(data);
-                        closest = Some((t_near, descendant.clone(), normal));
-                        continue;
-                    }
+                if closest.is_none() || t_near < closest.as_ref().unwrap().0 {
+                    closest = Some((t_near, descendant.clone(), normal));
                 }
             }
         }

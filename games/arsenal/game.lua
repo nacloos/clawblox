@@ -130,7 +130,7 @@ local function createArena()
         for step = 1, 5 do
             local stair = Instance.new("Part")
             stair.Name = "Stair_" .. i .. "_" .. step
-            local offset = data[1]:Unit() * (step * 1.5)
+            local offset = data[1].Unit * (step * 1.5)
             stair.Position = Vector3.new(offset.X, step, offset.Z)
             stair.Size = data[2]
             stair.Anchored = true

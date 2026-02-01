@@ -12,6 +12,7 @@ export interface SpectatorEntity {
   position: [number, number, number]
   size?: [number, number, number]
   color?: [number, number, number]
+  material?: string
   health?: number
   pickup_type?: string
 }

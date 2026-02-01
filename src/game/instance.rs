@@ -549,6 +549,7 @@ impl GameInstance {
                         position: [part_data.position.x, part_data.position.y, part_data.position.z],
                         size: [part_data.size.x, part_data.size.y, part_data.size.z],
                         color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
+                        material: Some(part_data.material.name().to_string()),
                         anchored: part_data.anchored,
                     });
                 }
@@ -637,6 +638,7 @@ impl GameInstance {
                         ],
                         size: Some([part_data.size.x, part_data.size.y, part_data.size.z]),
                         color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
+                        material: Some(part_data.material.name().to_string()),
                         health: None,
                         pickup_type: None,
                     });
@@ -716,6 +718,8 @@ pub struct WorldEntity {
     pub size: [f32; 3],
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<[f32; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub material: Option<String>,
     pub anchored: bool,
 }
 
@@ -792,6 +796,8 @@ pub struct SpectatorEntity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<[f32; 3]>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub material: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub health: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pickup_type: Option<String>,
@@ -800,6 +806,7 @@ pub struct SpectatorEntity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::lua::instance::AttributeValue;
 
     #[test]
     fn test_player_goto_action() {
@@ -1000,5 +1007,158 @@ mod tests {
         // Agent A should see Agent B (clear LOS)
         assert_eq!(obs.other_players.len(), 1, "Should see other player with clear LOS");
         assert_eq!(obs.other_players[0].id, agent_b);
+    }
+
+    #[test]
+    fn test_shooting_and_killing() {
+        let mut instance = GameInstance::new(Uuid::new_v4());
+
+        // Load a minimal shooting test script (no debug prints, fast startup)
+        instance.load_script(r#"
+            local Players = game:GetService("Players")
+            local AgentInputService = game:GetService("AgentInputService")
+
+            -- Create floor
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(100, 1, 100)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            -- Initialize player weapons
+            Players.PlayerAdded:Connect(function(player)
+                player:SetAttribute("CurrentWeapon", 1)
+                player:SetAttribute("Kills", 0)
+            end)
+
+            -- Handle Fire input
+            if AgentInputService then
+                AgentInputService.InputReceived:Connect(function(player, inputType, data)
+                    if inputType == "Fire" and data and data.direction then
+                        local character = player.Character
+                        if not character then return end
+
+                        local hrp = character:FindFirstChild("HumanoidRootPart")
+                        if not hrp then return end
+
+                        local origin = hrp.Position + Vector3.new(0, 1, 0)
+                        local dir = Vector3.new(data.direction[1], data.direction[2], data.direction[3])
+
+                        -- Raycast to find target
+                        local raycastParams = RaycastParams.new()
+                        raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+                        raycastParams.FilterDescendantsInstances = {character}
+
+                        local result = Workspace:Raycast(origin, dir * 100, raycastParams)
+                        if result then
+                            -- Check if we hit a player
+                            local hitPart = result.Instance
+                            local current = hitPart
+                            while current do
+                                if current:FindFirstChild("Humanoid") then
+                                    -- Found a character, deal damage
+                                    local humanoid = current:FindFirstChild("Humanoid")
+                                    humanoid:TakeDamage(25)
+                                    print("[HIT] Dealt 25 damage, health now:", humanoid.Health)
+
+                                    if humanoid.Health <= 0 then
+                                        player:SetAttribute("Kills", (player:GetAttribute("Kills") or 0) + 1)
+                                        player:SetAttribute("CurrentWeapon", (player:GetAttribute("CurrentWeapon") or 1) + 1)
+                                        print("[KILL] Player got kill, weapon now:", player:GetAttribute("CurrentWeapon"))
+                                    end
+                                    break
+                                end
+                                current = current.Parent
+                            end
+                        else
+                            print("[MISS] Raycast hit nothing")
+                        end
+                    end
+                end)
+            end
+            print("Shooting test script loaded")
+        "#);
+
+        // Add two players
+        let attacker_id = Uuid::new_v4();
+        let victim_id = Uuid::new_v4();
+        instance.add_player(attacker_id);
+        instance.add_player(victim_id);
+
+        let attacker_user_id = *instance.players.get(&attacker_id).unwrap();
+
+        // Run a few ticks to initialize
+        for _ in 0..5 {
+            instance.tick();
+        }
+
+        // Position players facing each other
+        let hrp_attacker = *instance.player_hrp_ids.get(&attacker_id).unwrap();
+        let hrp_victim = *instance.player_hrp_ids.get(&victim_id).unwrap();
+
+        if let Some(state) = instance.physics.get_character_state(hrp_attacker) {
+            if let Some(body) = instance.physics.rigid_body_set.get_mut(state.body_handle) {
+                body.set_translation(rapier3d::prelude::vector![-5.0, 2.0, 0.0], true);
+            }
+        }
+        if let Some(state) = instance.physics.get_character_state(hrp_victim) {
+            if let Some(body) = instance.physics.rigid_body_set.get_mut(state.body_handle) {
+                body.set_translation(rapier3d::prelude::vector![5.0, 2.0, 0.0], true);
+            }
+        }
+
+        // Sync physics to Lua
+        instance.tick();
+
+        let initial_health = instance.get_player_health(victim_id).unwrap_or(100);
+
+        // Fire towards victim (+X direction)
+        let fire_input = serde_json::json!({ "direction": [1.0, 0.0, 0.0] });
+        instance.queue_agent_input(attacker_user_id, "Fire".to_string(), fire_input);
+
+        instance.tick();
+
+        let health_after_shot = instance.get_player_health(victim_id).unwrap_or(100);
+
+        assert!(
+            health_after_shot < initial_health,
+            "Victim should have taken damage: {} -> {}",
+            initial_health,
+            health_after_shot
+        );
+
+        // Keep shooting until dead
+        let mut shots = 1;
+        while instance.get_player_health(victim_id).unwrap_or(0) > 0 && shots < 10 {
+            let fire_input = serde_json::json!({ "direction": [1.0, 0.0, 0.0] });
+            instance.queue_agent_input(attacker_user_id, "Fire".to_string(), fire_input);
+            instance.tick();
+            shots += 1;
+        }
+
+        let final_health = instance.get_player_health(victim_id).unwrap_or(0);
+        assert!(final_health <= 0, "Victim should be dead after {} shots", shots);
+
+        // Check attacker stats
+        if let Some(runtime) = &instance.lua_runtime {
+            if let Some(player) = runtime.players().get_player_by_user_id(attacker_user_id) {
+                let data = player.data.lock().unwrap();
+
+                // Verify kills attribute was set to 1
+                if let Some(AttributeValue::Number(kills)) = data.attributes.get("Kills") {
+                    assert_eq!(*kills as i32, 1, "Expected 1 kill");
+                } else {
+                    panic!("Kills attribute not found or not a number");
+                }
+
+                // Verify weapon was upgraded to 2
+                if let Some(AttributeValue::Number(weapon)) = data.attributes.get("CurrentWeapon") {
+                    assert_eq!(*weapon as i32, 2, "Expected weapon to be upgraded to 2");
+                } else {
+                    panic!("CurrentWeapon attribute not found or not a number");
+                }
+            }
+        }
     }
 }

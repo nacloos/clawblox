@@ -310,20 +310,25 @@ impl LuaRuntime {
     /// Process pending agent inputs by firing InputReceived events
     pub fn process_agent_inputs(&self) -> Result<()> {
         let agent_input_service = self.agent_input_service();
+
+        // 1. Collect all (player, inputs) pairs WITHOUT holding locks during Lua calls
         let players = self.players().get_players();
+        let mut to_process: Vec<(Instance, Vec<AgentInput>)> = Vec::new();
 
         for player in players {
-            let user_id = player
-                .data
-                .lock()
-                .unwrap()
-                .player_data
-                .as_ref()
-                .map(|pd| pd.user_id)
-                .unwrap_or(0);
+            let user_id = {
+                let data = player.data.lock().unwrap();
+                data.player_data.as_ref().map(|pd| pd.user_id).unwrap_or(0)
+            }; // Lock released here
 
-            // Get and process all pending inputs for this player
             let inputs = agent_input_service.get_inputs(user_id);
+            if !inputs.is_empty() {
+                to_process.push((player, inputs));
+            }
+        }
+
+        // 2. Now fire events (no locks held)
+        for (player, inputs) in to_process {
             for input in inputs {
                 agent_input_service.fire_input_received(
                     &self.lua,
@@ -468,5 +473,6 @@ mod tests {
         // Check character is in workspace
         assert!(char_inst.parent().is_some());
     }
+
 }
 
