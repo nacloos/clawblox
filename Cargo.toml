@@ -17,7 +17,4 @@ bevy_rapier3d = "0.28"
 crossbeam-channel = "0.5"
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono"] }
 chrono = { version = "0.4", features = ["serde"] }
-aws-sdk-s3 = "1.121"
-aws-config = "1.8"
-aws-credential-types = "1.2"
-wasmtime = "41"
+mlua = { version = "0.11", features = ["luau", "serialize", "send"] }

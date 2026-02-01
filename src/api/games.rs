@@ -91,6 +91,7 @@ struct CreateGameRequest {
     description: Option<String>,
     #[serde(default = "default_game_type")]
     game_type: String,
+    script_code: Option<String>,
 }
 
 fn default_game_type() -> String {
@@ -123,13 +124,14 @@ async fn create_game(
 
     // Create game definition in database only (no memory instance yet)
     sqlx::query(
-        "INSERT INTO games (id, name, description, game_type, creator_id, status) VALUES ($1, $2, $3, $4, $5, 'waiting')",
+        "INSERT INTO games (id, name, description, game_type, creator_id, status, script_code) VALUES ($1, $2, $3, $4, $5, 'waiting', $6)",
     )
     .bind(game_id)
     .bind(&payload.name)
     .bind(&payload.description)
     .bind(&payload.game_type)
     .bind(agent.0)
+    .bind(&payload.script_code)
     .execute(&state.pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -194,16 +196,20 @@ async fn join_game(
 
     let agent_id = agent.0;
 
-    // Verify game exists in database
-    sqlx::query_as::<_, (Uuid,)>("SELECT id FROM games WHERE id = $1")
+    // Get game from database including script
+    let db_game: Game = sqlx::query_as("SELECT * FROM games WHERE id = $1")
         .bind(game_id)
         .fetch_optional(&state.pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Game not found".to_string()))?;
 
-    // Get or create the running instance
-    game::get_or_create_instance(&state.game_manager, game_id);
+    // Get or create the running instance with script if available
+    game::get_or_create_instance_with_script(
+        &state.game_manager,
+        game_id,
+        db_game.script_code.as_deref(),
+    );
 
     // Join the instance
     game::join_game(&state.game_manager, game_id, agent_id)
@@ -278,16 +284,21 @@ async fn matchmake(
         .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
 
     // First check for games with waiting status and room for players
-    let waiting_game: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT id FROM games WHERE status = 'waiting' ORDER BY created_at ASC LIMIT 1",
+    let waiting_game: Option<Game> = sqlx::query_as(
+        "SELECT * FROM games WHERE status = 'waiting' ORDER BY created_at ASC LIMIT 1",
     )
     .fetch_optional(&state.pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    if let Some((game_id,)) = waiting_game {
+    if let Some(db_game) = waiting_game {
+        let game_id = db_game.id;
         // Check if instance has room (create if needed)
-        game::get_or_create_instance(&state.game_manager, game_id);
+        game::get_or_create_instance_with_script(
+            &state.game_manager,
+            game_id,
+            db_game.script_code.as_deref(),
+        );
         if let Some(info) = game::get_game_info(&state.game_manager, game_id) {
             if info.player_count < 4 {
                 return Ok(Json(MatchmakeResponse {

@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod instance;
+pub mod lua;
 pub mod shooter;
 pub mod systems;
 
@@ -75,13 +76,26 @@ pub fn create_game(state: &GameManagerHandle) -> Uuid {
 /// Gets an existing running instance or creates a new one for the given game ID.
 /// Returns true if a new instance was created, false if using existing.
 pub fn get_or_create_instance(state: &GameManagerHandle, game_id: Uuid) -> bool {
+    get_or_create_instance_with_script(state, game_id, None)
+}
+
+/// Gets an existing running instance or creates a new one with an optional Lua script.
+/// Returns true if a new instance was created, false if using existing.
+pub fn get_or_create_instance_with_script(
+    state: &GameManagerHandle,
+    game_id: Uuid,
+    script: Option<&str>,
+) -> bool {
     let mut state = state.write().unwrap();
 
     if state.games.contains_key(&game_id) {
         return false;
     }
 
-    let game = GameInstance::new(game_id);
+    let game = match script {
+        Some(code) => GameInstance::new_with_script(game_id, code),
+        None => GameInstance::new(game_id),
+    };
     state.games.insert(game_id, game);
     true
 }

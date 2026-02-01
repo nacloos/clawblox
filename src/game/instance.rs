@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use super::actions::{GameAction, QueuedAction};
+use super::lua::LuaRuntime;
 use super::shooter::{
     get_spawn_position, spawn_ai_enemies, spawn_arena, spawn_bullet, spawn_pickups, spawn_player,
     AiEnemy, Bullet, Health, Pickup, PickupType, Player, PICKUP_RESPAWN_TIME, RESPAWN_TIME,
@@ -20,6 +21,7 @@ pub struct GameInstance {
     pub action_receiver: Receiver<QueuedAction>,
     pub action_sender: Sender<QueuedAction>,
     pub status: GameStatus,
+    pub lua_runtime: Option<LuaRuntime>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -67,6 +69,28 @@ impl GameInstance {
             action_receiver,
             action_sender,
             status: GameStatus::Waiting,
+            lua_runtime: None,
+        }
+    }
+
+    pub fn new_with_script(game_id: Uuid, script: &str) -> Self {
+        let mut instance = Self::new(game_id);
+        instance.load_script(script);
+        instance
+    }
+
+    pub fn load_script(&mut self, source: &str) {
+        match LuaRuntime::new() {
+            Ok(mut runtime) => {
+                if let Err(e) = runtime.load_script(source) {
+                    eprintln!("[Lua Error] Failed to load script: {}", e);
+                } else {
+                    self.lua_runtime = Some(runtime);
+                }
+            }
+            Err(e) => {
+                eprintln!("[Lua Error] Failed to create runtime: {}", e);
+            }
         }
     }
 
@@ -85,6 +109,14 @@ impl GameInstance {
 
         self.players.insert(agent_id, entity);
 
+        if let Some(runtime) = &self.lua_runtime {
+            let player_name = format!("Player_{}", agent_id.as_simple());
+            let player = runtime.add_player(agent_id.as_u128() as u64, &player_name);
+            if let Err(e) = runtime.fire_player_added(&player) {
+                eprintln!("[Lua Error] Failed to fire PlayerAdded: {}", e);
+            }
+        }
+
         if self.players.len() >= 1 && self.status == GameStatus::Waiting {
             self.status = GameStatus::Playing;
         }
@@ -94,6 +126,16 @@ impl GameInstance {
 
     pub fn remove_player(&mut self, agent_id: Uuid) -> bool {
         if let Some(entity) = self.players.remove(&agent_id) {
+            if let Some(runtime) = &self.lua_runtime {
+                let user_id = agent_id.as_u128() as u64;
+                if let Some(player) = runtime.players().get_player_by_user_id(user_id) {
+                    if let Err(e) = runtime.fire_player_removing(&player) {
+                        eprintln!("[Lua Error] Failed to fire PlayerRemoving: {}", e);
+                    }
+                }
+                runtime.remove_player(user_id);
+            }
+
             let mut commands_queue = CommandQueue::default();
             {
                 let mut commands = Commands::new(&mut commands_queue, &self.world);
@@ -116,6 +158,14 @@ impl GameInstance {
         }
 
         self.update_physics();
+
+        if let Some(runtime) = &self.lua_runtime {
+            let dt = 1.0 / 60.0;
+            if let Err(e) = runtime.tick(dt) {
+                eprintln!("[Lua Error] Tick error: {}", e);
+            }
+        }
+
         self.tick += 1;
     }
 
