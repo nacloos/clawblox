@@ -116,6 +116,7 @@ impl LuaRuntime {
                 .map(|v| match v {
                     Value::Nil => "nil".to_string(),
                     Value::Boolean(b) => b.to_string(),
+                    Value::Integer(n) => n.to_string(),
                     Value::Number(n) => n.to_string(),
                     Value::String(s) => s.to_str().map(|s| s.to_string()).unwrap_or_default(),
                     Value::UserData(ud) => {

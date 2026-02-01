@@ -392,8 +392,12 @@ impl PhysicsWorld {
             current_pos.z + movement.translation.z
         ];
 
+        // Use set_translation directly (not set_next_kinematic_translation) because:
+        // - We already computed collision-corrected movement via move_shape()
+        // - set_next_kinematic_translation schedules for NEXT step, causing 1-frame delay
+        // - Each frame we'd overwrite the previous scheduled position before it applied
         let body = self.rigid_body_set.get_mut(body_handle)?;
-        body.set_next_kinematic_translation(new_pos);
+        body.set_translation(new_pos, true);
 
         Some([new_pos.x, new_pos.y, new_pos.z])
     }

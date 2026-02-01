@@ -140,7 +140,9 @@ impl RBXScriptSignal {
             };
 
             if let Some(callback) = callback_key {
-                let _ = callback.call::<()>(args.clone());
+                if let Err(e) = callback.call::<()>(args.clone()) {
+                    eprintln!("[Lua Error] Callback error in signal '{}': {}", self.name, e);
+                }
                 if once {
                     to_remove.push(id);
                 }

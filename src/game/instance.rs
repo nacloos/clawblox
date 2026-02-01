@@ -2,6 +2,7 @@ use crossbeam_channel::{Receiver, Sender};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+use super::lua::instance::attributes_to_json;
 use super::lua::services::AgentInput;
 use super::lua::LuaRuntime;
 use super::physics::PhysicsWorld;
@@ -23,6 +24,8 @@ pub struct GameInstance {
     pub action_receiver: Receiver<QueuedAction>,
     pub action_sender: Sender<QueuedAction>,
     pub status: GameStatus,
+    /// Counter for generating unique user IDs that fit in Lua's safe integer range (< 2^53)
+    next_user_id: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -64,6 +67,7 @@ impl GameInstance {
             action_receiver,
             action_sender,
             status: GameStatus::Playing,
+            next_user_id: 1, // Start at 1, stays well within Lua's safe integer range
         }
     }
 
@@ -96,7 +100,9 @@ impl GameInstance {
             return false;
         }
 
-        let user_id = agent_id.as_u128() as u64;
+        // Use counter-based user_id to ensure it fits in Lua's safe integer range (< 2^53)
+        let user_id = self.next_user_id;
+        self.next_user_id += 1;
         self.players.insert(agent_id, user_id);
 
         if let Some(runtime) = &self.lua_runtime {
@@ -172,6 +178,9 @@ impl GameInstance {
 
         // Update query pipeline so character controller can detect collisions with new geometry
         self.physics.query_pipeline.update(&self.physics.collider_set);
+
+        // Sync Lua humanoid MoveTo targets to physics character controllers
+        self.sync_humanoid_move_targets();
 
         // Update character controller movement
         self.update_character_movement(dt);
@@ -304,6 +313,45 @@ impl GameInstance {
         }
     }
 
+    /// Syncs Lua humanoid MoveTo targets to physics character controllers
+    fn sync_humanoid_move_targets(&mut self) {
+        let Some(runtime) = &self.lua_runtime else {
+            return;
+        };
+
+        // For each player, check if their humanoid has a move target
+        for (&agent_id, &user_id) in &self.players {
+            let Some(&hrp_id) = self.player_hrp_ids.get(&agent_id) else {
+                continue;
+            };
+
+            // Get player's character and humanoid
+            let Some(player) = runtime.players().get_player_by_user_id(user_id) else {
+                continue;
+            };
+
+            let player_data = player.data.lock().unwrap();
+            let Some(character_weak) = player_data.player_data.as_ref().and_then(|pd| pd.character.as_ref()) else {
+                continue;
+            };
+            let Some(character_ref) = character_weak.upgrade() else {
+                continue;
+            };
+            drop(player_data);
+
+            // Find humanoid in character
+            let character_data = character_ref.lock().unwrap();
+            for child_ref in &character_data.children {
+                let mut child_data = child_ref.lock().unwrap();
+                if let Some(humanoid) = &mut child_data.humanoid_data {
+                    if let Some(target) = humanoid.move_to_target.take() {
+                        self.physics.set_character_target(hrp_id, Some([target.x, target.y, target.z]));
+                    }
+                }
+            }
+        }
+    }
+
     /// Processes a queued action from a player
     fn process_action(&mut self, queued: QueuedAction) {
         let Some(&_user_id) = self.players.get(&queued.agent_id) else {
@@ -332,6 +380,7 @@ impl GameInstance {
         const CHARACTER_HALF_HEIGHT: f32 = 1.0; // Capsule half-height
         const SNAP_THRESHOLD: f32 = 0.5; // Max distance to snap to ground
         const MAX_RAYCAST_DIST: f32 = 10.0; // How far down to look for ground
+        const GROUND_OFFSET: f32 = 0.02; // Small gap to prevent move_shape detecting floor penetration
 
         // Collect HRP IDs to process (avoid borrow issues)
         let hrp_ids: Vec<u64> = self.player_hrp_ids.values().copied().collect();
@@ -359,8 +408,8 @@ impl GameInstance {
                 let feet_clearance = distance - CHARACTER_HALF_HEIGHT;
 
                 if feet_clearance <= SNAP_THRESHOLD && vertical_velocity <= 0.0 {
-                    // Grounded - snap to ground
-                    (ground_y + CHARACTER_HALF_HEIGHT, 0.0)
+                    // Grounded - snap to ground (with small offset to prevent move_shape penetration)
+                    (ground_y + CHARACTER_HALF_HEIGHT + GROUND_OFFSET, 0.0)
                 } else {
                     // Above ground or moving up - apply gravity
                     let new_vel = vertical_velocity + gravity * dt;
@@ -416,9 +465,9 @@ impl GameInstance {
         // Get health from humanoid
         let health = self.get_player_health(agent_id).unwrap_or(100);
 
-        // Read all player attributes generically
+        // Read all player attributes generically and convert to JSON
         let player_data = player.data.lock().unwrap();
-        let attributes = player_data.attributes.clone();
+        let attributes = attributes_to_json(&player_data.attributes);
         drop(player_data);
 
         // Get other players
@@ -471,12 +520,10 @@ impl GameInstance {
 
         let char_data = character.lock().unwrap();
         for child in &char_data.children {
-            if let Some(child_ref) = child.upgrade() {
-                let child_data = child_ref.lock().unwrap();
-                if child_data.name == "Humanoid" {
-                    if let Some(humanoid) = &child_data.humanoid_data {
-                        return Some(humanoid.health as i32);
-                    }
+            let child_data = child.lock().unwrap();
+            if child_data.name == "Humanoid" {
+                if let Some(humanoid) = &child_data.humanoid_data {
+                    return Some(humanoid.health as i32);
                 }
             }
         }
@@ -495,11 +542,11 @@ impl GameInstance {
             let position = self.get_player_position(agent_id).unwrap_or([0.0, 0.0, 0.0]);
             let health = self.get_player_health(agent_id).unwrap_or(100);
 
-            // Get all attributes generically
+            // Get all attributes generically and convert to JSON
             let attributes = if let Some(runtime) = &self.lua_runtime {
                 if let Some(player) = runtime.players().get_player_by_user_id(user_id) {
                     let data = player.data.lock().unwrap();
-                    data.attributes.clone()
+                    attributes_to_json(&data.attributes)
                 } else {
                     std::collections::HashMap::new()
                 }

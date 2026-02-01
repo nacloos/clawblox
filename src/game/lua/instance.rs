@@ -108,6 +108,27 @@ pub enum AttributeValue {
     Nil,
 }
 
+impl AttributeValue {
+    /// Convert to JSON value for API responses
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            AttributeValue::String(s) => serde_json::Value::String(s.clone()),
+            AttributeValue::Number(n) => serde_json::json!(*n),
+            AttributeValue::Bool(b) => serde_json::Value::Bool(*b),
+            AttributeValue::Vector3(v) => serde_json::json!([v.x, v.y, v.z]),
+            AttributeValue::Color3(c) => serde_json::json!([c.r, c.g, c.b]),
+            AttributeValue::Nil => serde_json::Value::Null,
+        }
+    }
+}
+
+/// Convert a HashMap of AttributeValue to JSON-serializable HashMap
+pub fn attributes_to_json(
+    attrs: &std::collections::HashMap<String, AttributeValue>,
+) -> std::collections::HashMap<String, serde_json::Value> {
+    attrs.iter().map(|(k, v)| (k.clone(), v.to_json())).collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct PartData {
     pub position: Vector3,
@@ -155,6 +176,8 @@ pub struct HumanoidData {
     pub jump_height: f32,
     pub auto_rotate: bool,
     pub hip_height: f32,
+    /// Movement target set by MoveTo()
+    pub move_to_target: Option<Vector3>,
 
     pub died: RBXScriptSignal,
     pub health_changed: RBXScriptSignal,
@@ -171,6 +194,7 @@ impl Default for HumanoidData {
             jump_height: 7.2,
             auto_rotate: true,
             hip_height: 2.0,
+            move_to_target: None,
             died: create_signal("Died"),
             health_changed: create_signal("HealthChanged"),
             move_to_finished: create_signal("MoveToFinished"),
@@ -761,7 +785,8 @@ impl UserData for Instance {
 
         fields.add_field_method_get("UserId", |_, this| {
             let data = this.data.lock().unwrap();
-            Ok(data.player_data.as_ref().map(|p| p.user_id))
+            // Return as f64 to ensure it's a Lua number type (not Integer) for table key compatibility
+            Ok(data.player_data.as_ref().map(|p| p.user_id as f64))
         });
 
         fields.add_field_method_get("DisplayName", |_, this| {
@@ -845,6 +870,7 @@ impl UserData for Instance {
             let attr_value = match value {
                 Value::Nil => AttributeValue::Nil,
                 Value::Boolean(b) => AttributeValue::Bool(b),
+                Value::Integer(n) => AttributeValue::Number(n as f64),
                 Value::Number(n) => AttributeValue::Number(n),
                 Value::String(s) => AttributeValue::String(s.to_str()?.to_string()),
                 Value::UserData(ud) => {
@@ -926,7 +952,16 @@ impl UserData for Instance {
 
         methods.add_method(
             "MoveTo",
-            |_, _this, (_position, _part): (Vector3, Option<Instance>)| Ok(()),
+            |_, this, (position, _part): (Vector3, Option<Instance>)| {
+                let mut data = this.data.lock().unwrap();
+                if let Some(humanoid) = &mut data.humanoid_data {
+                    println!("[DEBUG] Humanoid:MoveTo({}, {}, {})", position.x, position.y, position.z);
+                    humanoid.move_to_target = Some(position);
+                } else {
+                    println!("[DEBUG] MoveTo called but no humanoid_data!");
+                }
+                Ok(())
+            },
         );
 
         methods.add_method("GetPrimaryPartCFrame", |_, this, ()| {

@@ -1,10 +1,9 @@
-use mlua::{Lua, MultiValue, Table, UserData, UserDataFields, UserDataMethods, Value};
+use mlua::{Lua, MultiValue, UserData, UserDataFields, UserDataMethods, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::game::lua::events::{create_signal, RBXScriptSignal};
 use crate::game::lua::instance::Instance;
-use crate::game::lua::types::Vector3;
 
 /// Represents an input from an agent
 #[derive(Clone, Debug)]

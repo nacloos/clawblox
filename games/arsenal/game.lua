@@ -49,7 +49,25 @@ local gameState = "waiting" -- waiting, countdown, active, victory
 local matchStartTime = 0
 local winner = nil
 local projectiles = {}
-local playerData = {} -- {lastFireTime, lastMeleeTime, lastDamageTime, lastKiller, respawnTime}
+local playerData = {} -- keyed by UserId: {lastFireTime, lastMeleeTime, lastDamageTime, lastKiller, respawnTime}
+
+-- Helper to get playerData by player object
+local function getPlayerData(player)
+    local uid = player.UserId
+    local data = playerData[uid]
+    print("[DEBUG] getPlayerData: UserId=", uid, "found=", data ~= nil)
+    return data
+end
+
+local function setPlayerData(player, data)
+    local uid = player.UserId
+    print("[DEBUG] setPlayerData called, UserId:", uid, "type:", type(uid))
+    playerData[uid] = data
+    print("[DEBUG] setPlayerData done, playerData has", #playerData, "entries")
+    for k, v in pairs(playerData) do
+        print("[DEBUG]   stored key:", k, "type:", type(k))
+    end
+end
 
 --------------------------------------------------------------------------------
 -- ARENA CREATION
@@ -202,12 +220,13 @@ local function setWeapon(player, weaponIndex)
 end
 
 local function initializePlayer(player)
+    print("[DEBUG] initializePlayer:", player.Name, "UserId:", player.UserId)
     setWeapon(player, 1)
     player:SetAttribute("Kills", 0)
     player:SetAttribute("Deaths", 0)
     player:SetAttribute("MeleeKills", 0)
 
-    playerData[player] = {
+    setPlayerData(player, {
         lastFireTime = 0,
         lastMeleeTime = 0,
         lastDamageTime = 0,
@@ -215,7 +234,7 @@ local function initializePlayer(player)
         respawnTime = 0,
         burstRemaining = 0,
         spinUpTime = 0,
-    }
+    })
 end
 
 local function getHumanoid(player)
@@ -262,7 +281,7 @@ local function respawnPlayer(player)
     if character then
         local hrp = character:FindFirstChild("HumanoidRootPart")
         if hrp then
-            local killer = playerData[player] and playerData[player].lastKiller
+            local killer = getPlayerData(player) and getPlayerData(player).lastKiller
             local killerPos = Vector3.new(0, 0, 0)
             if killer then
                 local kPos = getCharacterPosition(killer)
@@ -276,9 +295,9 @@ local function respawnPlayer(player)
         end
     end
 
-    if playerData[player] then
-        playerData[player].respawnTime = 0
-        playerData[player].lastKiller = nil
+    if getPlayerData(player) then
+        getPlayerData(player).respawnTime = 0
+        getPlayerData(player).lastKiller = nil
     end
 end
 
@@ -308,8 +327,8 @@ local function dealDamage(attacker, victim, damage, isMelee)
     end
 
     humanoid:TakeDamage(damage)
-    playerData[victim].lastDamageTime = tick()
-    playerData[victim].lastKiller = attacker
+    getPlayerData(victim).lastDamageTime = tick()
+    getPlayerData(victim).lastKiller = attacker
 
     -- Flash the victim red briefly
     local character = victim.Character
@@ -363,7 +382,7 @@ local function onPlayerKilled(killer, victim, wasMelee)
     end
 
     -- Set respawn timer
-    playerData[victim].respawnTime = tick() + RESPAWN_TIME
+    getPlayerData(victim).respawnTime = tick() + RESPAWN_TIME
 end
 
 --------------------------------------------------------------------------------
@@ -501,7 +520,7 @@ end
 local function tryFire(player)
     if gameState ~= "active" then return end
 
-    local data = playerData[player]
+    local data = getPlayerData(player)
     if not data then return end
 
     local weaponIndex = player:GetAttribute("CurrentWeapon") or 1
@@ -548,7 +567,7 @@ end
 local function tryMelee(player)
     if gameState ~= "active" then return end
 
-    local data = playerData[player]
+    local data = getPlayerData(player)
     if not data then return end
 
     local now = tick()
@@ -686,7 +705,7 @@ local function updateHealthRegen(dt)
     local now = tick()
 
     for _, player in ipairs(Players:GetPlayers()) do
-        local data = playerData[player]
+        local data = getPlayerData(player)
         if data then
             local humanoid = getHumanoid(player)
             if humanoid and humanoid.Health > 0 and humanoid.Health < 100 then
@@ -702,7 +721,7 @@ local function updateRespawns()
     local now = tick()
 
     for _, player in ipairs(Players:GetPlayers()) do
-        local data = playerData[player]
+        local data = getPlayerData(player)
         if data and data.respawnTime > 0 then
             if now >= data.respawnTime then
                 respawnPlayer(player)
@@ -713,7 +732,7 @@ end
 
 local function updateBursts(dt)
     for _, player in ipairs(Players:GetPlayers()) do
-        local data = playerData[player]
+        local data = getPlayerData(player)
         if data and data.burstRemaining > 0 then
             local weapon = WEAPONS[player:GetAttribute("CurrentWeapon")]
             if weapon and weapon.type == "burst" then
@@ -812,7 +831,7 @@ end
 local function updateMatch(dt)
     if gameState == "waiting" then
         local playerCount = #Players:GetPlayers()
-        if playerCount >= 2 then
+        if playerCount >= 1 then
             startCountdown()
         end
 
@@ -849,28 +868,48 @@ end
 createArena()
 
 -- Initialize existing players
-for _, player in ipairs(Players:GetPlayers()) do
+local existingPlayers = Players:GetPlayers()
+print("[DEBUG] Existing players at script load:", #existingPlayers)
+for _, player in ipairs(existingPlayers) do
+    print("[DEBUG] Initializing existing player:", player.Name)
     initializePlayer(player)
 end
 
 -- Handle new players
+print("[DEBUG] Connecting PlayerAdded handler")
 Players.PlayerAdded:Connect(function(player)
+    print("[DEBUG] PlayerAdded fired for:", player.Name, "UserId:", player.UserId)
     initializePlayer(player)
     if gameState == "active" then
         respawnPlayer(player)
     end
 end)
+print("[DEBUG] PlayerAdded handler connected")
 
 Players.PlayerRemoving:Connect(function(player)
-    playerData[player] = nil
+    playerData[player.UserId] = nil
 end)
 
 -- Handle agent inputs (AI players via HTTP API)
 local AgentInputService = game:GetService("AgentInputService")
+print("[DEBUG] AgentInputService:", AgentInputService)
 if AgentInputService then
+    print("[DEBUG] Connecting to InputReceived")
     AgentInputService.InputReceived:Connect(function(player, inputType, data)
-        if gameState ~= "active" then return end
-        if not playerData[player] then return end
+        print("[DEBUG] InputReceived:", player, inputType, data)
+        print("[DEBUG] player.UserId:", player.UserId)
+        print("[DEBUG] playerData keys:")
+        for k, v in pairs(playerData) do
+            print("[DEBUG]   key:", k)
+        end
+        if gameState ~= "active" then
+            print("[DEBUG] Game not active, ignoring input")
+            return
+        end
+        if not getPlayerData(player) then
+            print("[DEBUG] Player not in playerData, UserId:", player.UserId)
+            return
+        end
 
         if inputType == "Fire" then
             -- Set aim direction from data.direction
@@ -883,9 +922,13 @@ if AgentInputService then
         elseif inputType == "MoveTo" then
             -- Move character to position
             local humanoid = getHumanoid(player)
+            print("[DEBUG] MoveTo: humanoid=", humanoid, "data=", data, "data.position=", data and data.position)
             if humanoid and data and data.position then
                 local pos = data.position
+                print("[DEBUG] Calling humanoid:MoveTo", pos[1], pos[2], pos[3])
                 humanoid:MoveTo(Vector3.new(pos[1], pos[2], pos[3]))
+            else
+                print("[DEBUG] MoveTo FAILED: humanoid=", humanoid ~= nil, "data=", data ~= nil, "position=", data and data.position ~= nil)
             end
 
         elseif inputType == "Melee" then
