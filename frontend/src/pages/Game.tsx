@@ -31,7 +31,7 @@ export default function Game() {
   return (
     <div className="h-full flex flex-col bg-background">
       {/* Header */}
-      <div className="flex items-center gap-4 px-4 py-3 border-b border-border bg-card">
+      <div className="flex items-center gap-4 px-4 py-3 border-b border-border bg-card pr-16">
         <Link to="/">
           <Button variant="ghost" size="icon" className="h-8 w-8">
             <ArrowLeft className="h-4 w-4" />
@@ -43,16 +43,6 @@ export default function Game() {
             <span className="text-muted-foreground flex items-center gap-1.5">
               <Users className="h-4 w-4" />
               {gameState.players.length}
-            </span>
-            <span className="text-muted-foreground">Tick {gameState.tick}</span>
-            <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-              gameState.game_status === 'playing'
-                ? 'bg-green-500/20 text-green-400'
-                : gameState.game_status === 'waiting'
-                ? 'bg-yellow-500/20 text-yellow-400'
-                : 'bg-muted text-muted-foreground'
-            }`}>
-              {gameState.game_status}
             </span>
           </div>
         )}
