@@ -1,8 +1,6 @@
-pub mod actions;
 pub mod instance;
 pub mod lua;
-pub mod shooter;
-pub mod systems;
+pub mod physics;
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -10,8 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-use instance::{GameInstance, GameStatus, PlayerObservation};
-use actions::GameAction;
+use instance::{GameAction, GameInstance, GameStatus, PlayerObservation};
 
 pub type GameManagerHandle = Arc<RwLock<GameManagerState>>;
 

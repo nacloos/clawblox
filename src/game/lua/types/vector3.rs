@@ -59,14 +59,6 @@ impl Vector3 {
             && (self.z - other.z).abs() < epsilon
     }
 
-    pub fn to_bevy(&self) -> bevy::prelude::Vec3 {
-        bevy::prelude::Vec3::new(self.x, self.y, self.z)
-    }
-
-    pub fn from_bevy(v: bevy::prelude::Vec3) -> Self {
-        Self::new(v.x, v.y, v.z)
-    }
-
     pub fn to_array(&self) -> [f32; 3] {
         [self.x, self.y, self.z]
     }

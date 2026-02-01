@@ -10,6 +10,8 @@ export interface SpectatorEntity {
   id: number
   type: string
   position: [number, number, number]
+  size?: [number, number, number]
+  color?: [number, number, number]
   health?: number
   pickup_type?: string
 }

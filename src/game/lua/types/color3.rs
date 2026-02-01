@@ -91,15 +91,6 @@ impl Color3 {
             self.b + (goal.b - self.b) * alpha,
         )
     }
-
-    pub fn to_bevy(&self) -> bevy::prelude::Color {
-        bevy::prelude::Color::srgb(self.r, self.g, self.b)
-    }
-
-    pub fn from_bevy(color: bevy::prelude::Color) -> Self {
-        let srgba = color.to_srgba();
-        Self::new(srgba.red, srgba.green, srgba.blue)
-    }
 }
 
 impl FromLua for Color3 {

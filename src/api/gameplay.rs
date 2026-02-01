@@ -8,7 +8,7 @@ use serde::Serialize;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::game::{self, actions::GameAction, instance::{PlayerObservation, SpectatorObservation}, GameManagerHandle};
+use crate::game::{self, instance::{GameAction, PlayerObservation, SpectatorObservation}, GameManagerHandle};
 
 use super::agents::extract_api_key;
 
