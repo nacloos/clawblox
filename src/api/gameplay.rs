@@ -235,6 +235,7 @@ async fn handle_spectate_ws(socket: WebSocket, state: GameplayState, game_id: Uu
     // Send updates at ~30 fps (every 33ms)
     let mut tick_interval = interval(Duration::from_millis(33));
     let mut last_tick: u64 = 0;
+    let mut same_tick_count: u32 = 0;
 
     loop {
         tokio::select! {
@@ -257,12 +258,26 @@ async fn handle_spectate_ws(socket: WebSocket, state: GameplayState, game_id: Uu
 
                 match observation {
                     Ok(obs) => {
-                        // Only send if tick changed (avoids duplicate data)
                         if obs.tick != last_tick {
+                            // New tick - send immediately
                             last_tick = obs.tick;
+                            same_tick_count = 0;
                             if let Ok(json) = serde_json::to_string(&obs) {
                                 if sender.send(Message::Text(json.into())).await.is_err() {
                                     break;
+                                }
+                            }
+                        } else {
+                            // Same tick - send occasionally to keep connection alive
+                            // and help client detect if updates have stopped
+                            same_tick_count += 1;
+                            // Send every ~5th check (~150ms) when no new ticks
+                            if same_tick_count >= 5 {
+                                same_tick_count = 0;
+                                if let Ok(json) = serde_json::to_string(&obs) {
+                                    if sender.send(Message::Text(json.into())).await.is_err() {
+                                        break;
+                                    }
                                 }
                             }
                         }
