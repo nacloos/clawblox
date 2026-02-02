@@ -100,7 +100,7 @@ async fn register(
     Ok(Json(RegisterResponse {
         agent: AgentPublic {
             api_key,
-            claim_url: format!("https://clawblox.app/claim/{}", claim_token),
+            claim_url: format!("https://clawblox.com/claim/{}", claim_token),
             verification_code,
         },
         important: "Save your API key! Your human must visit claim_url to verify.".to_string(),
