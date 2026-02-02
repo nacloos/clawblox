@@ -85,12 +85,12 @@ def leave_all_games(headers: dict):
     print("Left all games")
 
 
-def observe(game_id: str, headers: dict) -> dict | None:
+def observe(game_id: str, headers: dict) -> dict:
     """Get current game observation."""
     resp = requests.get(f"{API_BASE}/games/{game_id}/observe", headers=headers)
-    if resp.status_code == 200:
-        return resp.json()
-    return None
+    if resp.status_code != 200:
+        raise RuntimeError(f"Observe failed: {resp.status_code} {resp.text}")
+    return resp.json()
 
 
 def move_to(game_id: str, position: list, headers: dict):
@@ -100,17 +100,21 @@ def move_to(game_id: str, position: list, headers: dict):
         headers=headers,
         json={"type": "MoveTo", "data": {"position": position}},
     )
-    return resp.status_code == 200
+    if resp.status_code != 200:
+        raise RuntimeError(f"MoveTo failed: {resp.status_code} {resp.text}")
+    return True
 
 
-def shoot(game_id: str, direction: list, headers: dict):
-    """Send Fire input."""
+def shoot(game_id: str, target: list, headers: dict):
+    """Send Fire input with target position."""
     resp = requests.post(
         f"{API_BASE}/games/{game_id}/input",
         headers=headers,
-        json={"type": "Fire", "data": {"direction": direction}},
+        json={"type": "Fire", "data": {"target": target}},
     )
-    return resp.status_code == 200
+    if resp.status_code != 200:
+        raise RuntimeError(f"Fire failed: {resp.status_code} {resp.text}")
+    return True
 
 
 def normalize(v: list) -> list:
@@ -142,7 +146,7 @@ def random_position(center: list = None, radius: float = 20.0) -> list:
     return [x, y, z]
 
 
-def run_agent(api_key: str, move_interval: float = 2.0):
+def run_agent(api_key: str):
     """Main agent loop."""
     headers = {"Authorization": f"Bearer {api_key}"}
 
@@ -173,16 +177,22 @@ def run_agent(api_key: str, move_interval: float = 2.0):
     if not join_game(game_id, headers):
         return
 
-    last_move_time = 0
     last_shoot_time = 0
     shoot_interval = 0.2  # Shoot every 200ms when enemy visible
+    current_target = None
+    target_reached_threshold = 1.5  # Consider target reached within this distance
+    last_position = None
+    stuck_start_time = None
+    stuck_threshold = 0.5  # Consider stuck if moved less than this
+    stuck_timeout = 2.0  # Pick new target if stuck for this long
 
     try:
         print("\nStarting agent loop (Ctrl+C to stop)...\n")
         while True:
-            obs = observe(game_id, headers)
-            if obs is None:
-                print("Failed to get observation, retrying...")
+            try:
+                obs = observe(game_id, headers)
+            except RuntimeError as e:
+                print(f"\nObservation error: {e}, retrying...")
                 time.sleep(1)
                 continue
 
@@ -203,9 +213,10 @@ def run_agent(api_key: str, move_interval: float = 2.0):
             kills = attrs.get("Kills", 0)
             deaths = attrs.get("Deaths", 0)
             enemies = len(other_players)
+            target_dist = distance(position, current_target) if current_target else 0
             print(
                 f"Tick {tick:5d} | Pos: ({position[0]:6.1f}, {position[1]:5.1f}, {position[2]:6.1f}) | "
-                f"HP: {health:3d} | {weapon:12s} | K/D: {kills}/{deaths} | Enemies: {enemies}",
+                f"HP: {health:3d} | {weapon:12s} | K/D: {kills}/{deaths} | Enemies: {enemies} | Target: {target_dist:.1f}",
                 end="\r",
             )
 
@@ -224,30 +235,51 @@ def run_agent(api_key: str, move_interval: float = 2.0):
             # Shoot at nearest enemy
             if nearest_enemy and now - last_shoot_time >= shoot_interval:
                 enemy_pos = nearest_enemy.get("position", [0, 0, 0])
-                aim_dir = direction_to(position, enemy_pos)
-                shoot(game_id, aim_dir, headers)
+                shoot(game_id, enemy_pos, headers)
                 last_shoot_time = now
 
-                # Move toward enemy if far
-                if nearest_dist > 15:
-                    move_to(game_id, enemy_pos, headers)
-                    last_move_time = now
+                # Chase enemy if far
+                if nearest_dist > 10:
+                    current_target = enemy_pos
+                    move_to(game_id, current_target, headers)
 
             # Shoot randomly when no enemies (less frequently)
             elif now - last_shoot_time >= 1.0:
-                random_dir = normalize([
-                    random.uniform(-1, 1),
-                    random.uniform(-0.2, 0.3),
-                    random.uniform(-1, 1),
-                ])
-                shoot(game_id, random_dir, headers)
+                # Pick a random target position
+                random_target = [
+                    position[0] + random.uniform(-30, 30),
+                    position[1] + random.uniform(-2, 2),
+                    position[2] + random.uniform(-30, 30),
+                ]
+                shoot(game_id, random_target, headers)
                 last_shoot_time = now
 
-            # Move to random target periodically
-            if now - last_move_time >= move_interval:
-                current_target = random_position(center=position, radius=15.0)
+            # Check if stuck (not making progress toward target)
+            now = time.time()
+            if last_position is not None and current_target is not None:
+                moved = distance(position, last_position)
+                if moved < stuck_threshold * 0.1:  # Barely moved this tick
+                    if stuck_start_time is None:
+                        stuck_start_time = now
+                    elif now - stuck_start_time > stuck_timeout:
+                        print(f"\n[STUCK] No progress for {stuck_timeout}s, picking new target")
+                        current_target = None
+                        stuck_start_time = None
+                else:
+                    stuck_start_time = None  # Reset if making progress
+            last_position = position[:]
+
+            # Check if we need a new target (no target, reached it, or stuck)
+            need_new_target = (
+                current_target is None or
+                distance(position, current_target) < target_reached_threshold
+            )
+
+            if need_new_target and not nearest_enemy:
+                # Pick a new random target
+                current_target = random_position(center=[0, position[1], 0], radius=25.0)
                 move_to(game_id, current_target, headers)
-                last_move_time = now
+                stuck_start_time = None
 
             # 10 Hz loop
             time.sleep(0.1)
@@ -267,12 +299,6 @@ def main():
     parser.add_argument(
         "--leave", action="store_true", help="Leave all games and exit"
     )
-    parser.add_argument(
-        "--interval",
-        type=float,
-        default=2.0,
-        help="Seconds between random moves (default: 2.0)",
-    )
     args = parser.parse_args()
 
     api_key = args.api_key or os.getenv("CLAWBLOX_API_KEY")
@@ -291,7 +317,7 @@ def main():
         leave_all_games(headers)
         return
 
-    run_agent(api_key, move_interval=args.interval)
+    run_agent(api_key)
 
 
 if __name__ == "__main__":

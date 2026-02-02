@@ -1,12 +1,18 @@
 use axum::{
-    extract::{Path, State},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Path, State,
+    },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::time::Duration;
+use tokio::time::interval;
 use uuid::Uuid;
 
 use crate::db::models::Game;
@@ -30,6 +36,7 @@ pub fn routes(pool: PgPool, game_manager: GameManagerHandle) -> Router {
     Router::new()
         .route("/games/{id}/observe", get(observe))
         .route("/games/{id}/spectate", get(spectate))
+        .route("/games/{id}/spectate/ws", get(spectate_ws))
         .route("/games/{id}/action", post(action))
         .route("/games/{id}/skill", get(get_skill))
         .route("/games/{id}/input", post(send_input))
@@ -188,4 +195,88 @@ async fn send_input(
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     Ok(Json(observation))
+}
+
+/// WebSocket endpoint for spectating game state in real-time
+async fn spectate_ws(
+    State(state): State<GameplayState>,
+    Path(game_id): Path<Uuid>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_spectate_ws(socket, state, game_id))
+}
+
+/// Handle the WebSocket connection for spectating
+async fn handle_spectate_ws(socket: WebSocket, state: GameplayState, game_id: Uuid) {
+    let (mut sender, mut receiver) = socket.split();
+
+    // First verify game exists in database and get script
+    let db_game: Option<(Uuid, Option<String>)> =
+        sqlx::query_as("SELECT id, script_code FROM games WHERE id = $1")
+            .bind(game_id)
+            .fetch_optional(&state.pool)
+            .await
+            .ok()
+            .flatten();
+
+    let Some(db_game) = db_game else {
+        let _ = sender
+            .send(Message::Text(
+                r#"{"error":"Game not found"}"#.to_string().into(),
+            ))
+            .await;
+        return;
+    };
+
+    // Auto-start the game instance if not running
+    if !game::is_instance_running(&state.game_manager, game_id) {
+        game::get_or_create_instance_with_script(&state.game_manager, game_id, db_game.1.as_deref());
+    }
+
+    // Send updates at ~30 fps (every 33ms)
+    let mut tick_interval = interval(Duration::from_millis(33));
+    let mut last_tick: u64 = 0;
+
+    loop {
+        tokio::select! {
+            // Check for incoming messages (ping/pong, close)
+            msg = receiver.next() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        if sender.send(Message::Pong(data)).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Send game state on tick
+            _ = tick_interval.tick() => {
+                let observation = game::get_spectator_observation(&state.game_manager, game_id);
+
+                match observation {
+                    Ok(obs) => {
+                        // Only send if tick changed (avoids duplicate data)
+                        if obs.tick != last_tick {
+                            last_tick = obs.tick;
+                            if let Ok(json) = serde_json::to_string(&obs) {
+                                if sender.send(Message::Text(json.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // Game instance no longer exists
+                        let _ = sender
+                            .send(Message::Text(r#"{"error":"Game ended"}"#.to_string().into()))
+                            .await;
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }

@@ -47,6 +47,26 @@ impl PlayersService {
 
     pub fn remove_player(&self, user_id: u64) {
         let mut data = self.data.lock().unwrap();
+
+        // Find and destroy the player's character before removing them
+        for player in &data.players {
+            let pdata = player.data.lock().unwrap();
+            if let Some(pd) = &pdata.player_data {
+                if pd.user_id == user_id {
+                    // Destroy the character by removing it from workspace
+                    if let Some(char_weak) = &pd.character {
+                        if let Some(char_ref) = char_weak.upgrade() {
+                            let character = Instance::from_ref(char_ref);
+                            drop(pdata); // Release lock before modifying
+                            character.set_parent(None);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Remove the player from the list
         data.players.retain(|p| {
             let pdata = p.data.lock().unwrap();
             pdata

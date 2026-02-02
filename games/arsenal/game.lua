@@ -80,7 +80,7 @@ local function createArena()
     floor.Size = Vector3.new(ARENA_SIZE, 2, ARENA_SIZE)
     floor.Position = Vector3.new(0, -1, 0)
     floor.Anchored = true
-    floor.Color = Color3.fromRGB(60, 60, 60)
+    floor.Color = Color3.fromRGB(180, 180, 185)
     floor.Parent = Workspace
 
     -- Walls (invisible barriers)
@@ -101,43 +101,14 @@ local function createArena()
         wall.Parent = Workspace
     end
 
-    -- Center platform
+    -- Center platform (low, just above ground)
     local centerPlatform = Instance.new("Part")
     centerPlatform.Name = "CenterPlatform"
     centerPlatform.Size = Vector3.new(16, 1, 16)
-    centerPlatform.Position = Vector3.new(0, 5, 0)
+    centerPlatform.Position = Vector3.new(0, 0.5, 0)
     centerPlatform.Anchored = true
-    centerPlatform.Color = Color3.fromRGB(80, 80, 100)
+    centerPlatform.Color = Color3.fromRGB(100, 140, 180)
     centerPlatform.Parent = Workspace
-
-    -- Center platform support
-    local support = Instance.new("Part")
-    support.Name = "CenterSupport"
-    support.Size = Vector3.new(8, 5, 8)
-    support.Position = Vector3.new(0, 2.5, 0)
-    support.Anchored = true
-    support.Color = Color3.fromRGB(70, 70, 90)
-    support.Parent = Workspace
-
-    -- Stairs to center (4 sides)
-    local stairDirs = {
-        {Vector3.new(12, 0, 0), Vector3.new(8, 1, 4)},
-        {Vector3.new(-12, 0, 0), Vector3.new(8, 1, 4)},
-        {Vector3.new(0, 0, 12), Vector3.new(4, 1, 8)},
-        {Vector3.new(0, 0, -12), Vector3.new(4, 1, 8)},
-    }
-    for i, data in ipairs(stairDirs) do
-        for step = 1, 5 do
-            local stair = Instance.new("Part")
-            stair.Name = "Stair_" .. i .. "_" .. step
-            local offset = data[1].Unit * (step * 1.5)
-            stair.Position = Vector3.new(offset.X, step, offset.Z)
-            stair.Size = data[2]
-            stair.Anchored = true
-            stair.Color = Color3.fromRGB(90, 90, 90)
-            stair.Parent = Workspace
-        end
-    end
 
     -- Corner platforms
     local cornerPositions = {
@@ -152,7 +123,7 @@ local function createArena()
         platform.Size = Vector3.new(10, 1, 10)
         platform.Position = pos
         platform.Anchored = true
-        platform.Color = Color3.fromRGB(100, 80, 80)
+        platform.Color = Color3.fromRGB(180, 120, 120)
         platform.Parent = Workspace
 
         -- Platform support
@@ -161,7 +132,7 @@ local function createArena()
         pSupport.Size = Vector3.new(4, 4, 4)
         pSupport.Position = pos - Vector3.new(0, 2.5, 0)
         pSupport.Anchored = true
-        pSupport.Color = Color3.fromRGB(80, 60, 60)
+        pSupport.Color = Color3.fromRGB(150, 100, 100)
         pSupport.Parent = Workspace
     end
 
@@ -182,20 +153,16 @@ local function createArena()
         cover.Size = Vector3.new(6, 5, 6)
         cover.Position = pos
         cover.Anchored = true
-        cover.Color = Color3.fromRGB(120, 120, 120)
+        cover.Color = Color3.fromRGB(180, 180, 190)
         cover.Parent = Workspace
     end
 
-    -- Bridges connecting platforms
+    -- Bridges along edges (centered, touching side cover blocks)
     local bridges = {
-        {Vector3.new(-14, 4, -28), Vector3.new(18, 0.5, 3)},
-        {Vector3.new(14, 4, -28), Vector3.new(18, 0.5, 3)},
-        {Vector3.new(-14, 4, 28), Vector3.new(18, 0.5, 3)},
-        {Vector3.new(14, 4, 28), Vector3.new(18, 0.5, 3)},
-        {Vector3.new(-28, 4, -14), Vector3.new(3, 0.5, 18)},
-        {Vector3.new(-28, 4, 14), Vector3.new(3, 0.5, 18)},
-        {Vector3.new(28, 4, -14), Vector3.new(3, 0.5, 18)},
-        {Vector3.new(28, 4, 14), Vector3.new(3, 0.5, 18)},
+        {Vector3.new(0, 4, -28), Vector3.new(46, 0.5, 3)},   -- back edge
+        {Vector3.new(0, 4, 28), Vector3.new(46, 0.5, 3)},    -- front edge
+        {Vector3.new(-28, 4, 0), Vector3.new(3, 0.5, 46)},   -- left edge
+        {Vector3.new(28, 4, 0), Vector3.new(3, 0.5, 46)},    -- right edge
     }
     for i, data in ipairs(bridges) do
         local bridge = Instance.new("Part")
@@ -203,7 +170,7 @@ local function createArena()
         bridge.Position = data[1]
         bridge.Size = data[2]
         bridge.Anchored = true
-        bridge.Color = Color3.fromRGB(90, 90, 110)
+        bridge.Color = Color3.fromRGB(130, 150, 180)
         bridge.Parent = Workspace
     end
 
@@ -500,7 +467,7 @@ local function spawnProjectile(player, weapon, direction)
     local projectile = Instance.new("Part")
     projectile.Name = "Projectile"
     projectile.Size = Vector3.new(0.5, 0.5, 2)
-    projectile.Position = origin
+    projectile.CFrame = CFrame.new(origin, origin + direction)  -- Set position and rotation
     projectile.Anchored = false
     projectile.CanCollide = true
     projectile.Color = weapon.name == "Rocket Launcher" and Color3.fromRGB(255, 100, 50) or Color3.fromRGB(139, 90, 43)
@@ -912,10 +879,15 @@ if AgentInputService then
         end
 
         if inputType == "Fire" then
-            -- Set aim direction from data.direction
-            if data and data.direction then
-                local dir = data.direction
-                player:SetAttribute("AimDirection", Vector3.new(dir[1], dir[2], dir[3]))
+            -- Compute aim direction from target position
+            if data and data.target then
+                local target = data.target
+                local targetPos = Vector3.new(target[1], target[2], target[3])
+                local playerPos = getCharacterPosition(player)
+                if playerPos then
+                    local dir = (targetPos - playerPos).Unit
+                    player:SetAttribute("AimDirection", dir)
+                end
             end
             tryFire(player)
 

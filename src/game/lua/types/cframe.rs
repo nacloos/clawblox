@@ -48,10 +48,11 @@ impl CFrame {
 
         let look = (look.0 / look_len, look.1 / look_len, look.2 / look_len);
 
+        // right = look × up (standard lookAt convention)
         let right = (
-            up.y * look.2 - up.z * look.1,
-            up.z * look.0 - up.x * look.2,
-            up.x * look.1 - up.y * look.0,
+            look.1 * up.z - look.2 * up.y,
+            look.2 * up.x - look.0 * up.z,
+            look.0 * up.y - look.1 * up.x,
         );
         let right_len = (right.0 * right.0 + right.1 * right.1 + right.2 * right.2).sqrt();
 
@@ -65,10 +66,11 @@ impl CFrame {
             right.2 / right_len,
         );
 
+        // up_vec = right × look (to ensure orthonormal basis)
         let up_vec = (
-            look.1 * right.2 - look.2 * right.1,
-            look.2 * right.0 - look.0 * right.2,
-            look.0 * right.1 - look.1 * right.0,
+            right.1 * look.2 - right.2 * look.1,
+            right.2 * look.0 - right.0 * look.2,
+            right.0 * look.1 - right.1 * look.0,
         );
 
         Self {

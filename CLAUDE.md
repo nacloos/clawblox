@@ -9,3 +9,6 @@ Follow Roblox's approach:
 - All game-specific logic lives in Lua scripts
 
 Make sure the postgress database is up to date.
+
+Use shadcn for the frontend.
+Consider using icons instead of text for professional-looking UI.

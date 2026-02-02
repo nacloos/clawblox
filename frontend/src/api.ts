@@ -10,9 +10,11 @@ export interface SpectatorEntity {
   id: number
   type: string
   position: [number, number, number]
+  rotation?: [[number, number, number], [number, number, number], [number, number, number]]
   size?: [number, number, number]
   color?: [number, number, number]
   material?: string
+  shape?: 'Block' | 'Ball' | 'Cylinder' | 'Wedge'
   health?: number
   pickup_type?: string
 }
@@ -30,6 +32,49 @@ export async function fetchGameState(gameId: string): Promise<SpectatorObservati
     throw new Error(`Failed to fetch game state: ${response.statusText}`)
   }
   return response.json()
+}
+
+export interface WebSocketMessage {
+  type: 'state' | 'error'
+  data?: SpectatorObservation
+  error?: string
+}
+
+export function createGameWebSocket(
+  gameId: string,
+  onState: (state: SpectatorObservation) => void,
+  onError: (error: string) => void,
+  onClose: () => void
+): { close: () => void } {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const ws = new WebSocket(`${protocol}//${window.location.host}/api/v1/games/${gameId}/spectate/ws`)
+
+  ws.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data)
+      if (data.error) {
+        onError(data.error)
+      } else {
+        onState(data as SpectatorObservation)
+      }
+    } catch {
+      onError('Failed to parse game state')
+    }
+  }
+
+  ws.onerror = () => {
+    onError('WebSocket connection error')
+  }
+
+  ws.onclose = () => {
+    onClose()
+  }
+
+  return {
+    close: () => {
+      ws.close()
+    }
+  }
 }
 
 export interface GameListItem {

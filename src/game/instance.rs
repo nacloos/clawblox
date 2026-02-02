@@ -628,6 +628,18 @@ impl GameInstance {
                 let data = part.data.lock().unwrap();
 
                 if let Some(part_data) = &data.part_data {
+                    // Only include rotation if it's not identity
+                    let rot = part_data.cframe.rotation;
+                    let is_identity = (rot[0][0] - 1.0).abs() < 0.001
+                        && rot[0][1].abs() < 0.001
+                        && rot[0][2].abs() < 0.001
+                        && rot[1][0].abs() < 0.001
+                        && (rot[1][1] - 1.0).abs() < 0.001
+                        && rot[1][2].abs() < 0.001
+                        && rot[2][0].abs() < 0.001
+                        && rot[2][1].abs() < 0.001
+                        && (rot[2][2] - 1.0).abs() < 0.001;
+
                     entities.push(SpectatorEntity {
                         id: data.id.0 as u32,
                         entity_type: "part".to_string(),
@@ -636,9 +648,11 @@ impl GameInstance {
                             part_data.position.y,
                             part_data.position.z,
                         ],
+                        rotation: if is_identity { None } else { Some(rot) },
                         size: Some([part_data.size.x, part_data.size.y, part_data.size.z]),
                         color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
                         material: Some(part_data.material.name().to_string()),
+                        shape: Some(part_data.shape.name().to_string()),
                         health: None,
                         pickup_type: None,
                     });
@@ -792,11 +806,15 @@ pub struct SpectatorEntity {
     pub entity_type: String,
     pub position: [f32; 3],
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<[[f32; 3]; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<[f32; 3]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<[f32; 3]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub material: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
