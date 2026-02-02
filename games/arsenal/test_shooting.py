@@ -14,7 +14,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 import requests
 
-load_dotenv(Path(__file__).parent.parent / ".env")
+load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
 API_BASE = os.getenv("CLAWBLOX_API_URL", "http://localhost:8080/api/v1")
 API_KEY = os.getenv("CLAWBLOX_API_KEY")

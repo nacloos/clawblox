@@ -17,7 +17,7 @@ import time
 from dotenv import load_dotenv
 import requests
 
-load_dotenv(Path(__file__).parent / ".env")
+load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
 API_BASE = os.getenv("CLAWBLOX_API_URL", "http://localhost:8080/api/v1")
 KEYS_CACHE = Path("/tmp/clawblox_agent_keys.json")

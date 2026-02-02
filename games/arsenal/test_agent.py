@@ -18,8 +18,8 @@ from dataclasses import dataclass, field
 
 import requests
 
-# Load .env file if present
-env_path = Path(__file__).parent.parent / ".env"
+# Load .env file if present (project root is ../../)
+env_path = Path(__file__).parent.parent.parent / ".env"
 if env_path.exists():
     for line in env_path.read_text().splitlines():
         if line and not line.startswith("#") and "=" in line:

@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+"""
+Test agent for Escape Tsunami For Brainrots.
+Collects brainrots, deposits them, and buys speed upgrades.
+"""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import random
+import sys
+import time
+
+import requests
+
+# Load .env file if present (project root is ../../)
+env_path = Path(__file__).parent.parent.parent / ".env"
+if env_path.exists():
+    for line in env_path.read_text().splitlines():
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip())
+
+API_BASE = os.getenv("CLAWBLOX_API_URL", "http://localhost:8080/api/v1")
+GAME_ID = "a0000000-0000-0000-0000-000000000006"  # Tsunami Brainrot
+
+# Map constants
+SAFE_ZONE_END = 50
+COLLECTION_ZONE_END = 200
+MAP_WIDTH = 80
+COLLECTION_RANGE = 5
+
+# Speed upgrade costs
+SPEED_COSTS = [0, 100, 300, 700, 1500, 3000, 6000, 12000, 25000, 50000]
+
+
+def distance_xz(a: list, b: list) -> float:
+    return ((a[0] - b[0]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
+
+
+def find_nearest_brainrot(pos: list, entities: list) -> dict | None:
+    """Find the nearest brainrot from world entities"""
+    nearest = None
+    nearest_dist = float('inf')
+
+    for entity in entities:
+        if entity.get("name") == "Brainrot":
+            dist = distance_xz(pos, entity["position"])
+            if dist < nearest_dist:
+                nearest_dist = dist
+                nearest = entity
+
+    return nearest
+
+
+def run_agent(api_key: str):
+    """Run the test agent"""
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    # Leave any existing games first
+    try:
+        resp = requests.get(f"{API_BASE}/games", headers=headers, timeout=5)
+        for g in resp.json().get("games", []):
+            requests.post(f"{API_BASE}/games/{g['id']}/leave", headers=headers, timeout=5)
+    except:
+        pass
+
+    # Join the tsunami game
+    resp = requests.post(f"{API_BASE}/games/{GAME_ID}/join", headers=headers, timeout=5)
+    if resp.status_code != 200:
+        print(f"Failed to join: {resp.text}")
+        return
+    print("Joined game!")
+
+    time.sleep(0.5)
+
+    # Agent state
+    state = "collect"  # collect, return, deposit, upgrade
+    target_brainrot = None
+    last_status_time = 0
+
+    try:
+        while True:
+            # Observe
+            resp = requests.get(f"{API_BASE}/games/{GAME_ID}/observe", headers=headers, timeout=5)
+            if resp.status_code != 200:
+                print(f"Observe failed: {resp.status_code}")
+                time.sleep(1)
+                continue
+
+            obs = resp.json()
+            pos = obs["player"]["position"]
+            attrs = obs["player"].get("attributes", {})
+            entities = obs.get("world", {}).get("entities", [])
+
+            money = attrs.get("Money", 0)
+            speed_level = attrs.get("SpeedLevel", 1)
+            carried_count = attrs.get("CarriedCount", 0)
+            carried_value = attrs.get("CarriedValue", 0)
+
+            now = time.time()
+
+            # Status update every 3 seconds
+            if now - last_status_time >= 3.0:
+                print(f"[{state.upper()}] pos=({pos[0]:.0f}, {pos[2]:.0f}) money={money} speed={speed_level} carrying={carried_count} (value={carried_value})")
+                last_status_time = now
+
+            # State machine
+            if state == "collect":
+                # Find nearest brainrot
+                brainrot = find_nearest_brainrot(pos, entities)
+
+                if brainrot:
+                    dist = distance_xz(pos, brainrot["position"])
+
+                    if dist < COLLECTION_RANGE:
+                        # Close enough - collect it
+                        resp = requests.post(
+                            f"{API_BASE}/games/{GAME_ID}/input",
+                            headers=headers,
+                            json={"type": "Collect"},
+                            timeout=5
+                        )
+                        if resp.status_code == 200:
+                            print(f"  Collected brainrot!")
+                    else:
+                        # Move toward it
+                        resp = requests.post(
+                            f"{API_BASE}/games/{GAME_ID}/input",
+                            headers=headers,
+                            json={"type": "MoveTo", "data": {"position": brainrot["position"]}},
+                            timeout=5
+                        )
+                else:
+                    # No brainrots visible - move deeper into collection zone
+                    target_z = random.uniform(SAFE_ZONE_END + 20, COLLECTION_ZONE_END - 20)
+                    target_x = random.uniform(-30, 30)
+                    resp = requests.post(
+                        f"{API_BASE}/games/{GAME_ID}/input",
+                        headers=headers,
+                        json={"type": "MoveTo", "data": {"position": [target_x, 0, target_z]}},
+                        timeout=5
+                    )
+
+                # If carrying enough, return to deposit
+                if carried_count >= 5:
+                    state = "return"
+                    print(f"  Carrying {carried_count} brainrots, returning to deposit...")
+
+            elif state == "return":
+                # Move back to safe zone
+                if pos[2] > SAFE_ZONE_END:
+                    resp = requests.post(
+                        f"{API_BASE}/games/{GAME_ID}/input",
+                        headers=headers,
+                        json={"type": "MoveTo", "data": {"position": [0, 0, 25]}},
+                        timeout=5
+                    )
+                else:
+                    state = "deposit"
+
+            elif state == "deposit":
+                # Deposit brainrots
+                resp = requests.post(
+                    f"{API_BASE}/games/{GAME_ID}/input",
+                    headers=headers,
+                    json={"type": "Deposit"},
+                    timeout=5
+                )
+                if resp.status_code == 200:
+                    print(f"  Deposited! New money: {money + carried_value}")
+                state = "upgrade"
+
+            elif state == "upgrade":
+                # Try to buy speed upgrade if affordable
+                if speed_level < len(SPEED_COSTS):
+                    next_cost = SPEED_COSTS[speed_level]  # speed_level is 1-indexed, costs are 0-indexed for next
+                    if money >= next_cost:
+                        resp = requests.post(
+                            f"{API_BASE}/games/{GAME_ID}/input",
+                            headers=headers,
+                            json={"type": "BuySpeed"},
+                            timeout=5
+                        )
+                        if resp.status_code == 200:
+                            print(f"  Upgraded speed to level {speed_level + 1}!")
+
+                # Go back to collecting
+                state = "collect"
+
+            time.sleep(0.2)  # 5 cycles per second
+
+    except KeyboardInterrupt:
+        print("\nStopping...")
+    finally:
+        requests.post(f"{API_BASE}/games/{GAME_ID}/leave", headers=headers, timeout=5)
+        print("Left game.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Test agent for Tsunami Brainrot game")
+    parser.add_argument("--api-key", type=str, help="API key (or uses CLAWBLOX_API_KEY env var)")
+    args = parser.parse_args()
+
+    api_key = args.api_key or os.getenv("CLAWBLOX_API_KEY")
+    if not api_key:
+        print("Error: No API key provided. Use --api-key or set CLAWBLOX_API_KEY")
+        sys.exit(1)
+
+    print(f"API: {API_BASE}")
+    print(f"Game: {GAME_ID}")
+    print("-" * 60)
+
+    run_agent(api_key)
+
+
+if __name__ == "__main__":
+    main()
