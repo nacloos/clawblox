@@ -1021,6 +1021,10 @@ impl UserData for Instance {
         });
 
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| Ok(this.name()));
+
+        methods.add_meta_method(mlua::MetaMethod::Eq, |_, this, other: Instance| {
+            Ok(this.id() == other.id())
+        });
     }
 }
 

@@ -178,7 +178,6 @@ local function setWeapon(player, weaponIndex)
 end
 
 local function initializePlayer(player)
-    print("[DEBUG] initializePlayer:", player.Name, "UserId:", player.UserId)
     setWeapon(player, 1)
     player:SetAttribute("Kills", 0)
     player:SetAttribute("Deaths", 0)
@@ -264,14 +263,12 @@ end
 --------------------------------------------------------------------------------
 
 local function findPlayerFromPart(part)
+    -- Walk up to find the character Model (has Humanoid child)
     local current = part
-    while current do
+    while current and current ~= Workspace do
         if current:FindFirstChild("Humanoid") then
-            for _, player in ipairs(Players:GetPlayers()) do
-                if player.Character == current then
-                    return player
-                end
-            end
+            -- Use Roblox's built-in method
+            return Players:GetPlayerFromCharacter(current)
         end
         current = current.Parent
     end
@@ -366,10 +363,16 @@ end
 
 local function fireHitscan(player, weapon, direction)
     local character = player.Character
-    if not character then return end
+    if not character then
+        warn("fireHitscan: player has no Character")
+        return
+    end
 
     local hrp = character:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
+    if not hrp then
+        warn("fireHitscan: character has no HumanoidRootPart")
+        return
+    end
 
     local origin = hrp.Position + Vector3.new(0, 1, 0)
     local pelletCount = weapon.pellets or 1
@@ -479,7 +482,10 @@ local function tryFire(player)
     if gameState ~= "active" then return end
 
     local data = getPlayerData(player)
-    if not data then return end
+    if not data then
+        warn("tryFire: no player data for", player.Name)
+        return
+    end
 
     local weaponIndex = player:GetAttribute("CurrentWeapon") or 1
     local weapon = WEAPONS[weaponIndex]
@@ -490,7 +496,7 @@ local function tryFire(player)
         return
     end
 
-    -- Get aim direction from attribute (set by frontend)
+    -- Get aim direction from attribute (set by agent/frontend)
     local aimDir = player:GetAttribute("AimDirection")
     if not aimDir then
         local character = player.Character
@@ -502,7 +508,10 @@ local function tryFire(player)
         end
     end
 
-    if not aimDir then return end
+    if not aimDir then
+        warn("tryFire: no aim direction for", player.Name)
+        return
+    end
     aimDir = aimDir.Unit
 
     data.lastFireTime = now
@@ -826,23 +835,17 @@ end
 createArena()
 
 -- Initialize existing players
-local existingPlayers = Players:GetPlayers()
-print("[DEBUG] Existing players at script load:", #existingPlayers)
-for _, player in ipairs(existingPlayers) do
-    print("[DEBUG] Initializing existing player:", player.Name)
+for _, player in ipairs(Players:GetPlayers()) do
     initializePlayer(player)
 end
 
 -- Handle new players
-print("[DEBUG] Connecting PlayerAdded handler")
 Players.PlayerAdded:Connect(function(player)
-    print("[DEBUG] PlayerAdded fired for:", player.Name, "UserId:", player.UserId)
     initializePlayer(player)
     if gameState == "active" then
         respawnPlayer(player)
     end
 end)
-print("[DEBUG] PlayerAdded handler connected")
 
 Players.PlayerRemoving:Connect(function(player)
     playerData[player.UserId] = nil
@@ -850,22 +853,11 @@ end)
 
 -- Handle agent inputs (AI players via HTTP API)
 local AgentInputService = game:GetService("AgentInputService")
-print("[DEBUG] AgentInputService:", AgentInputService)
 if AgentInputService then
-    print("[DEBUG] Connecting to InputReceived")
     AgentInputService.InputReceived:Connect(function(player, inputType, data)
-        print("[DEBUG] InputReceived:", player, inputType, data)
-        print("[DEBUG] player.UserId:", player.UserId)
-        print("[DEBUG] playerData keys:")
-        for k, v in pairs(playerData) do
-            print("[DEBUG]   key:", k)
-        end
-        if gameState ~= "active" then
-            print("[DEBUG] Game not active, ignoring input")
-            return
-        end
+        if gameState ~= "active" then return end
         if not getPlayerData(player) then
-            print("[DEBUG] Player not in playerData, UserId:", player.UserId)
+            warn("InputReceived: unknown player", player.Name)
             return
         end
 
@@ -883,15 +875,12 @@ if AgentInputService then
             tryFire(player)
 
         elseif inputType == "MoveTo" then
-            -- Move character to position
             local humanoid = getHumanoid(player)
-            print("[DEBUG] MoveTo: humanoid=", humanoid, "data=", data, "data.position=", data and data.position)
             if humanoid and data and data.position then
                 local pos = data.position
-                print("[DEBUG] Calling humanoid:MoveTo", pos[1], pos[2], pos[3])
                 humanoid:MoveTo(Vector3.new(pos[1], pos[2], pos[3]))
             else
-                print("[DEBUG] MoveTo FAILED: humanoid=", humanoid ~= nil, "data=", data ~= nil, "position=", data and data.position ~= nil)
+                warn("MoveTo: missing humanoid or position for", player.Name)
             end
 
         elseif inputType == "Melee" then

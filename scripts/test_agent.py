@@ -1,433 +1,290 @@
 #!/usr/bin/env python3
 """
-Test agent that joins the arena game and moves to random positions.
-
-Usage:
-    uv run scripts/test_agent.py [--api-key YOUR_KEY] [--register]
-
-If --register is provided, registers a new agent first.
-Otherwise, requires an API key via --api-key, CLAWBLOX_API_KEY env var, or .env file.
+Test agent focused on movement. Explores the arena by moving to random waypoints.
 """
 
 import argparse
-import asyncio
-import contextlib
+import json
+import math
 import os
 from pathlib import Path
 import random
 import sys
+import threading
 import time
 
-from dotenv import load_dotenv
 import requests
 
-# Load .env from script directory
-load_dotenv(Path(__file__).parent / ".env")
-
 API_BASE = os.getenv("CLAWBLOX_API_URL", "http://localhost:8080/api/v1")
+KEYS_CACHE = Path("/tmp/clawblox_agent_keys.json")
+
+# Arena bounds (200x200, stay inside walls)
+ARENA_MIN = -80
+ARENA_MAX = 80
 
 
-async def register_agent(name: str = "TestAgent") -> str:
-    """Register a new agent and return the API key."""
-    def do_request():
-        return requests.post(
+def load_cached_keys() -> list[str]:
+    if KEYS_CACHE.exists():
+        try:
+            return json.loads(KEYS_CACHE.read_text()).get("keys", [])
+        except:
+            pass
+    return []
+
+
+def save_cached_keys(keys: list[str]):
+    KEYS_CACHE.write_text(json.dumps({"keys": keys}))
+
+
+def register_agent(name: str) -> str | None:
+    try:
+        resp = requests.post(
             f"{API_BASE}/agents/register",
-            json={"name": name, "description": "Test agent that moves randomly"},
+            json={"name": name, "description": "Test agent"},
+            timeout=10,
         )
-
-    resp = await asyncio.to_thread(do_request)
-    resp.raise_for_status()
-    data = resp.json()
-    api_key = data.get("agent", {}).get("api_key") or data.get("api_key")
-    print(f"Registered agent: {name}")
-    print(f"API Key: {api_key}")
-    return api_key
-
-
-async def list_games(headers: dict) -> list:
-    """List all available games."""
-    def do_request():
-        return requests.get(f"{API_BASE}/games", headers=headers)
-
-    resp = await asyncio.to_thread(do_request)
-    resp.raise_for_status()
-    return resp.json().get("games", [])
-
-
-def find_arena_game(games: list) -> dict | None:
-    """Find an arena game from the list."""
-    for game in games:
-        name = game.get("name", "").lower()
-        game_type = game.get("game_type", "").lower()
-        if "arena" in name or "arena" in game_type or "arsenal" in name:
-            return game
+        if resp.status_code == 200:
+            return resp.json()["agent"]["api_key"]
+    except Exception as e:
+        print(f"Registration error: {e}")
     return None
 
 
-async def join_game(game_id: str, headers: dict) -> bool:
-    """Join a game."""
-    def do_request():
-        return requests.post(f"{API_BASE}/games/{game_id}/join", headers=headers)
+def get_api_keys(num_needed: int) -> list[str]:
+    """Get or register enough API keys for num_needed agents"""
+    # Start with env key
+    keys = []
+    env_key = os.getenv("CLAWBLOX_API_KEY")
+    if env_key:
+        keys.append(env_key)
 
-    resp = await asyncio.to_thread(do_request)
-    if resp.status_code == 200:
-        print(f"Joined game: {game_id}")
-        return True
-    print(f"Failed to join game: {resp.text}")
-    return False
+    # Add cached keys
+    for k in load_cached_keys():
+        if k not in keys:
+            keys.append(k)
 
+    # Register more if needed
+    while len(keys) < num_needed:
+        name = f"agent_{random.randint(1000, 9999)}"
+        print(f"Registering {name}...", flush=True)
+        key = register_agent(name)
+        if key:
+            keys.append(key)
+            print(f"  OK: {key[:20]}...", flush=True)
 
-async def leave_game(game_id: str, headers: dict, quiet: bool = False):
-    """Leave a game."""
-    def do_request():
-        return requests.post(f"{API_BASE}/games/{game_id}/leave", headers=headers)
-
-    resp = await asyncio.to_thread(do_request)
-    if resp.status_code == 200:
-        if not quiet:
-            print(f"Left game: {game_id}")
-    else:
-        if not quiet:
-            print(f"Failed to leave game: {resp.text}")
-
-
-async def leave_all_games(headers: dict):
-    """Leave all games the agent is currently in."""
-    games = await list_games(headers)
-    for game in games:
-        await leave_game(game["id"], headers, quiet=True)
-    print("Left all games")
+    # Cache all keys
+    save_cached_keys(keys)
+    return keys[:num_needed]
 
 
-async def observe(game_id: str, headers: dict) -> dict:
-    """Get current game observation."""
-    def do_request():
-        return requests.get(f"{API_BASE}/games/{game_id}/observe", headers=headers)
-
-    resp = await asyncio.to_thread(do_request)
-    if resp.status_code != 200:
-        raise RuntimeError(f"Observe failed: {resp.status_code} {resp.text}")
-    return resp.json()
+def distance_xz(a: list, b: list) -> float:
+    return ((a[0] - b[0]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
 
 
-async def move_to(game_id: str, position: list, headers: dict):
-    """Send MoveTo input."""
-    payload = {"type": "MoveTo", "data": {"position": position}}
-    def do_request():
-        return requests.post(
-            f"{API_BASE}/games/{game_id}/input",
-            headers=headers,
-            json=payload,
-        )
-
-    resp = await asyncio.to_thread(do_request)
-    if resp.status_code != 200:
-        raise RuntimeError(f"MoveTo failed: {resp.status_code} {resp.text}")
-    return True
+def random_waypoint() -> list:
+    return [random.uniform(ARENA_MIN, ARENA_MAX), 3.0, random.uniform(ARENA_MIN, ARENA_MAX)]
 
 
-async def shoot(game_id: str, target: list, headers: dict):
-    """Send Fire input with target position."""
-    def do_request():
-        return requests.post(
-            f"{API_BASE}/games/{game_id}/input",
-            headers=headers,
-            json={"type": "Fire", "data": {"target": target}},
-        )
+def unstuck_waypoint(pos: list, last_waypoint: list) -> list:
+    """When stuck, pick a waypoint in the opposite direction from where we were heading"""
+    # Direction we were trying to go
+    dx = last_waypoint[0] - pos[0]
+    dz = last_waypoint[2] - pos[2]
 
-    resp = await asyncio.to_thread(do_request)
-    if resp.status_code != 200:
-        raise RuntimeError(f"Fire failed: {resp.status_code} {resp.text}")
-    return True
+    # Go roughly opposite direction, with some randomness
+    angle = random.uniform(-0.5, 0.5)  # radians of randomness
+    import math
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
 
+    # Rotate and reverse direction
+    new_dx = -(dx * cos_a - dz * sin_a)
+    new_dz = -(dx * sin_a + dz * cos_a)
 
-def normalize(v: list) -> list:
-    """Normalize a vector."""
-    mag = (v[0] ** 2 + v[1] ** 2 + v[2] ** 2) ** 0.5
-    if mag == 0:
-        return [0, 0, 0]
-    return [v[0] / mag, v[1] / mag, v[2] / mag]
+    # Normalize and scale to a reasonable distance (20-40 units)
+    dist = (new_dx**2 + new_dz**2) ** 0.5
+    if dist > 0:
+        scale = random.uniform(20, 40) / dist
+        new_dx *= scale
+        new_dz *= scale
 
+    # Clamp to arena bounds
+    new_x = max(ARENA_MIN, min(ARENA_MAX, pos[0] + new_dx))
+    new_z = max(ARENA_MIN, min(ARENA_MAX, pos[2] + new_dz))
 
-def distance(a: list, b: list) -> float:
-    """Calculate distance between two positions."""
-    return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
-
-
-def direction_to(from_pos: list, to_pos: list) -> list:
-    """Get normalized direction from one position to another."""
-    d = [to_pos[0] - from_pos[0], to_pos[1] - from_pos[1], to_pos[2] - from_pos[2]]
-    return normalize(d)
+    return [new_x, 3.0, new_z]
 
 
-def random_position(center: list = None, radius: float = 20.0) -> list:
-    """Generate a random position within radius of center."""
-    if center is None:
-        center = [0.0, 1.0, 0.0]
-    x = center[0] + random.uniform(-radius, radius)
-    z = center[2] + random.uniform(-radius, radius)
-    y = center[1]  # Keep same height
-    return [x, y, z]
+def find_closest_enemy(pos: list, other_players: list) -> dict | None:
+    """Find the closest visible enemy"""
+    if not other_players:
+        return None
+
+    closest = None
+    closest_dist = float('inf')
+
+    for enemy in other_players:
+        dist = distance_xz(pos, enemy["position"])
+        if dist < closest_dist:
+            closest_dist = dist
+            closest = enemy
+
+    return closest
 
 
-async def periodic_logger(state: dict, state_lock: asyncio.Lock, interval: float):
-    while True:
-        await asyncio.sleep(interval)
-        async with state_lock:
-            if not state["running"]:
-                return
-            tick = state["tick"]
-            position = state["position"]
-            target_dist = state["target_dist"]
-            velocity = state["velocity"]
-            start_time = state["start_time"]
-        elapsed = time.monotonic() - start_time
-        status_line = (
-            f"T+{elapsed:6.1f}s | Tick {tick:5d} | Pos: ({position[0]:6.1f}, {position[1]:5.1f}, {position[2]:6.1f}) | "
-            f"Target: {target_dist:.1f} | Vel: {velocity:.1f}"
-        )
-        print(status_line, flush=True)
-
-
-async def run_agent(api_key: str, duration: float | None = None):
-    """Main agent loop."""
+def run_agent(agent_id: int, api_key: str, game_id: str, stop_event: threading.Event):
+    """Run a single agent"""
+    prefix = f"[{agent_id}]"
     headers = {"Authorization": f"Bearer {api_key}"}
-    start_time = time.monotonic()
 
-    # List games
-    print("\nFetching available games...")
-    games = await list_games(headers)
-    if not games:
-        print("No games available. Make sure the server is running and has games.")
+    # Leave any existing games
+    try:
+        resp = requests.get(f"{API_BASE}/games", headers=headers, timeout=5)
+        for g in resp.json().get("games", []):
+            requests.post(f"{API_BASE}/games/{g['id']}/leave", headers=headers, timeout=5)
+    except:
+        pass
+
+    # Join
+    resp = requests.post(f"{API_BASE}/games/{game_id}/join", headers=headers, timeout=5)
+    if resp.status_code != 200:
+        print(f"{prefix} Failed to join: {resp.text}", flush=True)
         return
+    print(f"{prefix} Joined", flush=True)
 
-    print(f"Found {len(games)} game(s):")
-    for g in games:
-        status = g.get("status", "unknown")
-        players = g.get("player_count", 0)
-        print(f"  - {g['name']} ({g['game_type']}) - {status}, {players} players")
+    time.sleep(0.3)
 
-    # Find arena game
-    arena = find_arena_game(games)
-    if not arena:
-        print("\nNo arena game found. Using first available game.")
-        arena = games[0]
-
-    game_id = arena["id"]
-    print(f"\nSelected game: {arena['name']} (id: {game_id})")
-
-    # Leave any existing game first, then join
-    await leave_all_games(headers)
-    if not await join_game(game_id, headers):
-        return
-
-    last_shoot_time = 0
-    shoot_interval = 0.2  # Shoot every 200ms when enemy visible
-    current_target = None
-    target_reached_threshold = 1.5  # Consider target reached within this distance
-    last_position = None
-    last_position_time = None
-    stuck_start_time = None
-    stuck_threshold = 0.5  # Consider stuck if moved less than this
-    stuck_timeout = 2.0  # Pick new target if stuck for this long
-    last_move_command_time = 0.0
-    move_command_interval = 0.5  # Re-issue MoveTo periodically while traveling
-    last_target_distance = None
-    last_progress_time = None
-    progress_timeout = 2.0  # If target distance doesn't shrink for this long, re-path
-    log_interval_seconds = 0.5  # Periodic position logs for movement debugging
-    state_lock = asyncio.Lock()
-    state = {
-        "running": True,
-        "start_time": start_time,
-        "tick": 0,
-        "position": [0.0, 0.0, 0.0],
-        "target_dist": 0.0,
-        "velocity": 0.0,
-    }
-    logger_task = asyncio.create_task(periodic_logger(state, state_lock, log_interval_seconds))
+    waypoint = random_waypoint()
+    last_pos = None
+    stuck_time = None
+    arrivals = 0
+    kills = 0
 
     try:
-        dur_msg = f" for {duration}s" if duration else ""
-        print(f"\nStarting agent loop{dur_msg} (Ctrl+C to stop)...\n")
-        while True:
-            # Check duration limit
-            elapsed = time.monotonic() - start_time
-            if duration and elapsed >= duration:
-                print(f"\n[DONE] Duration limit {duration}s reached")
-                break
-            try:
-                obs = await observe(game_id, headers)
-            except RuntimeError as e:
-                print(f"\nObservation error: {e}, retrying...")
-                await asyncio.sleep(1)
+        tick = 0
+        while not stop_event.is_set():
+            # Observe
+            resp = requests.get(f"{API_BASE}/games/{game_id}/observe", headers=headers, timeout=5)
+            if resp.status_code != 200:
+                time.sleep(0.5)
                 continue
 
-            now = time.monotonic()
-            game_status = obs.get("game_status", "unknown")
-            if game_status == "finished":
-                print("Game finished!")
-                break
-
-            player = obs.get("player", {})
-            position = player.get("position", [0, 0, 0])
-            health = player.get("health", 0)
-            tick = obs.get("tick", 0)
+            obs = resp.json()
+            pos = obs["player"]["position"]
             other_players = obs.get("other_players", [])
 
-            # Calculate velocity for debug
-            velocity = 0.0
-            if last_position is not None and last_position_time is not None:
-                dt = now - last_position_time
-                if dt > 0:
-                    velocity = distance(position, last_position) / dt
+            # Track kills from attributes
+            player_kills = obs.get("player", {}).get("attributes", {}).get("Kills", 0)
+            if player_kills > kills:
+                print(f"{prefix} [KILL] total: {player_kills}", flush=True)
+                kills = player_kills
 
-            # Update state for periodic logger
-            enemies = len(other_players)
-            target_dist = distance(position, current_target) if current_target else 0
-            async with state_lock:
-                state["tick"] = tick
-                state["position"] = position[:]
-                state["target_dist"] = target_dist
-                state["velocity"] = velocity
+            # Find closest enemy
+            enemy = find_closest_enemy(pos, other_players)
 
-            # Find nearest enemy
-            nearest_enemy = None
-            nearest_dist = float("inf")
-            for enemy in other_players:
-                enemy_pos = enemy.get("position", [0, 0, 0])
-                dist = distance(position, enemy_pos)
-                if dist < nearest_dist:
-                    nearest_dist = dist
-                    nearest_enemy = enemy
+            if enemy:
+                enemy_pos = enemy["position"]
+                enemy_dist = distance_xz(pos, enemy_pos)
 
-            # Shoot at nearest enemy
-            if nearest_enemy and now - last_shoot_time >= shoot_interval:
-                enemy_pos = nearest_enemy.get("position", [0, 0, 0])
-                await shoot(game_id, enemy_pos, headers)
-                last_shoot_time = now
+                # Fire at enemy
+                fire_payload = {"type": "Fire", "data": {"target": enemy_pos}}
+                requests.post(f"{API_BASE}/games/{game_id}/input", headers=headers, json=fire_payload, timeout=5)
 
-                # Chase enemy if far
-                if nearest_dist > 10:
-                    current_target = enemy_pos
-                    await move_to(game_id, current_target, headers)
-                    last_move_command_time = now
-                    last_target_distance = None
-                    last_progress_time = now
+                # Move toward enemy
+                waypoint = enemy_pos
+                stuck_time = None
 
-            # Shoot randomly when no enemies (less frequently)
-            elif now - last_shoot_time >= 1.0:
-                # Pick a random target position
-                random_target = [
-                    position[0] + random.uniform(-30, 30),
-                    position[1] + random.uniform(-2, 2),
-                    position[2] + random.uniform(-30, 30),
-                ]
-                await shoot(game_id, random_target, headers)
-                last_shoot_time = now
+                if tick % 10 == 0:
+                    print(f"{prefix} [COMBAT] enemy at dist {enemy_dist:.1f}", flush=True)
+            else:
+                # No enemy - explore
+                dist = distance_xz(pos, waypoint)
 
-            # Track progress toward target
-            if current_target is not None:
-                target_dist = distance(position, current_target)
-                if last_target_distance is None or target_dist < last_target_distance - 0.1:
-                    last_progress_time = now
-                last_target_distance = target_dist
+                # Check arrival
+                if dist < 5.0:
+                    arrivals += 1
+                    waypoint = random_waypoint()
+                    stuck_time = None
 
-            # Check if stuck (not making progress toward target)
-            if last_position is not None and current_target is not None:
-                moved = distance(position, last_position)
-                if moved < stuck_threshold * 0.1:  # Barely moved this tick
-                    if stuck_start_time is None:
-                        stuck_start_time = now
-                    elif now - stuck_start_time > stuck_timeout:
-                        print(f"\n[STUCK] No progress for {stuck_timeout}s, picking new target")
-                        current_target = None
-                        stuck_start_time = None
-                        last_target_distance = None
-                        last_progress_time = None
-                else:
-                    stuck_start_time = None  # Reset if making progress
-            last_position = position[:]
-            last_position_time = now
+                # Check stuck
+                if last_pos:
+                    moved = distance_xz(pos, last_pos)
+                    if moved < 0.1:
+                        if stuck_time is None:
+                            stuck_time = time.time()
+                        elif time.time() - stuck_time > 2.0:
+                            waypoint = unstuck_waypoint(pos, waypoint)
+                            stuck_time = None
+                    else:
+                        stuck_time = None
 
-            # Check if we need a new target (no target, reached it, or stuck)
-            need_new_target = (
-                current_target is None or
-                distance(position, current_target) < target_reached_threshold
-            )
+            # Send MoveTo
+            move_payload = {"type": "MoveTo", "data": {"position": waypoint}}
+            requests.post(f"{API_BASE}/games/{game_id}/input", headers=headers, json=move_payload, timeout=5)
 
-            if need_new_target and not nearest_enemy:
-                # Pick a new random target
-                current_target = random_position(center=[0, position[1], 0], radius=25.0)
-                await move_to(game_id, current_target, headers)
-                last_move_command_time = now
-                stuck_start_time = None
-                last_target_distance = None
-                last_progress_time = now
+            # Periodic status
+            if tick % 20 == 0:
+                health = obs.get("player", {}).get("health", 100)
+                print(f"{prefix} pos=({pos[0]:.0f},{pos[2]:.0f}) hp={health} enemies={len(other_players)}", flush=True)
 
-            # Re-issue MoveTo while traveling to avoid stale targets
-            if current_target is not None and now - last_move_command_time >= move_command_interval:
-                await move_to(game_id, current_target, headers)
-                last_move_command_time = now
+            last_pos = pos
+            tick += 1
+            time.sleep(0.1)
 
-            # If distance to target isn't shrinking for a while, pick a new target
-            if (
-                current_target is not None
-                and last_progress_time is not None
-                and now - last_progress_time > progress_timeout
-            ):
-                print(f"\n[STUCK] Target distance not shrinking for {progress_timeout}s, re-pathing")
-                current_target = random_position(center=[0, position[1], 0], radius=25.0)
-                await move_to(game_id, current_target, headers)
-                last_move_command_time = now
-                last_target_distance = None
-                last_progress_time = now
-
-            # 10 Hz loop
-            await asyncio.sleep(0.1)
-
-    except KeyboardInterrupt:
-        print("\n\nStopping agent...")
     finally:
-        async with state_lock:
-            state["running"] = False
-        logger_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await logger_task
-        await leave_game(game_id, headers)
+        requests.post(f"{API_BASE}/games/{game_id}/leave", headers=headers, timeout=5)
+        print(f"{prefix} Left (arrivals: {arrivals}, kills: {kills})", flush=True)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test agent for Clawblox arena game")
-    parser.add_argument("--api-key", help="API key for authentication")
-    parser.add_argument(
-        "--register", action="store_true", help="Register a new agent first"
-    )
-    parser.add_argument(
-        "--leave", action="store_true", help="Leave all games and exit"
-    )
-    parser.add_argument(
-        "--duration", type=float, default=60.0, help="Run for N seconds (default: 60)"
-    )
+    parser = argparse.ArgumentParser(description="Test exploration agents")
+    parser.add_argument("-n", "--num-agents", type=int, default=1, help="Number of agents")
+    parser.add_argument("-d", "--duration", type=float, default=None, help="Run for N seconds")
     args = parser.parse_args()
 
-    api_key = args.api_key or os.getenv("CLAWBLOX_API_KEY")
+    print(f"API: {API_BASE}", flush=True)
 
-    if args.register:
-        api_key = asyncio.run(register_agent())
-        print(f"\nSet this env var to reuse: export CLAWBLOX_API_KEY={api_key}\n")
-    elif not api_key:
-        print("Error: No API key provided.")
-        print("Use --api-key YOUR_KEY or set CLAWBLOX_API_KEY env var")
-        print("Or use --register to create a new agent")
+    # Get API keys
+    api_keys = get_api_keys(args.num_agents)
+    print(f"Got {len(api_keys)} API key(s)", flush=True)
+
+    # Find game
+    headers = {"Authorization": f"Bearer {api_keys[0]}"}
+    resp = requests.get(f"{API_BASE}/games", headers=headers)
+    resp.raise_for_status()
+    games = resp.json().get("games", [])
+    if not games:
+        print("No games available")
         sys.exit(1)
 
-    if args.leave:
-        headers = {"Authorization": f"Bearer {api_key}"}
-        asyncio.run(leave_all_games(headers))
-        return
+    game_id = games[0]["id"]
+    print(f"Game: {games[0]['name']}", flush=True)
+    print("-" * 60, flush=True)
 
-    asyncio.run(run_agent(api_key, duration=args.duration))
+    # Start agents
+    stop_event = threading.Event()
+    threads = []
+
+    for i in range(args.num_agents):
+        t = threading.Thread(target=run_agent, args=(i, api_keys[i], game_id, stop_event))
+        t.daemon = True
+        t.start()
+        threads.append(t)
+        time.sleep(0.2)  # Stagger joins
+
+    # Run until duration or Ctrl+C
+    try:
+        start = time.time()
+        while True:
+            time.sleep(0.5)
+            if args.duration and (time.time() - start) >= args.duration:
+                print(f"\nDuration {args.duration}s reached", flush=True)
+                break
+    except KeyboardInterrupt:
+        print("\nStopping...", flush=True)
+    finally:
+        stop_event.set()
+        for t in threads:
+            t.join(timeout=2)
 
 
 if __name__ == "__main__":
