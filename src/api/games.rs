@@ -27,7 +27,7 @@ pub fn routes(pool: PgPool, game_manager: GameManagerHandle) -> Router {
         .route("/games/{id}", get(get_game).put(update_game))
         .route("/games/{id}/join", post(join_game))
         .route("/games/{id}/leave", post(leave_game))
-        .route("/games/{id}/publish", post(publish_game))
+        // .route("/games/{id}/publish", post(publish_game))  // Disabled for now
         .route("/matchmake", post(matchmake))
         .with_state(state)
 }
