@@ -176,46 +176,33 @@ impl GameInstance {
 
     /// Main game loop tick - called at 60 Hz
     pub fn tick(&mut self) {
-        use std::time::Instant;
         let dt = 1.0 / 60.0;
-
-        // Debug timing (log every 60 ticks)
-        let should_log = self.tick % 60 == 0 && self.tick > 0;
-        let t0 = Instant::now();
 
         // Process queued actions
         while let Ok(queued) = self.action_receiver.try_recv() {
             self.process_action(queued);
         }
-        let t1 = Instant::now();
 
         // Sync Lua workspace gravity to physics
         self.sync_gravity();
-        let t2 = Instant::now();
 
         // Sync new/changed Lua parts to physics (skip character-controlled parts)
         self.sync_lua_to_physics();
-        let t3 = Instant::now();
 
         // Update query pipeline so character controller can detect collisions with new geometry
         self.physics.query_pipeline.update(&self.physics.collider_set);
-        let t4 = Instant::now();
 
         // Sync Lua humanoid MoveTo targets to physics character controllers
         self.sync_humanoid_move_targets();
-        let t5 = Instant::now();
 
         // Update character controller movement
         self.update_character_movement(dt);
-        let t6 = Instant::now();
 
         // Step physics simulation
         self.physics.step(dt);
-        let t7 = Instant::now();
 
         // Sync physics results back to Lua (for Anchored=false parts and characters)
         self.sync_physics_to_lua();
-        let t8 = Instant::now();
 
         // Process agent inputs (fire InputReceived events)
         if let Some(runtime) = &self.lua_runtime {
@@ -223,38 +210,12 @@ impl GameInstance {
                 eprintln!("[Lua Error] Failed to process agent inputs: {}", e);
             }
         }
-        let t9 = Instant::now();
 
         // Run Lua Heartbeat
         if let Some(runtime) = &self.lua_runtime {
             if let Err(e) = runtime.tick(dt) {
                 eprintln!("[Lua Error] Tick error: {}", e);
             }
-        }
-        let t10 = Instant::now();
-
-        if should_log {
-            let num_colliders = self.physics.collider_set.len();
-            let num_bodies = self.physics.rigid_body_set.len();
-            println!("[Tick] colliders={} bodies={} charMove={:.2}ms | actions={:.2}ms lua2phys={:.2}ms query={:.2}ms physics={:.2}ms",
-                num_colliders, num_bodies, (t6-t5).as_micros() as f64 / 1000.0,
-                (t1-t0).as_micros() as f64 / 1000.0,
-                (t3-t2).as_micros() as f64 / 1000.0,
-                (t4-t3).as_micros() as f64 / 1000.0,
-                (t7-t6).as_micros() as f64 / 1000.0);
-            // Original detailed log
-            println!("[Tick] actions={:.2}ms gravity={:.2}ms lua2phys={:.2}ms query={:.2}ms moveto={:.2}ms charMove={:.2}ms physics={:.2}ms phys2lua={:.2}ms inputs={:.2}ms heartbeat={:.2}ms",
-                (t1-t0).as_micros() as f64 / 1000.0,
-                (t2-t1).as_micros() as f64 / 1000.0,
-                (t3-t2).as_micros() as f64 / 1000.0,
-                (t4-t3).as_micros() as f64 / 1000.0,
-                (t5-t4).as_micros() as f64 / 1000.0,
-                (t6-t5).as_micros() as f64 / 1000.0,
-                (t7-t6).as_micros() as f64 / 1000.0,
-                (t8-t7).as_micros() as f64 / 1000.0,
-                (t9-t8).as_micros() as f64 / 1000.0,
-                (t10-t9).as_micros() as f64 / 1000.0,
-            );
         }
 
         self.tick += 1;

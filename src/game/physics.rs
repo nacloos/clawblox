@@ -2,6 +2,12 @@ use rapier3d::control::{CharacterAutostep, CharacterLength, KinematicCharacterCo
 use rapier3d::prelude::*;
 use std::collections::HashMap;
 
+// Collision groups for Roblox-style physics behavior
+// Characters don't collide with each other, only with static geometry
+// Note: rapier3d uses InteractionGroups (not CollisionGroups like bevy_rapier)
+const GROUP_STATIC: Group = Group::GROUP_1;    // Walls, floors, obstacles
+const GROUP_CHARACTER: Group = Group::GROUP_2; // Player characters
+
 /// State for a character controller (player or NPC)
 pub struct CharacterControllerState {
     pub controller: KinematicCharacterController,
@@ -107,8 +113,10 @@ impl PhysicsWorld {
         let handle = self.rigid_body_set.insert(body);
 
         // Create collider (box shape, half-extents)
+        // Static geometry collides with everything (characters and other static)
         let collider = ColliderBuilder::cuboid(size[0] / 2.0, size[1] / 2.0, size[2] / 2.0)
             .sensor(!can_collide) // If can_collide is false, make it a sensor (no physical response)
+            .collision_groups(InteractionGroups::new(GROUP_STATIC, Group::ALL))
             .build();
 
         self.collider_set
@@ -221,9 +229,11 @@ impl PhysicsWorld {
                     );
                 }
 
-                // Add new collider with updated size
+                // Add new collider with updated size (maintain static collision group)
                 let collider =
-                    ColliderBuilder::cuboid(size[0] / 2.0, size[1] / 2.0, size[2] / 2.0).build();
+                    ColliderBuilder::cuboid(size[0] / 2.0, size[1] / 2.0, size[2] / 2.0)
+                        .collision_groups(InteractionGroups::new(GROUP_STATIC, Group::ALL))
+                        .build();
 
                 self.collider_set
                     .insert_with_parent(collider, handle, &mut self.rigid_body_set);
@@ -247,8 +257,11 @@ impl PhysicsWorld {
         let body_handle = self.rigid_body_set.insert(body);
 
         // Create capsule collider (half-height is the cylinder part, total height = 2*half_height + 2*radius)
+        // Characters only collide with static geometry, not other characters (Roblox FPS style)
         let half_height = (height - 2.0 * radius).max(0.0) / 2.0;
-        let collider = ColliderBuilder::capsule_y(half_height, radius).build();
+        let collider = ColliderBuilder::capsule_y(half_height, radius)
+            .collision_groups(InteractionGroups::new(GROUP_CHARACTER, GROUP_STATIC))
+            .build();
         let collider_handle = self
             .collider_set
             .insert_with_parent(collider, body_handle, &mut self.rigid_body_set);
@@ -413,8 +426,11 @@ impl PhysicsWorld {
         let current_pos = *body.translation();
 
         // Calculate horizontal movement with collision
+        // Use collision groups so characters only collide with static geometry
         let desired = vector![dx, 0.0, dz];
-        let filter = QueryFilter::default().exclude_rigid_body(body_handle);
+        let filter = QueryFilter::default()
+            .exclude_rigid_body(body_handle)
+            .groups(InteractionGroups::new(GROUP_CHARACTER, GROUP_STATIC));
 
         let movement = state.controller.move_shape(
             dt,

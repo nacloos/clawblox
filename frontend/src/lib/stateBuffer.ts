@@ -7,9 +7,6 @@ const MAX_RENDER_DELAY_MS = 500
 const CLOCK_SAMPLES = 10
 const BUFFER_SIZE = 20
 
-// Debug
-let debugLogTimer = 0
-
 export interface EntitySnapshot {
   id: number
   type: string
@@ -84,16 +81,6 @@ export class StateBuffer {
   push(observation: SpectatorObservation): void {
     const localTime = performance.now()
     const serverTime = observation.server_time_ms
-
-    // Log first few pushes and every 30th after
-    if (this.buffer.length < 5 || this.buffer.length % 30 === 0) {
-      console.log('[StateBuffer.push]', {
-        tick: observation.tick,
-        serverTimeMs: serverTime,
-        localTime: Math.round(localTime),
-        bufferLen: this.buffer.length,
-      })
-    }
 
     // Update clock offset (smoothed median filters outliers from network spikes)
     this.updateClockOffset(localTime, serverTime)
@@ -170,27 +157,6 @@ export class StateBuffer {
         after = snapshot
         break
       }
-    }
-
-    // Debug logging (once per second)
-    const now = performance.now()
-    if (now - debugLogTimer > 1000) {
-      debugLogTimer = now
-      const latest = this.buffer[this.buffer.length - 1]
-      const earliest = this.buffer[0]
-      console.log('[StateBuffer]', {
-        bufferSize: this.buffer.length,
-        clockOffset: Math.round(this.clockOffset),
-        renderDelay: this.renderDelay,
-        targetServerTime: Math.round(targetServerTime),
-        earliestServerTime: earliest.serverTimeMs,
-        latestServerTime: latest.serverTimeMs,
-        bufferSpanMs: latest.serverTimeMs - earliest.serverTimeMs,
-        hasBefore: !!before,
-        hasAfter: !!after,
-        beforeTime: before?.serverTimeMs,
-        afterTime: after?.serverTimeMs,
-      })
     }
 
     // No data before target - use earliest snapshot

@@ -54,13 +54,6 @@ impl GameManager {
     pub fn run(self) {
         let tick_duration = Duration::from_millis(1000 / self.tick_rate);
 
-        // Debug timing
-        let mut tick_count: u64 = 0;
-        let mut total_tick_time_us: u64 = 0;
-        let mut total_cache_time_us: u64 = 0;
-        let mut max_tick_time_us: u64 = 0;
-        let run_start = Instant::now();
-
         loop {
             let start = Instant::now();
 
@@ -71,12 +64,8 @@ impl GameManager {
                 let game_handle = entry.value().clone();
                 let mut game = game_handle.write();
                 if game.status == GameStatus::Playing {
-                    let tick_start = Instant::now();
                     game.tick();
-                    let tick_elapsed = tick_start.elapsed().as_micros() as u64;
-                    total_tick_time_us += tick_elapsed;
 
-                    let cache_start = Instant::now();
                     // Cache observations for all players after tick
                     // This allows /observe HTTP requests to read without lock
                     for &agent_id in game.players.keys() {
@@ -89,26 +78,7 @@ impl GameManager {
                     // This allows WebSocket spectator to read without lock
                     let spectator_obs = game.get_spectator_observation();
                     self.state.spectator_cache.insert(game_id, spectator_obs);
-                    let cache_elapsed = cache_start.elapsed().as_micros() as u64;
-                    total_cache_time_us += cache_elapsed;
-
-                    let total_us = tick_elapsed + cache_elapsed;
-                    if total_us > max_tick_time_us {
-                        max_tick_time_us = total_us;
-                    }
                 }
-            }
-
-            tick_count += 1;
-
-            // Log every second (60 ticks)
-            if tick_count % 60 == 0 {
-                let elapsed_secs = run_start.elapsed().as_secs();
-                let avg_tick_ms = total_tick_time_us as f64 / tick_count as f64 / 1000.0;
-                let avg_cache_ms = total_cache_time_us as f64 / tick_count as f64 / 1000.0;
-                let actual_rate = tick_count as f64 / elapsed_secs.max(1) as f64;
-                println!("[GameLoop] t={}s ticks={} rate={:.1}Hz avg_tick={:.2}ms avg_cache={:.2}ms max={:.2}ms",
-                    elapsed_secs, tick_count, actual_rate, avg_tick_ms, avg_cache_ms, max_tick_time_us as f64 / 1000.0);
             }
 
             let elapsed = start.elapsed();
