@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-use instance::{GameAction, GameInstance, GameStatus, PlayerObservation};
+use instance::{GameAction, GameInstance, GameStatus, PlayerObservation, SpectatorObservation};
 
 /// Handle to the game manager - now uses DashMap for per-game locks
 pub type GameManagerHandle = Arc<GameManagerState>;
@@ -23,6 +23,9 @@ pub struct GameManagerState {
     /// Cached observations, keyed by (game_id, agent_id)
     /// Updated once per tick, read lock-free by HTTP /observe
     pub observation_cache: DashMap<(Uuid, Uuid), PlayerObservation>,
+    /// Cached spectator observations, keyed by game_id
+    /// Updated once per tick, read lock-free by WebSocket spectator
+    pub spectator_cache: DashMap<Uuid, SpectatorObservation>,
 }
 
 impl GameManagerState {
@@ -30,6 +33,7 @@ impl GameManagerState {
         Self {
             games: DashMap::new(),
             observation_cache: DashMap::new(),
+            spectator_cache: DashMap::new(),
         }
     }
 }
@@ -69,6 +73,11 @@ impl GameManager {
                             self.state.observation_cache.insert((game_id, agent_id), obs);
                         }
                     }
+
+                    // Cache spectator observation after tick
+                    // This allows WebSocket spectator to read without lock
+                    let spectator_obs = game.get_spectator_observation();
+                    self.state.spectator_cache.insert(game_id, spectator_obs);
                 }
             }
 
@@ -83,8 +92,12 @@ impl GameManager {
 pub fn create_game(state: &GameManagerHandle) -> Uuid {
     let game_id = Uuid::new_v4();
     let game = GameInstance::new(game_id);
-    let game_handle = Arc::new(RwLock::new(game));
 
+    // Cache initial spectator observation before inserting game
+    let spectator_obs = game.get_spectator_observation();
+    state.spectator_cache.insert(game_id, spectator_obs);
+
+    let game_handle = Arc::new(RwLock::new(game));
     state.games.insert(game_id, game_handle);
 
     game_id
@@ -111,6 +124,11 @@ pub fn get_or_create_instance_with_script(
         Some(code) => GameInstance::new_with_script(game_id, code),
         None => GameInstance::new(game_id),
     };
+
+    // Cache initial spectator observation before inserting game
+    let spectator_obs = game.get_spectator_observation();
+    state.spectator_cache.insert(game_id, spectator_obs);
+
     let game_handle = Arc::new(RwLock::new(game));
     state.games.insert(game_id, game_handle);
     true
@@ -217,14 +235,14 @@ pub fn get_observation(
 pub fn get_spectator_observation(
     state: &GameManagerHandle,
     game_id: Uuid,
-) -> Result<instance::SpectatorObservation, String> {
-    let game_handle = state
-        .games
+) -> Result<SpectatorObservation, String> {
+    // Read from cache (lock-free) instead of acquiring game lock
+    // Cache is populated by game tick loop
+    state
+        .spectator_cache
         .get(&game_id)
-        .ok_or_else(|| "Game not found".to_string())?;
-
-    let game = game_handle.read();
-    Ok(game.get_spectator_observation())
+        .map(|r| r.clone())
+        .ok_or_else(|| "Game not found".to_string())
 }
 
 pub fn list_games(state: &GameManagerHandle) -> Vec<GameInfo> {

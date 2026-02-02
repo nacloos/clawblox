@@ -1,7 +1,11 @@
-import { memo, useRef } from 'react'
+import { memo, useRef, useEffect } from 'react'
 import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
+import { damp3, dampQ } from 'maath/easing'
 import { SpectatorEntity } from '../api'
+
+// Smoothing factor for position/rotation interpolation (higher = faster)
+const SMOOTHING = 12
 
 interface EntityProps {
   entity: SpectatorEntity
@@ -47,18 +51,27 @@ function toColor(colorArray?: [number, number, number]): string {
   return `rgb(${Math.round(colorArray[0] * 255)}, ${Math.round(colorArray[1] * 255)}, ${Math.round(colorArray[2] * 255)})`
 }
 
-// Animated pickup component using useFrame for smooth animation
+// Animated pickup component - smooth position + bobbing animation
 function PickupEntity({ entity }: EntityProps) {
   const meshRef = useRef<THREE.Mesh>(null)
-  const [x, y, z] = entity.position
+  const targetPos = useRef(new THREE.Vector3(entity.position[0], entity.position[1], entity.position[2]))
   const isHealth = entity.pickup_type === 'health'
   const baseColor = isHealth ? '#22c55e' : '#3b82f6'
 
-  useFrame(({ clock }) => {
-    if (meshRef.current) {
-      meshRef.current.position.y = y + 0.3 + Math.sin(clock.getElapsedTime() * 2) * 0.1
-    }
+  useEffect(() => {
+    targetPos.current.set(entity.position[0], entity.position[1], entity.position[2])
+  }, [entity.position[0], entity.position[1], entity.position[2]])
+
+  useFrame(({ clock }, delta) => {
+    if (!meshRef.current) return
+    // Smooth interpolation for x and z
+    meshRef.current.position.x += (targetPos.current.x - meshRef.current.position.x) * Math.min(1, SMOOTHING * delta)
+    meshRef.current.position.z += (targetPos.current.z - meshRef.current.position.z) * Math.min(1, SMOOTHING * delta)
+    // Bobbing animation for y
+    meshRef.current.position.y = targetPos.current.y + 0.3 + Math.sin(clock.getElapsedTime() * 2) * 0.1
   })
+
+  const [x, y, z] = entity.position
 
   return (
     <mesh ref={meshRef} position={[x, y + 0.3, z]} castShadow>
@@ -72,13 +85,25 @@ function PickupEntity({ entity }: EntityProps) {
   )
 }
 
-// Enemy entity with health bar
+// Enemy entity with health bar - uses smooth interpolation
 function EnemyEntity({ entity }: EntityProps) {
-  const [x, y, z] = entity.position
+  const groupRef = useRef<THREE.Group>(null)
+  const targetPos = useRef(new THREE.Vector3(...entity.position))
   const healthRatio = (entity.health ?? 80) / 80
 
+  useEffect(() => {
+    targetPos.current.set(...entity.position)
+  }, [entity.position[0], entity.position[1], entity.position[2]])
+
+  useFrame((_, delta) => {
+    if (!groupRef.current) return
+    damp3(groupRef.current.position, targetPos.current, SMOOTHING, delta)
+  })
+
+  const [x, y, z] = entity.position
+
   return (
-    <group position={[x, y, z]}>
+    <group ref={groupRef} position={[x, y, z]}>
       <mesh castShadow>
         <boxGeometry args={[1, 1.5, 1]} />
         <meshStandardMaterial color="#e74c3c" />
@@ -91,10 +116,8 @@ function EnemyEntity({ entity }: EntityProps) {
   )
 }
 
-// Convert Roblox rotation matrix to Three.js Euler using Matrix4
-function rotationToEuler(rot: [[number, number, number], [number, number, number], [number, number, number]]): THREE.Euler {
-  // Create a Matrix4 from the rotation matrix
-  // Roblox CFrame rotation is row-major: rot[row][col]
+// Convert Roblox rotation matrix to Three.js Quaternion for smooth interpolation
+function rotationToQuaternion(rot: [[number, number, number], [number, number, number], [number, number, number]]): THREE.Quaternion {
   const matrix = new THREE.Matrix4()
   matrix.set(
     rot[0][0], rot[0][1], rot[0][2], 0,
@@ -102,54 +125,65 @@ function rotationToEuler(rot: [[number, number, number], [number, number, number
     rot[2][0], rot[2][1], rot[2][2], 0,
     0, 0, 0, 1
   )
-
-  // Extract Euler angles using Three.js's robust implementation
-  const euler = new THREE.Euler()
-  euler.setFromRotationMatrix(matrix, 'YXZ')
-  return euler
+  const quat = new THREE.Quaternion()
+  quat.setFromRotationMatrix(matrix)
+  return quat
 }
 
 // Part entity - renders based on shape property (Roblox-style)
+// Uses smooth interpolation for position and rotation
 function PartEntity({ entity }: EntityProps) {
-  const [x, y, z] = entity.position
+  const meshRef = useRef<THREE.Mesh>(null)
+  const targetPos = useRef(new THREE.Vector3(...entity.position))
+  const targetQuat = useRef(entity.rotation ? rotationToQuaternion(entity.rotation) : new THREE.Quaternion())
+
   const size = entity.size || [1, 1, 1]
   const color = toColor(entity.color)
   const materialProps = getMaterialProps(entity.material, color)
   const shape = entity.shape || 'Block'
-  const rotation = entity.rotation ? rotationToEuler(entity.rotation) : new THREE.Euler(0, 0, 0)
 
-  // Roblox Cylinder: size.x = diameter, size.y = length (along X axis), size.z = diameter
-  // Three.js CylinderGeometry: radiusTop, radiusBottom, height, radialSegments
-  // Roblox cylinders are oriented along the X axis, Three.js along Y axis
+  // Update targets when entity data changes
+  useEffect(() => {
+    targetPos.current.set(...entity.position)
+    if (entity.rotation) {
+      targetQuat.current.copy(rotationToQuaternion(entity.rotation))
+    }
+  }, [entity.position[0], entity.position[1], entity.position[2], entity.rotation])
+
+  // Smooth interpolation each frame
+  useFrame((_, delta) => {
+    if (!meshRef.current) return
+    damp3(meshRef.current.position, targetPos.current, SMOOTHING, delta)
+    dampQ(meshRef.current.quaternion, targetQuat.current, SMOOTHING, delta)
+  })
+
+  // Initial position from entity data
+  const [x, y, z] = entity.position
+  const initialQuat = entity.rotation ? rotationToQuaternion(entity.rotation) : new THREE.Quaternion()
 
   switch (shape) {
     case 'Ball':
-      // Ball uses the smallest dimension as diameter
       const radius = Math.min(size[0], size[1], size[2]) / 2
       return (
-        <mesh position={[x, y, z]} rotation={rotation} castShadow receiveShadow>
+        <mesh ref={meshRef} position={[x, y, z]} quaternion={initialQuat} castShadow receiveShadow>
           <sphereGeometry args={[radius, 24, 24]} />
           <meshStandardMaterial {...materialProps} />
         </mesh>
       )
 
     case 'Cylinder':
-      // Roblox Cylinder: oriented along X axis, size = [diameter, length, diameter]
-      // We use capsule-like rendering: size.x = diameter, size.y = height
       const cylRadius = size[0] / 2
       const cylHeight = size[1]
       return (
-        <mesh position={[x, y, z]} rotation={rotation} castShadow receiveShadow>
+        <mesh ref={meshRef} position={[x, y, z]} quaternion={initialQuat} castShadow receiveShadow>
           <capsuleGeometry args={[cylRadius, cylHeight - cylRadius * 2, 8, 16]} />
           <meshStandardMaterial {...materialProps} />
         </mesh>
       )
 
     case 'Wedge':
-      // Wedge is a triangular prism - approximate with a box for now
-      // TODO: Implement proper wedge geometry
       return (
-        <mesh position={[x, y, z]} rotation={rotation} castShadow receiveShadow>
+        <mesh ref={meshRef} position={[x, y, z]} quaternion={initialQuat} castShadow receiveShadow>
           <boxGeometry args={size as [number, number, number]} />
           <meshStandardMaterial {...materialProps} />
         </mesh>
@@ -158,7 +192,7 @@ function PartEntity({ entity }: EntityProps) {
     case 'Block':
     default:
       return (
-        <mesh position={[x, y, z]} rotation={rotation} castShadow receiveShadow>
+        <mesh ref={meshRef} position={[x, y, z]} quaternion={initialQuat} castShadow receiveShadow>
           <boxGeometry args={size as [number, number, number]} />
           <meshStandardMaterial {...materialProps} />
         </mesh>
