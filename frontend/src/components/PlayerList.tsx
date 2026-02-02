@@ -10,7 +10,7 @@ interface PlayerListProps {
 
 export default function PlayerList({ players, selectedPlayerId, onSelectPlayer }: PlayerListProps) {
   return (
-    <div className="absolute top-4 right-4 bg-card/90 backdrop-blur-sm border border-border rounded-lg p-3 min-w-[180px] max-h-[400px] overflow-y-auto">
+    <div className="absolute top-4 right-4 bg-card/90 backdrop-blur-sm border border-border rounded-lg p-3 w-[200px] max-h-[400px] overflow-y-auto">
       <div className="text-sm font-medium text-foreground mb-3">Players</div>
 
       <div className="space-y-2">
