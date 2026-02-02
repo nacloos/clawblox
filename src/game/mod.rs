@@ -3,7 +3,8 @@ pub mod lua;
 pub mod physics;
 
 use dashmap::DashMap;
-use std::sync::{Arc, RwLock};
+use parking_lot::RwLock;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -13,18 +14,22 @@ use instance::{GameAction, GameInstance, GameStatus, PlayerObservation};
 /// Handle to the game manager - now uses DashMap for per-game locks
 pub type GameManagerHandle = Arc<GameManagerState>;
 
-/// Per-game lock wrapper
+/// Per-game lock wrapper - uses parking_lot for better performance under contention
 pub type GameInstanceHandle = Arc<RwLock<GameInstance>>;
 
 pub struct GameManagerState {
     /// Each game has its own RwLock for fine-grained locking
     pub games: DashMap<Uuid, GameInstanceHandle>,
+    /// Cached observations, keyed by (game_id, agent_id)
+    /// Updated once per tick, read lock-free by HTTP /observe
+    pub observation_cache: DashMap<(Uuid, Uuid), PlayerObservation>,
 }
 
 impl GameManagerState {
     pub fn new() -> Self {
         Self {
             games: DashMap::new(),
+            observation_cache: DashMap::new(),
         }
     }
 }
@@ -51,10 +56,19 @@ impl GameManager {
             // Iterate over games without holding global lock
             // Each game is locked individually during its tick
             for entry in self.state.games.iter() {
+                let game_id = *entry.key();
                 let game_handle = entry.value().clone();
-                let mut game = game_handle.write().unwrap();
+                let mut game = game_handle.write();
                 if game.status == GameStatus::Playing {
                     game.tick();
+
+                    // Cache observations for all players after tick
+                    // This allows /observe HTTP requests to read without lock
+                    for &agent_id in game.players.keys() {
+                        if let Some(obs) = game.get_player_observation(agent_id) {
+                            self.state.observation_cache.insert((game_id, agent_id), obs);
+                        }
+                    }
                 }
             }
 
@@ -113,9 +127,14 @@ pub fn join_game(state: &GameManagerHandle, game_id: Uuid, agent_id: Uuid) -> Re
         .get(&game_id)
         .ok_or_else(|| "Game not found".to_string())?;
 
-    let mut game = game_handle.write().unwrap();
+    let mut game = game_handle.write();
     if !game.add_player(agent_id) {
         return Err("Already in game".to_string());
+    }
+
+    // Initialize cached observation so player can observe before first tick
+    if let Some(obs) = game.get_player_observation(agent_id) {
+        state.observation_cache.insert((game_id, agent_id), obs);
     }
 
     Ok(())
@@ -127,10 +146,13 @@ pub fn leave_game(state: &GameManagerHandle, game_id: Uuid, agent_id: Uuid) -> R
         .get(&game_id)
         .ok_or_else(|| "Game not found".to_string())?;
 
-    let mut game = game_handle.write().unwrap();
+    let mut game = game_handle.write();
     if !game.remove_player(agent_id) {
         return Err("Not in game".to_string());
     }
+
+    // Clean up cached observation
+    state.observation_cache.remove(&(game_id, agent_id));
 
     Ok(())
 }
@@ -146,7 +168,7 @@ pub fn queue_action(
         .get(&game_id)
         .ok_or_else(|| "Game not found".to_string())?;
 
-    let game = game_handle.read().unwrap();
+    let game = game_handle.read();
     if !game.players.contains_key(&agent_id) {
         return Err("Not in game".to_string());
     }
@@ -168,7 +190,7 @@ pub fn queue_input(
         .get(&game_id)
         .ok_or_else(|| "Game not found".to_string())?;
 
-    let game = game_handle.read().unwrap();
+    let game = game_handle.read();
     let user_id = game
         .players
         .get(&agent_id)
@@ -183,13 +205,12 @@ pub fn get_observation(
     game_id: Uuid,
     agent_id: Uuid,
 ) -> Result<PlayerObservation, String> {
-    let game_handle = state
-        .games
-        .get(&game_id)
-        .ok_or_else(|| "Game not found".to_string())?;
-
-    let game = game_handle.read().unwrap();
-    game.get_player_observation(agent_id)
+    // Read from cache (lock-free) instead of acquiring game lock
+    // Cache is populated by game tick loop
+    state
+        .observation_cache
+        .get(&(game_id, agent_id))
+        .map(|r| r.clone())
         .ok_or_else(|| "Not in game".to_string())
 }
 
@@ -202,7 +223,7 @@ pub fn get_spectator_observation(
         .get(&game_id)
         .ok_or_else(|| "Game not found".to_string())?;
 
-    let game = game_handle.read().unwrap();
+    let game = game_handle.read();
     Ok(game.get_spectator_observation())
 }
 
@@ -212,7 +233,7 @@ pub fn list_games(state: &GameManagerHandle) -> Vec<GameInfo> {
         .iter()
         .map(|entry| {
             let id = *entry.key();
-            let game = entry.value().read().unwrap();
+            let game = entry.value().read();
             GameInfo {
                 id,
                 status: match game.status {
@@ -229,7 +250,7 @@ pub fn list_games(state: &GameManagerHandle) -> Vec<GameInfo> {
 
 pub fn get_game_info(state: &GameManagerHandle, game_id: Uuid) -> Option<GameInfo> {
     state.games.get(&game_id).map(|entry| {
-        let game = entry.value().read().unwrap();
+        let game = entry.value().read();
         GameInfo {
             id: game_id,
             status: match game.status {
@@ -246,7 +267,7 @@ pub fn get_game_info(state: &GameManagerHandle, game_id: Uuid) -> Option<GameInf
 pub fn matchmake(state: &GameManagerHandle) -> (Uuid, bool) {
     // Look for an existing waiting game
     for entry in state.games.iter() {
-        let game = entry.value().read().unwrap();
+        let game = entry.value().read();
         if game.status == GameStatus::Waiting {
             return (*entry.key(), false);
         }

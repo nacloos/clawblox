@@ -231,7 +231,7 @@ def find_closest_enemy(pos: list, other_players: list) -> dict | None:
     return closest
 
 
-def run_agent(agent_id: int, api_key: str, game_id: str, stop_event: threading.Event):
+def run_agent(agent_id: int, api_key: str, game_id: str, stop_event: threading.Event, cycle_delay: float):
     """Run a single agent"""
     prefix = f"[{agent_id}]"
     headers = {"Authorization": f"Bearer {api_key}"}
@@ -258,9 +258,9 @@ def run_agent(agent_id: int, api_key: str, game_id: str, stop_event: threading.E
     stuck_time = None
     arrivals = 0
     kills = 0
+    last_status_time = 0
 
     try:
-        tick = 0
         while not stop_event.is_set():
             # Observe
             resp = timed_request("GET", f"{API_BASE}/games/{game_id}/observe", "observe", headers=headers, timeout=5)
@@ -271,6 +271,7 @@ def run_agent(agent_id: int, api_key: str, game_id: str, stop_event: threading.E
             obs = resp.json()
             pos = obs["player"]["position"]
             other_players = obs.get("other_players", [])
+            now = time.time()
 
             # Track kills from attributes
             player_kills = obs.get("player", {}).get("attributes", {}).get("Kills", 0)
@@ -293,8 +294,9 @@ def run_agent(agent_id: int, api_key: str, game_id: str, stop_event: threading.E
                 waypoint = enemy_pos
                 stuck_time = None
 
-                if tick % 10 == 0:
+                if now - last_status_time >= 5.0:
                     print(f"{prefix} [COMBAT] enemy at dist {enemy_dist:.1f}", flush=True)
+                    last_status_time = now
             else:
                 # No enemy - explore
                 dist = distance_xz(pos, waypoint)
@@ -321,14 +323,14 @@ def run_agent(agent_id: int, api_key: str, game_id: str, stop_event: threading.E
             move_payload = {"type": "MoveTo", "data": {"position": waypoint}}
             timed_request("POST", f"{API_BASE}/games/{game_id}/input", "input", headers=headers, json=move_payload, timeout=5)
 
-            # Periodic status
-            if tick % 20 == 0:
+            # Periodic status (every ~5 seconds)
+            if now - last_status_time >= 5.0:
                 health = obs.get("player", {}).get("health", 100)
                 print(f"{prefix} pos=({pos[0]:.0f},{pos[2]:.0f}) hp={health} enemies={len(other_players)}", flush=True)
+                last_status_time = now
 
             last_pos = pos
-            tick += 1
-            time.sleep(0.1)
+            time.sleep(cycle_delay)
 
     finally:
         timed_request("POST", f"{API_BASE}/games/{game_id}/leave", "leave", headers=headers, timeout=5)
@@ -362,9 +364,13 @@ def main():
     parser.add_argument("-n", "--num-agents", type=int, default=1, help="Number of agents")
     parser.add_argument("-d", "--duration", type=float, default=None, help="Run for N seconds")
     parser.add_argument("--stats-interval", type=float, default=10.0, help="Print latency stats every N seconds")
+    parser.add_argument("--rate", type=float, default=1.0, help="Request cycles per second per agent (default: 1.0 for LLM-realistic pacing)")
     args = parser.parse_args()
 
+    cycle_delay = 1.0 / args.rate if args.rate > 0 else 0.1
+
     print(f"API: {API_BASE}", flush=True)
+    print(f"Rate: {args.rate} cycles/s per agent ({cycle_delay:.2f}s delay)", flush=True)
 
     # Get API keys
     api_keys = get_api_keys(args.num_agents)
@@ -388,7 +394,7 @@ def main():
     threads = []
 
     for i in range(args.num_agents):
-        t = threading.Thread(target=run_agent, args=(i, api_keys[i], game_id, stop_event))
+        t = threading.Thread(target=run_agent, args=(i, api_keys[i], game_id, stop_event, cycle_delay))
         t.daemon = True
         t.start()
         threads.append(t)

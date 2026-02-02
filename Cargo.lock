@@ -222,6 +222,7 @@ dependencies = [
  "home",
  "mlua",
  "nalgebra",
+ "parking_lot",
  "rand 0.8.5",
  "rapier3d",
  "serde",
