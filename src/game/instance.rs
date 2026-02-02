@@ -115,7 +115,7 @@ impl GameInstance {
             let spawn_z = (player_index / 4.0).floor() * 3.0;
 
             // Register character controller for player movement
-            self.physics.add_character(hrp_id, [spawn_x, 5.0, spawn_z], 0.5, 2.0);
+            self.physics.add_character(hrp_id, [spawn_x, 6.0, spawn_z], 1.0, 5.0);
             self.player_hrp_ids.insert(agent_id, hrp_id);
 
             if let Err(e) = runtime.fire_player_added(&player) {
@@ -322,32 +322,52 @@ impl GameInstance {
         // For each player, check if their humanoid has a move target
         for (&agent_id, &user_id) in &self.players {
             let Some(&hrp_id) = self.player_hrp_ids.get(&agent_id) else {
+                if self.tick % 120 == 0 {
+                    println!("[SYNC] user_id={} no hrp_id", user_id);
+                }
                 continue;
             };
 
             // Get player's character and humanoid
             let Some(player) = runtime.players().get_player_by_user_id(user_id) else {
+                if self.tick % 120 == 0 {
+                    println!("[SYNC] user_id={} no player", user_id);
+                }
                 continue;
             };
 
             let player_data = player.data.lock().unwrap();
             let Some(character_weak) = player_data.player_data.as_ref().and_then(|pd| pd.character.as_ref()) else {
+                if self.tick % 120 == 0 {
+                    println!("[SYNC] user_id={} no character ref", user_id);
+                }
                 continue;
             };
             let Some(character_ref) = character_weak.upgrade() else {
+                if self.tick % 120 == 0 {
+                    println!("[SYNC] user_id={} character ref upgrade failed", user_id);
+                }
                 continue;
             };
             drop(player_data);
 
             // Find humanoid in character
             let character_data = character_ref.lock().unwrap();
+            let mut found_humanoid = false;
             for child_ref in &character_data.children {
                 let mut child_data = child_ref.lock().unwrap();
                 if let Some(humanoid) = &mut child_data.humanoid_data {
+                    found_humanoid = true;
                     if let Some(target) = humanoid.move_to_target.take() {
+                        println!("[SYNC] user_id={} hrp_id={} GOT TARGET ({:.2},{:.2},{:.2})",
+                            user_id, hrp_id, target.x, target.y, target.z);
                         self.physics.set_character_target(hrp_id, Some([target.x, target.y, target.z]));
                     }
                 }
+            }
+            if !found_humanoid && self.tick % 120 == 0 {
+                println!("[SYNC] user_id={} hrp_id={} NO HUMANOID in {} children",
+                    user_id, hrp_id, character_data.children.len());
             }
         }
     }
@@ -377,7 +397,7 @@ impl GameInstance {
     /// Updates character controller movement towards targets
     /// Uses raycast for ground detection (Roblox-style) and character controller for horizontal collision
     fn update_character_movement(&mut self, dt: f32) {
-        const CHARACTER_HALF_HEIGHT: f32 = 1.0; // Capsule half-height
+        const CHARACTER_HALF_HEIGHT: f32 = 2.5; // Capsule half-height (5.0 total height / 2)
         const SNAP_THRESHOLD: f32 = 0.5; // Max distance to snap to ground
         const MAX_RAYCAST_DIST: f32 = 10.0; // How far down to look for ground
         const GROUND_OFFSET: f32 = 0.02; // Small gap to prevent move_shape detecting floor penetration
@@ -441,10 +461,18 @@ impl GameInstance {
                     let speed = WALK_SPEED * dt;
                     dx = (tx / dist_xz) * speed;
                     dz = (tz / dist_xz) * speed;
+                    if self.tick % 60 == 0 {
+                        println!("[MOVE] hrp={} pos=({:.2},{:.2},{:.2}) target=({:.2},{:.2},{:.2}) dist={:.2} dx={:.4} dz={:.4}",
+                            hrp_id, current_pos[0], current_pos[1], current_pos[2],
+                            target[0], target[1], target[2], dist_xz, dx, dz);
+                    }
                 } else {
                     // Reached target, clear it
+                    println!("[MOVE] hrp={} REACHED target, clearing", hrp_id);
                     self.physics.set_character_target(hrp_id, None);
                 }
+            } else if self.tick % 60 == 0 {
+                println!("[MOVE] hrp={} pos=({:.2},{:.2},{:.2}) NO TARGET", hrp_id, current_pos[0], current_pos[1], current_pos[2]);
             }
 
             // 4. Apply movement: horizontal with collision + vertical direct

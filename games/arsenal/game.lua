@@ -8,12 +8,12 @@ local Players = game:GetService("Players")
 -- CONFIGURATION
 --------------------------------------------------------------------------------
 
-local ARENA_SIZE = 80
+local ARENA_SIZE = 200
 local RESPAWN_TIME = 3
 local HEALTH_REGEN_DELAY = 5
 local HEALTH_REGEN_RATE = 10
 local MELEE_DAMAGE = 35
-local MELEE_RANGE = 6
+local MELEE_RANGE = 8
 local MELEE_COOLDOWN = 0.8
 
 local WEAPONS = {
@@ -35,10 +35,10 @@ local WEAPONS = {
 }
 
 local SPAWN_POINTS = {
-    Vector3.new(-30, 3, -30),
-    Vector3.new(-30, 3, 30),
-    Vector3.new(30, 3, 30),
-    Vector3.new(30, 3, -30),
+    Vector3.new(-75, 12, -75),
+    Vector3.new(-75, 12, 75),
+    Vector3.new(75, 12, 75),
+    Vector3.new(75, 12, -75),
 }
 
 --------------------------------------------------------------------------------
@@ -53,20 +53,11 @@ local playerData = {} -- keyed by UserId: {lastFireTime, lastMeleeTime, lastDama
 
 -- Helper to get playerData by player object
 local function getPlayerData(player)
-    local uid = player.UserId
-    local data = playerData[uid]
-    print("[DEBUG] getPlayerData: UserId=", uid, "found=", data ~= nil)
-    return data
+    return playerData[player.UserId]
 end
 
 local function setPlayerData(player, data)
-    local uid = player.UserId
-    print("[DEBUG] setPlayerData called, UserId:", uid, "type:", type(uid))
-    playerData[uid] = data
-    print("[DEBUG] setPlayerData done, playerData has", #playerData, "entries")
-    for k, v in pairs(playerData) do
-        print("[DEBUG]   stored key:", k, "type:", type(k))
-    end
+    playerData[player.UserId] = data
 end
 
 --------------------------------------------------------------------------------
@@ -85,10 +76,10 @@ local function createArena()
 
     -- Walls (invisible barriers)
     local wallPositions = {
-        {Vector3.new(ARENA_SIZE/2 + 1, 10, 0), Vector3.new(2, 20, ARENA_SIZE)},
-        {Vector3.new(-ARENA_SIZE/2 - 1, 10, 0), Vector3.new(2, 20, ARENA_SIZE)},
-        {Vector3.new(0, 10, ARENA_SIZE/2 + 1), Vector3.new(ARENA_SIZE, 20, 2)},
-        {Vector3.new(0, 10, -ARENA_SIZE/2 - 1), Vector3.new(ARENA_SIZE, 20, 2)},
+        {Vector3.new(ARENA_SIZE/2 + 1, 25, 0), Vector3.new(2, 50, ARENA_SIZE)},
+        {Vector3.new(-ARENA_SIZE/2 - 1, 25, 0), Vector3.new(2, 50, ARENA_SIZE)},
+        {Vector3.new(0, 25, ARENA_SIZE/2 + 1), Vector3.new(ARENA_SIZE, 50, 2)},
+        {Vector3.new(0, 25, -ARENA_SIZE/2 - 1), Vector3.new(ARENA_SIZE, 50, 2)},
     }
     for i, data in ipairs(wallPositions) do
         local wall = Instance.new("Part")
@@ -104,23 +95,23 @@ local function createArena()
     -- Center platform (low, just above ground)
     local centerPlatform = Instance.new("Part")
     centerPlatform.Name = "CenterPlatform"
-    centerPlatform.Size = Vector3.new(16, 1, 16)
-    centerPlatform.Position = Vector3.new(0, 0.5, 0)
+    centerPlatform.Size = Vector3.new(40, 2, 40)
+    centerPlatform.Position = Vector3.new(0, 1, 0)
     centerPlatform.Anchored = true
     centerPlatform.Color = Color3.fromRGB(100, 140, 180)
     centerPlatform.Parent = Workspace
 
     -- Corner platforms
     local cornerPositions = {
-        Vector3.new(-28, 4, -28),
-        Vector3.new(-28, 4, 28),
-        Vector3.new(28, 4, 28),
-        Vector3.new(28, 4, -28),
+        Vector3.new(-70, 10, -70),
+        Vector3.new(-70, 10, 70),
+        Vector3.new(70, 10, 70),
+        Vector3.new(70, 10, -70),
     }
     for i, pos in ipairs(cornerPositions) do
         local platform = Instance.new("Part")
         platform.Name = "CornerPlatform_" .. i
-        platform.Size = Vector3.new(10, 1, 10)
+        platform.Size = Vector3.new(25, 2, 25)
         platform.Position = pos
         platform.Anchored = true
         platform.Color = Color3.fromRGB(180, 120, 120)
@@ -129,8 +120,8 @@ local function createArena()
         -- Platform support
         local pSupport = Instance.new("Part")
         pSupport.Name = "CornerSupport_" .. i
-        pSupport.Size = Vector3.new(4, 4, 4)
-        pSupport.Position = pos - Vector3.new(0, 2.5, 0)
+        pSupport.Size = Vector3.new(10, 10, 10)
+        pSupport.Position = pos - Vector3.new(0, 6, 0)
         pSupport.Anchored = true
         pSupport.Color = Color3.fromRGB(150, 100, 100)
         pSupport.Parent = Workspace
@@ -138,19 +129,19 @@ local function createArena()
 
     -- Cover blocks
     local coverPositions = {
-        Vector3.new(-15, 2.5, -15),
-        Vector3.new(15, 2.5, -15),
-        Vector3.new(-15, 2.5, 15),
-        Vector3.new(15, 2.5, 15),
-        Vector3.new(-25, 2.5, 0),
-        Vector3.new(25, 2.5, 0),
-        Vector3.new(0, 2.5, -25),
-        Vector3.new(0, 2.5, 25),
+        Vector3.new(-37.5, 7.5, -37.5),
+        Vector3.new(37.5, 7.5, -37.5),
+        Vector3.new(-37.5, 7.5, 37.5),
+        Vector3.new(37.5, 7.5, 37.5),
+        Vector3.new(-62.5, 7.5, 0),
+        Vector3.new(62.5, 7.5, 0),
+        Vector3.new(0, 7.5, -62.5),
+        Vector3.new(0, 7.5, 62.5),
     }
     for i, pos in ipairs(coverPositions) do
         local cover = Instance.new("Part")
         cover.Name = "Cover_" .. i
-        cover.Size = Vector3.new(6, 5, 6)
+        cover.Size = Vector3.new(15, 15, 15)
         cover.Position = pos
         cover.Anchored = true
         cover.Color = Color3.fromRGB(180, 180, 190)
@@ -159,10 +150,10 @@ local function createArena()
 
     -- Bridges along edges (centered, touching side cover blocks)
     local bridges = {
-        {Vector3.new(0, 4, -28), Vector3.new(46, 0.5, 3)},   -- back edge
-        {Vector3.new(0, 4, 28), Vector3.new(46, 0.5, 3)},    -- front edge
-        {Vector3.new(-28, 4, 0), Vector3.new(3, 0.5, 46)},   -- left edge
-        {Vector3.new(28, 4, 0), Vector3.new(3, 0.5, 46)},    -- right edge
+        {Vector3.new(0, 10, -70), Vector3.new(115, 1, 8)},   -- back edge
+        {Vector3.new(0, 10, 70), Vector3.new(115, 1, 8)},    -- front edge
+        {Vector3.new(-70, 10, 0), Vector3.new(8, 1, 115)},   -- left edge
+        {Vector3.new(70, 10, 0), Vector3.new(8, 1, 115)},    -- right edge
     }
     for i, data in ipairs(bridges) do
         local bridge = Instance.new("Part")
@@ -755,7 +746,7 @@ local leaderboardTimer = 0
 
 local function startCountdown()
     gameState = "countdown"
-    countdownTime = 5
+    countdownTime = 0  -- Start immediately
 
     -- Reset all players
     for _, player in ipairs(Players:GetPlayers()) do
@@ -763,7 +754,7 @@ local function startCountdown()
         respawnPlayer(player)
     end
 
-    print("Match starting in 5 seconds...")
+    print("Match starting...")
 end
 
 local function startMatch()

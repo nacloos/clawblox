@@ -237,8 +237,8 @@ impl LuaRuntime {
         // Create HumanoidRootPart as a Cylinder (capsule-like shape for player)
         let mut hrp_data = InstanceData::new_part("HumanoidRootPart");
         if let Some(part) = &mut hrp_data.part_data {
-            part.size = super::types::Vector3::new(1.0, 2.0, 1.0); // diameter, height, diameter
-            part.position = super::types::Vector3::new(0.0, 5.0, 0.0); // Spawn above floor
+            part.size = super::types::Vector3::new(2.0, 5.0, 2.0); // diameter, height, diameter (R15 scale)
+            part.position = super::types::Vector3::new(0.0, 6.0, 0.0); // Spawn above floor
             part.anchored = false;
             part.shape = super::types::PartType::Cylinder;
             part.color = super::types::Color3::new(0.9, 0.45, 0.3); // Orange-reddish player color

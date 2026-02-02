@@ -9,15 +9,15 @@ interface GameSceneProps {
   followPlayerId?: string | null
 }
 
-// Arena is 80x80 units, centered at origin
+// Arena is 200x200 units, centered at origin
 // Fixed overhead isometric view that frames the arena
-const OVERVIEW_POSITION = new THREE.Vector3(0, 55, 28)
+const OVERVIEW_POSITION = new THREE.Vector3(0, 140, 70)
 const OVERVIEW_TARGET = new THREE.Vector3(0, 0, 0)
 
 // Follow camera settings
-const FOLLOW_DISTANCE = 12
-const FOLLOW_HEIGHT = 8
-const MIN_CAMERA_DISTANCE = 3
+const FOLLOW_DISTANCE = 20
+const FOLLOW_HEIGHT = 15
+const MIN_CAMERA_DISTANCE = 5
 
 function CameraController({
   gameState,
@@ -87,7 +87,7 @@ function CameraController({
 export default function GameScene({ gameState, followPlayerId }: GameSceneProps) {
   return (
     <Canvas
-      camera={{ position: [0, 55, 28], fov: 50 }}
+      camera={{ position: [0, 140, 70], fov: 50 }}
       shadows
       gl={{ logarithmicDepthBuffer: true }}
       style={{ background: 'linear-gradient(to bottom, #1a1a2e 0%, #0f0f1a 100%)' }}
@@ -95,16 +95,16 @@ export default function GameScene({ gameState, followPlayerId }: GameSceneProps)
       <hemisphereLight args={['#87ceeb', '#444444', 0.6]} />
       <ambientLight intensity={0.15} />
       <directionalLight
-        position={[50, 100, 50]}
+        position={[100, 200, 100]}
         intensity={1.2}
         castShadow
         shadow-mapSize={[2048, 2048]}
         shadow-camera-near={1}
-        shadow-camera-far={250}
-        shadow-camera-left={-80}
-        shadow-camera-right={80}
-        shadow-camera-top={80}
-        shadow-camera-bottom={-80}
+        shadow-camera-far={400}
+        shadow-camera-left={-120}
+        shadow-camera-right={120}
+        shadow-camera-top={120}
+        shadow-camera-bottom={-120}
         shadow-bias={-0.0001}
       />
       <pointLight position={[-50, 50, -50]} intensity={0.3} color="#4a9eff" />

@@ -522,7 +522,7 @@ mod tests {
 
         // Add character above floor
         let char_id = 100;
-        world.add_character(char_id, [0.0, 5.0, 0.0], 0.5, 2.0);
+        world.add_character(char_id, [0.0, 6.0, 0.0], 1.0, 5.0);
 
         world.step(1.0 / 60.0);
         world.query_pipeline.update(&world.collider_set);
@@ -534,12 +534,12 @@ mod tests {
         assert!(hit.is_some(), "Should detect floor");
 
         let (distance, ground_y) = hit.unwrap();
-        // Character at Y=5, floor top at Y=0.5, distance = 4.5
-        assert!(distance > 4.0 && distance < 5.0, "Distance to floor should be ~4.5, got {}", distance);
+        // Character at Y=6, floor top at Y=0.5, distance = 5.5
+        assert!(distance > 5.0 && distance < 6.0, "Distance to floor should be ~5.5, got {}", distance);
         assert!((ground_y - 0.5).abs() < 0.1, "Ground Y should be ~0.5 (floor top), got {}", ground_y);
 
         // Test horizontal movement with Y positioning
-        let new_y = ground_y + 1.0; // half-height
+        let new_y = ground_y + 2.5; // half-height (5.0 / 2)
         world.move_character_and_set_y(char_id, 1.0, 0.0, new_y, 1.0 / 60.0);
         world.step(1.0 / 60.0);
 
