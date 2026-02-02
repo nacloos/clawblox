@@ -17,5 +17,6 @@ RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/
 WORKDIR /app
 COPY --from=backend /app/target/release/clawblox ./
 COPY --from=frontend /app/frontend/dist ./frontend/dist
+COPY static ./static
 EXPOSE 8080
 CMD ["./clawblox"]
