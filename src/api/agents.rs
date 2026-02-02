@@ -10,12 +10,22 @@ use uuid::Uuid;
 
 use crate::db::models::Agent;
 
-pub fn routes(pool: PgPool) -> Router {
+use super::ApiKeyCache;
+
+#[derive(Clone)]
+pub struct AgentsState {
+    pub pool: PgPool,
+    pub api_key_cache: ApiKeyCache,
+}
+
+pub fn routes(pool: PgPool, api_key_cache: ApiKeyCache) -> Router {
+    let state = AgentsState { pool, api_key_cache };
+
     Router::new()
         .route("/agents/register", post(register))
         .route("/agents/me", get(me))
         .route("/agents/status", get(status))
-        .with_state(pool)
+        .with_state(state)
 }
 
 fn generate_api_key() -> String {
@@ -65,12 +75,12 @@ struct AgentPublic {
 }
 
 async fn register(
-    State(pool): State<PgPool>,
+    State(state): State<AgentsState>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<Json<RegisterResponse>, (StatusCode, String)> {
     let existing = sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM agents WHERE name = $1")
         .bind(&req.name)
-        .fetch_one(&pool)
+        .fetch_one(&state.pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -82,10 +92,12 @@ async fn register(
     let claim_token = generate_claim_token();
     let verification_code = generate_verification_code();
 
-    sqlx::query(
+    // Insert and get the generated agent ID
+    let agent_id: (Uuid,) = sqlx::query_as(
         r#"
         INSERT INTO agents (name, api_key, description, claim_token, verification_code, status)
         VALUES ($1, $2, $3, $4, $5, 'pending_claim')
+        RETURNING id
         "#,
     )
     .bind(&req.name)
@@ -93,9 +105,12 @@ async fn register(
     .bind(&req.description)
     .bind(&claim_token)
     .bind(&verification_code)
-    .execute(&pool)
+    .fetch_one(&state.pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Populate the API key cache
+    state.api_key_cache.insert(api_key.clone(), agent_id.0);
 
     Ok(Json(RegisterResponse {
         agent: AgentPublic {
@@ -124,7 +139,7 @@ struct AgentResponse {
 }
 
 async fn me(
-    State(pool): State<PgPool>,
+    State(state): State<AgentsState>,
     headers: HeaderMap,
 ) -> Result<Json<AgentResponse>, (StatusCode, String)> {
     let api_key = extract_api_key(&headers)
@@ -134,10 +149,13 @@ async fn me(
         "SELECT id, name, api_key, description, claim_token, verification_code, status, created_at FROM agents WHERE api_key = $1",
     )
     .bind(&api_key)
-    .fetch_optional(&pool)
+    .fetch_optional(&state.pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
+
+    // Populate cache while we have the data
+    state.api_key_cache.insert(api_key, agent.id);
 
     Ok(Json(AgentResponse {
         id: agent.id,
@@ -153,18 +171,21 @@ struct StatusResponse {
 }
 
 async fn status(
-    State(pool): State<PgPool>,
+    State(state): State<AgentsState>,
     headers: HeaderMap,
 ) -> Result<Json<StatusResponse>, (StatusCode, String)> {
     let api_key = extract_api_key(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
 
-    let agent = sqlx::query_as::<_, (String,)>("SELECT status FROM agents WHERE api_key = $1")
+    let agent = sqlx::query_as::<_, (Uuid, String)>("SELECT id, status FROM agents WHERE api_key = $1")
         .bind(&api_key)
-        .fetch_optional(&pool)
+        .fetch_optional(&state.pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
 
-    Ok(Json(StatusResponse { status: agent.0 }))
+    // Populate cache while we have the data
+    state.api_key_cache.insert(api_key, agent.0);
+
+    Ok(Json(StatusResponse { status: agent.1 }))
 }

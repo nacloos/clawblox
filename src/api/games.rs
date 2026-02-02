@@ -12,15 +12,17 @@ use crate::db::models::Game;
 use crate::game::{self, GameManagerHandle};
 
 use super::agents::extract_api_key;
+use super::ApiKeyCache;
 
 #[derive(Clone)]
 pub struct GamesState {
     pub pool: PgPool,
     pub game_manager: GameManagerHandle,
+    pub api_key_cache: ApiKeyCache,
 }
 
-pub fn routes(pool: PgPool, game_manager: GameManagerHandle) -> Router {
-    let state = GamesState { pool, game_manager };
+pub fn routes(pool: PgPool, game_manager: GameManagerHandle, api_key_cache: ApiKeyCache) -> Router {
+    let state = GamesState { pool, game_manager, api_key_cache };
 
     Router::new()
         .route("/games", get(list_games).post(create_game))
@@ -30,6 +32,33 @@ pub fn routes(pool: PgPool, game_manager: GameManagerHandle) -> Router {
         // .route("/games/{id}/publish", post(publish_game))  // Disabled for now
         .route("/matchmake", post(matchmake))
         .with_state(state)
+}
+
+/// Gets agent_id from API key, checking cache first, then DB (and caching result)
+async fn get_agent_id_from_api_key(
+    api_key: &str,
+    cache: &ApiKeyCache,
+    pool: &PgPool,
+) -> Result<Uuid, (StatusCode, String)> {
+    // Check cache first
+    if let Some(agent_id) = cache.get(api_key) {
+        return Ok(*agent_id);
+    }
+
+    // Cache miss - query DB
+    let agent = sqlx::query_as::<_, (Uuid,)>("SELECT id FROM agents WHERE api_key = $1")
+        .bind(api_key)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
+
+    let agent_id = agent.0;
+
+    // Cache the result
+    cache.insert(api_key.to_string(), agent_id);
+
+    Ok(agent_id)
 }
 
 #[derive(Serialize)]
@@ -358,42 +387,42 @@ async fn join_game(
     let api_key = extract_api_key(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
 
-    let agent = sqlx::query_as::<_, (Uuid,)>("SELECT id FROM agents WHERE api_key = $1")
-        .bind(&api_key)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
+    // Use cache for agent auth
+    let agent_id = get_agent_id_from_api_key(&api_key, &state.api_key_cache, &state.pool).await?;
 
-    let agent_id = agent.0;
+    // Check if instance is already running (avoids DB query for script)
+    if !game::is_instance_running(&state.game_manager, game_id) {
+        // Get game from database including script (only if we need to create instance)
+        let db_game: Game = sqlx::query_as("SELECT * FROM games WHERE id = $1")
+            .bind(game_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or((StatusCode::NOT_FOUND, "Game not found".to_string()))?;
 
-    // Get game from database including script
-    let db_game: Game = sqlx::query_as("SELECT * FROM games WHERE id = $1")
-        .bind(game_id)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Game not found".to_string()))?;
-
-    // Get or create the running instance with script if available
-    game::get_or_create_instance_with_script(
-        &state.game_manager,
-        game_id,
-        db_game.script_code.as_deref(),
-    );
+        // Create the running instance with script
+        game::get_or_create_instance_with_script(
+            &state.game_manager,
+            game_id,
+            db_game.script_code.as_deref(),
+        );
+    }
 
     // Join the instance
     game::join_game(&state.game_manager, game_id, agent_id)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
-    sqlx::query(
-        "INSERT INTO game_players (game_id, agent_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-    )
-    .bind(game_id)
-    .bind(agent_id)
-    .execute(&state.pool)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Fire-and-forget: insert game_players record in background
+    let pool = state.pool.clone();
+    tokio::spawn(async move {
+        let _ = sqlx::query(
+            "INSERT INTO game_players (game_id, agent_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(game_id)
+        .bind(agent_id)
+        .execute(&pool)
+        .await;
+    });
 
     Ok(Json(JoinGameResponse {
         success: true,
@@ -409,24 +438,21 @@ async fn leave_game(
     let api_key = extract_api_key(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
 
-    let agent = sqlx::query_as::<_, (Uuid,)>("SELECT id FROM agents WHERE api_key = $1")
-        .bind(&api_key)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
-
-    let agent_id = agent.0;
+    // Use cache for agent auth
+    let agent_id = get_agent_id_from_api_key(&api_key, &state.api_key_cache, &state.pool).await?;
 
     game::leave_game(&state.game_manager, game_id, agent_id)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
-    sqlx::query("DELETE FROM game_players WHERE game_id = $1 AND agent_id = $2")
-        .bind(game_id)
-        .bind(agent_id)
-        .execute(&state.pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Fire-and-forget: delete game_players record in background
+    let pool = state.pool.clone();
+    tokio::spawn(async move {
+        let _ = sqlx::query("DELETE FROM game_players WHERE game_id = $1 AND agent_id = $2")
+            .bind(game_id)
+            .bind(agent_id)
+            .execute(&pool)
+            .await;
+    });
 
     Ok(Json(JoinGameResponse {
         success: true,
@@ -447,12 +473,8 @@ async fn matchmake(
     let api_key = extract_api_key(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
 
-    let _ = sqlx::query_as::<_, (Uuid,)>("SELECT id FROM agents WHERE api_key = $1")
-        .bind(&api_key)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
+    // Use cache for agent auth (just validate, don't need agent_id)
+    let _ = get_agent_id_from_api_key(&api_key, &state.api_key_cache, &state.pool).await?;
 
     // First check for games with waiting status and room for players
     let waiting_game: Option<Game> = sqlx::query_as(

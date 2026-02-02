@@ -955,10 +955,7 @@ impl UserData for Instance {
             |_, this, (position, _part): (Vector3, Option<Instance>)| {
                 let mut data = this.data.lock().unwrap();
                 if let Some(humanoid) = &mut data.humanoid_data {
-                    println!("[DEBUG] Humanoid:MoveTo({}, {}, {})", position.x, position.y, position.z);
                     humanoid.move_to_target = Some(position);
-                } else {
-                    println!("[DEBUG] MoveTo called but no humanoid_data!");
                 }
                 Ok(())
             },

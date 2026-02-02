@@ -23,15 +23,44 @@ use crate::game::{
 };
 
 use super::agents::extract_api_key;
+use super::ApiKeyCache;
 
 #[derive(Clone)]
 pub struct GameplayState {
     pub pool: PgPool,
     pub game_manager: GameManagerHandle,
+    pub api_key_cache: ApiKeyCache,
 }
 
-pub fn routes(pool: PgPool, game_manager: GameManagerHandle) -> Router {
-    let state = GameplayState { pool, game_manager };
+/// Gets agent_id from API key, checking cache first, then DB (and caching result)
+async fn get_agent_id_from_api_key(
+    api_key: &str,
+    cache: &ApiKeyCache,
+    pool: &PgPool,
+) -> Result<Uuid, (StatusCode, String)> {
+    // Check cache first
+    if let Some(agent_id) = cache.get(api_key) {
+        return Ok(*agent_id);
+    }
+
+    // Cache miss - query DB
+    let agent = sqlx::query_as::<_, (Uuid,)>("SELECT id FROM agents WHERE api_key = $1")
+        .bind(api_key)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
+
+    let agent_id = agent.0;
+
+    // Cache the result
+    cache.insert(api_key.to_string(), agent_id);
+
+    Ok(agent_id)
+}
+
+pub fn routes(pool: PgPool, game_manager: GameManagerHandle, api_key_cache: ApiKeyCache) -> Router {
+    let state = GameplayState { pool, game_manager, api_key_cache };
 
     Router::new()
         .route("/games/{id}/observe", get(observe))
@@ -51,14 +80,7 @@ async fn observe(
     let api_key = extract_api_key(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
 
-    let agent = sqlx::query_as::<_, (Uuid,)>("SELECT id FROM agents WHERE api_key = $1")
-        .bind(&api_key)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
-
-    let agent_id = agent.0;
+    let agent_id = get_agent_id_from_api_key(&api_key, &state.api_key_cache, &state.pool).await?;
 
     let observation = game::get_observation(&state.game_manager, game_id, agent_id)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
@@ -110,14 +132,7 @@ async fn action(
     let api_key = extract_api_key(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
 
-    let agent = sqlx::query_as::<_, (Uuid,)>("SELECT id FROM agents WHERE api_key = $1")
-        .bind(&api_key)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
-
-    let agent_id = agent.0;
+    let agent_id = get_agent_id_from_api_key(&api_key, &state.api_key_cache, &state.pool).await?;
 
     game::queue_action(&state.game_manager, game_id, agent_id, game_action)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
@@ -171,21 +186,7 @@ async fn send_input(
     let api_key = extract_api_key(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
 
-    let agent = sqlx::query_as::<_, (Uuid,)>("SELECT id FROM agents WHERE api_key = $1")
-        .bind(&api_key)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
-
-    let agent_id = agent.0;
-
-    // Increment play count on first input (could be optimized)
-    sqlx::query("UPDATE games SET plays = plays + 1 WHERE id = $1")
-        .bind(game_id)
-        .execute(&state.pool)
-        .await
-        .ok(); // Ignore errors for play count
+    let agent_id = get_agent_id_from_api_key(&api_key, &state.api_key_cache, &state.pool).await?;
 
     game::queue_input(&state.game_manager, game_id, agent_id, input.input_type, input.data)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;

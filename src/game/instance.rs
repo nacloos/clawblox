@@ -322,52 +322,32 @@ impl GameInstance {
         // For each player, check if their humanoid has a move target
         for (&agent_id, &user_id) in &self.players {
             let Some(&hrp_id) = self.player_hrp_ids.get(&agent_id) else {
-                if self.tick % 120 == 0 {
-                    println!("[SYNC] user_id={} no hrp_id", user_id);
-                }
                 continue;
             };
 
             // Get player's character and humanoid
             let Some(player) = runtime.players().get_player_by_user_id(user_id) else {
-                if self.tick % 120 == 0 {
-                    println!("[SYNC] user_id={} no player", user_id);
-                }
                 continue;
             };
 
             let player_data = player.data.lock().unwrap();
             let Some(character_weak) = player_data.player_data.as_ref().and_then(|pd| pd.character.as_ref()) else {
-                if self.tick % 120 == 0 {
-                    println!("[SYNC] user_id={} no character ref", user_id);
-                }
                 continue;
             };
             let Some(character_ref) = character_weak.upgrade() else {
-                if self.tick % 120 == 0 {
-                    println!("[SYNC] user_id={} character ref upgrade failed", user_id);
-                }
                 continue;
             };
             drop(player_data);
 
             // Find humanoid in character
             let character_data = character_ref.lock().unwrap();
-            let mut found_humanoid = false;
             for child_ref in &character_data.children {
                 let mut child_data = child_ref.lock().unwrap();
                 if let Some(humanoid) = &mut child_data.humanoid_data {
-                    found_humanoid = true;
                     if let Some(target) = humanoid.move_to_target.take() {
-                        println!("[SYNC] user_id={} hrp_id={} GOT TARGET ({:.2},{:.2},{:.2})",
-                            user_id, hrp_id, target.x, target.y, target.z);
                         self.physics.set_character_target(hrp_id, Some([target.x, target.y, target.z]));
                     }
                 }
-            }
-            if !found_humanoid && self.tick % 120 == 0 {
-                println!("[SYNC] user_id={} hrp_id={} NO HUMANOID in {} children",
-                    user_id, hrp_id, character_data.children.len());
             }
         }
     }
@@ -461,18 +441,10 @@ impl GameInstance {
                     let speed = WALK_SPEED * dt;
                     dx = (tx / dist_xz) * speed;
                     dz = (tz / dist_xz) * speed;
-                    if self.tick % 60 == 0 {
-                        println!("[MOVE] hrp={} pos=({:.2},{:.2},{:.2}) target=({:.2},{:.2},{:.2}) dist={:.2} dx={:.4} dz={:.4}",
-                            hrp_id, current_pos[0], current_pos[1], current_pos[2],
-                            target[0], target[1], target[2], dist_xz, dx, dz);
-                    }
                 } else {
                     // Reached target, clear it
-                    println!("[MOVE] hrp={} REACHED target, clearing", hrp_id);
                     self.physics.set_character_target(hrp_id, None);
                 }
-            } else if self.tick % 60 == 0 {
-                println!("[MOVE] hrp={} pos=({:.2},{:.2},{:.2}) NO TARGET", hrp_id, current_pos[0], current_pos[1], current_pos[2]);
             }
 
             // 4. Apply movement: horizontal with collision + vertical direct
@@ -481,7 +453,7 @@ impl GameInstance {
     }
 
     /// Gets the observation for a specific player
-    pub fn get_player_observation(&mut self, agent_id: Uuid) -> Option<PlayerObservation> {
+    pub fn get_player_observation(&self, agent_id: Uuid) -> Option<PlayerObservation> {
         let user_id = *self.players.get(&agent_id)?;
 
         let runtime = self.lua_runtime.as_ref()?;
@@ -646,7 +618,7 @@ impl GameInstance {
     }
 
     /// Gets the spectator observation (full world state from Lua Workspace)
-    pub fn get_spectator_observation(&mut self) -> SpectatorObservation {
+    pub fn get_spectator_observation(&self) -> SpectatorObservation {
         let mut entities = Vec::new();
         let mut players = Vec::new();
 

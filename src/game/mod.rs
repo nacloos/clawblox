@@ -2,7 +2,7 @@ pub mod instance;
 pub mod lua;
 pub mod physics;
 
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -10,16 +10,21 @@ use uuid::Uuid;
 
 use instance::{GameAction, GameInstance, GameStatus, PlayerObservation};
 
-pub type GameManagerHandle = Arc<RwLock<GameManagerState>>;
+/// Handle to the game manager - now uses DashMap for per-game locks
+pub type GameManagerHandle = Arc<GameManagerState>;
+
+/// Per-game lock wrapper
+pub type GameInstanceHandle = Arc<RwLock<GameInstance>>;
 
 pub struct GameManagerState {
-    pub games: HashMap<Uuid, GameInstance>,
+    /// Each game has its own RwLock for fine-grained locking
+    pub games: DashMap<Uuid, GameInstanceHandle>,
 }
 
 impl GameManagerState {
     pub fn new() -> Self {
         Self {
-            games: HashMap::new(),
+            games: DashMap::new(),
         }
     }
 }
@@ -31,7 +36,7 @@ pub struct GameManager {
 
 impl GameManager {
     pub fn new(tick_rate: u64) -> (Self, GameManagerHandle) {
-        let state = Arc::new(RwLock::new(GameManagerState::new()));
+        let state = Arc::new(GameManagerState::new());
         let handle = Arc::clone(&state);
 
         (Self { state, tick_rate }, handle)
@@ -43,12 +48,13 @@ impl GameManager {
         loop {
             let start = Instant::now();
 
-            {
-                let mut state = self.state.write().unwrap();
-                for (_, game) in state.games.iter_mut() {
-                    if game.status == GameStatus::Playing {
-                        game.tick();
-                    }
+            // Iterate over games without holding global lock
+            // Each game is locked individually during its tick
+            for entry in self.state.games.iter() {
+                let game_handle = entry.value().clone();
+                let mut game = game_handle.write().unwrap();
+                if game.status == GameStatus::Playing {
+                    game.tick();
                 }
             }
 
@@ -63,9 +69,9 @@ impl GameManager {
 pub fn create_game(state: &GameManagerHandle) -> Uuid {
     let game_id = Uuid::new_v4();
     let game = GameInstance::new(game_id);
+    let game_handle = Arc::new(RwLock::new(game));
 
-    let mut state = state.write().unwrap();
-    state.games.insert(game_id, game);
+    state.games.insert(game_id, game_handle);
 
     game_id
 }
@@ -83,8 +89,6 @@ pub fn get_or_create_instance_with_script(
     game_id: Uuid,
     script: Option<&str>,
 ) -> bool {
-    let mut state = state.write().unwrap();
-
     if state.games.contains_key(&game_id) {
         return false;
     }
@@ -93,23 +97,23 @@ pub fn get_or_create_instance_with_script(
         Some(code) => GameInstance::new_with_script(game_id, code),
         None => GameInstance::new(game_id),
     };
-    state.games.insert(game_id, game);
+    let game_handle = Arc::new(RwLock::new(game));
+    state.games.insert(game_id, game_handle);
     true
 }
 
 /// Checks if a game instance is currently running in memory.
 pub fn is_instance_running(state: &GameManagerHandle, game_id: Uuid) -> bool {
-    let state = state.read().unwrap();
     state.games.contains_key(&game_id)
 }
 
 pub fn join_game(state: &GameManagerHandle, game_id: Uuid, agent_id: Uuid) -> Result<(), String> {
-    let mut state = state.write().unwrap();
-    let game = state
+    let game_handle = state
         .games
-        .get_mut(&game_id)
+        .get(&game_id)
         .ok_or_else(|| "Game not found".to_string())?;
 
+    let mut game = game_handle.write().unwrap();
     if !game.add_player(agent_id) {
         return Err("Already in game".to_string());
     }
@@ -118,12 +122,12 @@ pub fn join_game(state: &GameManagerHandle, game_id: Uuid, agent_id: Uuid) -> Re
 }
 
 pub fn leave_game(state: &GameManagerHandle, game_id: Uuid, agent_id: Uuid) -> Result<(), String> {
-    let mut state = state.write().unwrap();
-    let game = state
+    let game_handle = state
         .games
-        .get_mut(&game_id)
+        .get(&game_id)
         .ok_or_else(|| "Game not found".to_string())?;
 
+    let mut game = game_handle.write().unwrap();
     if !game.remove_player(agent_id) {
         return Err("Not in game".to_string());
     }
@@ -137,12 +141,12 @@ pub fn queue_action(
     agent_id: Uuid,
     action: GameAction,
 ) -> Result<(), String> {
-    let state = state.read().unwrap();
-    let game = state
+    let game_handle = state
         .games
         .get(&game_id)
         .ok_or_else(|| "Game not found".to_string())?;
 
+    let game = game_handle.read().unwrap();
     if !game.players.contains_key(&agent_id) {
         return Err("Not in game".to_string());
     }
@@ -159,12 +163,12 @@ pub fn queue_input(
     input_type: String,
     data: serde_json::Value,
 ) -> Result<(), String> {
-    let state = state.read().unwrap();
-    let game = state
+    let game_handle = state
         .games
         .get(&game_id)
         .ok_or_else(|| "Game not found".to_string())?;
 
+    let game = game_handle.read().unwrap();
     let user_id = game
         .players
         .get(&agent_id)
@@ -179,12 +183,12 @@ pub fn get_observation(
     game_id: Uuid,
     agent_id: Uuid,
 ) -> Result<PlayerObservation, String> {
-    let mut state = state.write().unwrap();
-    let game = state
+    let game_handle = state
         .games
-        .get_mut(&game_id)
+        .get(&game_id)
         .ok_or_else(|| "Game not found".to_string())?;
 
+    let game = game_handle.read().unwrap();
     game.get_player_observation(agent_id)
         .ok_or_else(|| "Not in game".to_string())
 }
@@ -193,22 +197,41 @@ pub fn get_spectator_observation(
     state: &GameManagerHandle,
     game_id: Uuid,
 ) -> Result<instance::SpectatorObservation, String> {
-    let mut state = state.write().unwrap();
-    let game = state
+    let game_handle = state
         .games
-        .get_mut(&game_id)
+        .get(&game_id)
         .ok_or_else(|| "Game not found".to_string())?;
 
+    let game = game_handle.read().unwrap();
     Ok(game.get_spectator_observation())
 }
 
 pub fn list_games(state: &GameManagerHandle) -> Vec<GameInfo> {
-    let state = state.read().unwrap();
     state
         .games
         .iter()
-        .map(|(id, game)| GameInfo {
-            id: *id,
+        .map(|entry| {
+            let id = *entry.key();
+            let game = entry.value().read().unwrap();
+            GameInfo {
+                id,
+                status: match game.status {
+                    GameStatus::Waiting => "waiting".to_string(),
+                    GameStatus::Playing => "playing".to_string(),
+                    GameStatus::Finished => "finished".to_string(),
+                },
+                player_count: game.players.len(),
+                tick: game.tick,
+            }
+        })
+        .collect()
+}
+
+pub fn get_game_info(state: &GameManagerHandle, game_id: Uuid) -> Option<GameInfo> {
+    state.games.get(&game_id).map(|entry| {
+        let game = entry.value().read().unwrap();
+        GameInfo {
+            id: game_id,
             status: match game.status {
                 GameStatus::Waiting => "waiting".to_string(),
                 GameStatus::Playing => "playing".to_string(),
@@ -216,31 +239,16 @@ pub fn list_games(state: &GameManagerHandle) -> Vec<GameInfo> {
             },
             player_count: game.players.len(),
             tick: game.tick,
-        })
-        .collect()
-}
-
-pub fn get_game_info(state: &GameManagerHandle, game_id: Uuid) -> Option<GameInfo> {
-    let state = state.read().unwrap();
-    state.games.get(&game_id).map(|game| GameInfo {
-        id: game_id,
-        status: match game.status {
-            GameStatus::Waiting => "waiting".to_string(),
-            GameStatus::Playing => "playing".to_string(),
-            GameStatus::Finished => "finished".to_string(),
-        },
-        player_count: game.players.len(),
-        tick: game.tick,
+        }
     })
 }
 
 pub fn matchmake(state: &GameManagerHandle) -> (Uuid, bool) {
-    {
-        let state_read = state.read().unwrap();
-        for (id, game) in state_read.games.iter() {
-            if game.status == GameStatus::Waiting {
-                return (*id, false);
-            }
+    // Look for an existing waiting game
+    for entry in state.games.iter() {
+        let game = entry.value().read().unwrap();
+        if game.status == GameStatus::Waiting {
+            return (*entry.key(), false);
         }
     }
 

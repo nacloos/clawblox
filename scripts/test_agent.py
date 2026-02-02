@@ -9,14 +9,114 @@ import math
 import os
 from pathlib import Path
 import random
+import statistics
 import sys
 import threading
 import time
+from collections import defaultdict
+from dataclasses import dataclass, field
 
 import requests
 
 API_BASE = os.getenv("CLAWBLOX_API_URL", "http://localhost:8080/api/v1")
 KEYS_CACHE = Path("/tmp/clawblox_agent_keys.json")
+
+
+@dataclass
+class LatencyStats:
+    """Thread-safe latency statistics collector"""
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    latencies: dict = field(default_factory=lambda: defaultdict(list))
+    errors: dict = field(default_factory=lambda: defaultdict(int))
+    timeouts: dict = field(default_factory=lambda: defaultdict(int))
+
+    def record(self, endpoint: str, latency_ms: float):
+        with self.lock:
+            self.latencies[endpoint].append(latency_ms)
+
+    def record_error(self, endpoint: str):
+        with self.lock:
+            self.errors[endpoint] += 1
+
+    def record_timeout(self, endpoint: str):
+        with self.lock:
+            self.timeouts[endpoint] += 1
+
+    def get_summary(self) -> dict:
+        with self.lock:
+            summary = {}
+            for endpoint, lats in self.latencies.items():
+                if not lats:
+                    continue
+                sorted_lats = sorted(lats)
+                n = len(sorted_lats)
+                summary[endpoint] = {
+                    "count": n,
+                    "min": sorted_lats[0],
+                    "max": sorted_lats[-1],
+                    "mean": statistics.mean(sorted_lats),
+                    "p50": sorted_lats[n // 2],
+                    "p95": sorted_lats[int(n * 0.95)] if n >= 20 else sorted_lats[-1],
+                    "p99": sorted_lats[int(n * 0.99)] if n >= 100 else sorted_lats[-1],
+                    "errors": self.errors.get(endpoint, 0),
+                    "timeouts": self.timeouts.get(endpoint, 0),
+                }
+            return summary
+
+    def print_summary(self):
+        summary = self.get_summary()
+        if not summary:
+            print("No latency data collected")
+            return
+
+        print("\n" + "=" * 70)
+        print("LATENCY SUMMARY (milliseconds)")
+        print("=" * 70)
+        print(f"{'Endpoint':<15} {'Count':>8} {'Min':>8} {'Mean':>8} {'P50':>8} {'P95':>8} {'P99':>8} {'Max':>8} {'Err':>5} {'T/O':>5}")
+        print("-" * 70)
+
+        for endpoint in sorted(summary.keys()):
+            s = summary[endpoint]
+            print(f"{endpoint:<15} {s['count']:>8} {s['min']:>8.1f} {s['mean']:>8.1f} {s['p50']:>8.1f} {s['p95']:>8.1f} {s['p99']:>8.1f} {s['max']:>8.1f} {s['errors']:>5} {s['timeouts']:>5}")
+
+        # Overall stats
+        all_lats = []
+        total_errors = 0
+        total_timeouts = 0
+        for endpoint, s in summary.items():
+            all_lats.extend(self.latencies[endpoint])
+            total_errors += s['errors']
+            total_timeouts += s['timeouts']
+
+        if all_lats:
+            sorted_all = sorted(all_lats)
+            n = len(sorted_all)
+            print("-" * 70)
+            print(f"{'TOTAL':<15} {n:>8} {sorted_all[0]:>8.1f} {statistics.mean(sorted_all):>8.1f} {sorted_all[n//2]:>8.1f} {sorted_all[int(n*0.95)]:>8.1f} {sorted_all[int(n*0.99)]:>8.1f} {sorted_all[-1]:>8.1f} {total_errors:>5} {total_timeouts:>5}")
+        print("=" * 70)
+
+
+# Global latency tracker
+LATENCY_STATS = LatencyStats()
+
+
+def timed_request(method: str, url: str, endpoint_name: str, **kwargs) -> requests.Response | None:
+    """Make a request and record its latency"""
+    start = time.perf_counter()
+    try:
+        if method == "GET":
+            resp = requests.get(url, **kwargs)
+        else:
+            resp = requests.post(url, **kwargs)
+        latency_ms = (time.perf_counter() - start) * 1000
+        LATENCY_STATS.record(endpoint_name, latency_ms)
+        return resp
+    except requests.exceptions.Timeout:
+        LATENCY_STATS.record_timeout(endpoint_name)
+        return None
+    except requests.exceptions.RequestException:
+        LATENCY_STATS.record_error(endpoint_name)
+        return None
 
 # Arena bounds (200x200, stay inside walls)
 ARENA_MIN = -80
@@ -145,9 +245,9 @@ def run_agent(agent_id: int, api_key: str, game_id: str, stop_event: threading.E
         pass
 
     # Join
-    resp = requests.post(f"{API_BASE}/games/{game_id}/join", headers=headers, timeout=5)
-    if resp.status_code != 200:
-        print(f"{prefix} Failed to join: {resp.text}", flush=True)
+    resp = timed_request("POST", f"{API_BASE}/games/{game_id}/join", "join", headers=headers, timeout=5)
+    if resp is None or resp.status_code != 200:
+        print(f"{prefix} Failed to join: {resp.text if resp else 'timeout'}", flush=True)
         return
     print(f"{prefix} Joined", flush=True)
 
@@ -163,8 +263,8 @@ def run_agent(agent_id: int, api_key: str, game_id: str, stop_event: threading.E
         tick = 0
         while not stop_event.is_set():
             # Observe
-            resp = requests.get(f"{API_BASE}/games/{game_id}/observe", headers=headers, timeout=5)
-            if resp.status_code != 200:
+            resp = timed_request("GET", f"{API_BASE}/games/{game_id}/observe", "observe", headers=headers, timeout=5)
+            if resp is None or resp.status_code != 200:
                 time.sleep(0.5)
                 continue
 
@@ -187,7 +287,7 @@ def run_agent(agent_id: int, api_key: str, game_id: str, stop_event: threading.E
 
                 # Fire at enemy
                 fire_payload = {"type": "Fire", "data": {"target": enemy_pos}}
-                requests.post(f"{API_BASE}/games/{game_id}/input", headers=headers, json=fire_payload, timeout=5)
+                timed_request("POST", f"{API_BASE}/games/{game_id}/input", "input", headers=headers, json=fire_payload, timeout=5)
 
                 # Move toward enemy
                 waypoint = enemy_pos
@@ -219,7 +319,7 @@ def run_agent(agent_id: int, api_key: str, game_id: str, stop_event: threading.E
 
             # Send MoveTo
             move_payload = {"type": "MoveTo", "data": {"position": waypoint}}
-            requests.post(f"{API_BASE}/games/{game_id}/input", headers=headers, json=move_payload, timeout=5)
+            timed_request("POST", f"{API_BASE}/games/{game_id}/input", "input", headers=headers, json=move_payload, timeout=5)
 
             # Periodic status
             if tick % 20 == 0:
@@ -231,14 +331,37 @@ def run_agent(agent_id: int, api_key: str, game_id: str, stop_event: threading.E
             time.sleep(0.1)
 
     finally:
-        requests.post(f"{API_BASE}/games/{game_id}/leave", headers=headers, timeout=5)
+        timed_request("POST", f"{API_BASE}/games/{game_id}/leave", "leave", headers=headers, timeout=5)
         print(f"{prefix} Left (arrivals: {arrivals}, kills: {kills})", flush=True)
+
+
+def print_live_stats():
+    """Print a one-line summary of current latency stats"""
+    summary = LATENCY_STATS.get_summary()
+    if not summary:
+        return
+
+    parts = []
+    for endpoint in ["observe", "input"]:
+        if endpoint in summary:
+            s = summary[endpoint]
+            parts.append(f"{endpoint}: {s['mean']:.0f}ms (p99={s['p99']:.0f}ms, n={s['count']})")
+
+    total_timeouts = sum(s.get('timeouts', 0) for s in summary.values())
+    total_errors = sum(s.get('errors', 0) for s in summary.values())
+
+    if total_timeouts or total_errors:
+        parts.append(f"errors={total_errors} timeouts={total_timeouts}")
+
+    if parts:
+        print(f"[LATENCY] {' | '.join(parts)}", flush=True)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Test exploration agents")
     parser.add_argument("-n", "--num-agents", type=int, default=1, help="Number of agents")
     parser.add_argument("-d", "--duration", type=float, default=None, help="Run for N seconds")
+    parser.add_argument("--stats-interval", type=float, default=10.0, help="Print latency stats every N seconds")
     args = parser.parse_args()
 
     print(f"API: {API_BASE}", flush=True)
@@ -274,9 +397,17 @@ def main():
     # Run until duration or Ctrl+C
     try:
         start = time.time()
+        last_stats = start
         while True:
             time.sleep(0.5)
-            if args.duration and (time.time() - start) >= args.duration:
+
+            # Print periodic latency stats
+            now = time.time()
+            if now - last_stats >= args.stats_interval:
+                print_live_stats()
+                last_stats = now
+
+            if args.duration and (now - start) >= args.duration:
                 print(f"\nDuration {args.duration}s reached", flush=True)
                 break
     except KeyboardInterrupt:
@@ -285,6 +416,9 @@ def main():
         stop_event.set()
         for t in threads:
             t.join(timeout=2)
+
+        # Print final latency summary
+        LATENCY_STATS.print_summary()
 
 
 if __name__ == "__main__":
