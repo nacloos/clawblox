@@ -1,9 +1,8 @@
-use mlua::{Lua, MultiValue, ObjectLike, Result, UserData, UserDataMethods, Value};
+use mlua::{Lua, MultiValue, ObjectLike, RegistryKey, Result, Thread, ThreadStatus, UserData, UserDataMethods, Value};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use uuid::Uuid;
 
-use super::async_thread_manager::AsyncThreadManager;
 use super::instance::{Instance, InstanceData};
 use super::services::{
     register_raycast_params, AgentInput, AgentInputService, DataStoreService, PlayersService,
@@ -98,8 +97,9 @@ pub struct LuaRuntime {
     lua: Lua,
     game: Game,
     script_loaded: bool,
-    /// Manages pending async threads (for DataStore operations, etc.)
-    pub async_thread_manager: Arc<Mutex<AsyncThreadManager>>,
+    /// Tracks yielded coroutines that need to be resumed (e.g., callbacks waiting on DataStore)
+    /// Stored as RegistryKeys to prevent garbage collection
+    pending_coroutines: Arc<Mutex<Vec<RegistryKey>>>,
 }
 
 impl LuaRuntime {
@@ -218,13 +218,13 @@ impl LuaRuntime {
             })?;
         table_table.set("remove", remove_fn)?;
 
-        let async_thread_manager = Arc::new(Mutex::new(AsyncThreadManager::new()));
+        let pending_coroutines = Arc::new(Mutex::new(Vec::new()));
 
         Ok(Self {
             lua,
             game,
             script_loaded: false,
-            async_thread_manager,
+            pending_coroutines,
         })
     }
 
@@ -239,22 +239,83 @@ impl LuaRuntime {
             return Ok(());
         }
 
-        // 1. Poll pending async threads (for DataStore operations, etc.)
-        // Note: With create_async_function, mlua handles the yielding internally.
-        // The async threads complete when the tokio oneshot channel resolves.
-        {
-            let mut manager = self.async_thread_manager.lock().unwrap();
-            if let Err(e) = manager.poll_all(&self.lua) {
-                eprintln!("[LuaRuntime] Error polling async threads: {}", e);
-            }
-        }
+        // 1. Resume pending coroutines (callbacks that yielded on DataStore operations, etc.)
+        self.resume_pending_coroutines()?;
 
         // 2. Fire Heartbeat as coroutines (allows callbacks to yield)
         let heartbeat = self.game.run_service().heartbeat();
-        heartbeat.fire_as_coroutines(
+        let yielded_threads = heartbeat.fire_as_coroutines(
             &self.lua,
             MultiValue::from_iter([Value::Number(delta_time as f64)]),
         )?;
+
+        // 3. Track any newly yielded coroutines for resumption on next tick
+        self.track_yielded_threads(yielded_threads)?;
+
+        Ok(())
+    }
+
+    /// Resumes all pending coroutines and removes completed ones.
+    fn resume_pending_coroutines(&self) -> Result<()> {
+        let mut pending = self.pending_coroutines.lock().unwrap();
+        let mut still_pending = Vec::new();
+
+        for key in pending.drain(..) {
+            // Get the thread from the registry
+            let thread: Thread = match self.lua.registry_value(&key) {
+                Ok(t) => t,
+                Err(_) => {
+                    // Thread was garbage collected or invalid, clean up
+                    let _ = self.lua.remove_registry_value(key);
+                    continue;
+                }
+            };
+
+            // Check if thread is still resumable
+            if thread.status() != ThreadStatus::Resumable {
+                // Thread finished or errored, clean up
+                let _ = self.lua.remove_registry_value(key);
+                continue;
+            }
+
+            // Try to resume the thread
+            match thread.resume::<()>(()) {
+                Ok(()) => {
+                    // Check if still yielded
+                    if thread.status() == ThreadStatus::Resumable {
+                        still_pending.push(key);
+                    } else {
+                        // Thread finished, clean up
+                        let _ = self.lua.remove_registry_value(key);
+                    }
+                }
+                Err(e) => {
+                    // Thread errored
+                    eprintln!("[LuaRuntime] Coroutine error: {}", e);
+                    let _ = self.lua.remove_registry_value(key);
+                }
+            }
+        }
+
+        *pending = still_pending;
+        Ok(())
+    }
+
+    /// Tracks yielded threads for resumption on the next tick.
+    fn track_yielded_threads(&self, threads: Vec<Thread>) -> Result<()> {
+        let mut pending = self.pending_coroutines.lock().unwrap();
+
+        for thread in threads {
+            if thread.status() == ThreadStatus::Resumable {
+                // Store in registry to prevent garbage collection
+                match self.lua.create_registry_value(thread) {
+                    Ok(key) => pending.push(key),
+                    Err(e) => {
+                        eprintln!("[LuaRuntime] Failed to store yielded thread: {}", e);
+                    }
+                }
+            }
+        }
 
         Ok(())
     }
