@@ -1,28 +1,33 @@
 use mlua::{Lua, MultiValue, ObjectLike, Result, UserData, UserDataMethods, Value};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use uuid::Uuid;
 
+use super::async_thread_manager::AsyncThreadManager;
 use super::instance::{Instance, InstanceData};
 use super::services::{
-    register_raycast_params, AgentInput, AgentInputService, PlayersService, RunService,
-    WorkspaceService,
+    register_raycast_params, AgentInput, AgentInputService, DataStoreService, PlayersService,
+    RunService, WorkspaceService,
 };
 use super::types::register_all_types;
+use crate::game::async_bridge::AsyncBridge;
 
 pub struct GameDataModel {
     pub workspace: WorkspaceService,
     pub players: PlayersService,
     pub run_service: RunService,
     pub agent_input_service: AgentInputService,
+    pub data_store_service: DataStoreService,
 }
 
 impl GameDataModel {
-    pub fn new() -> Self {
+    pub fn new(game_id: Uuid, async_bridge: Option<Arc<AsyncBridge>>) -> Self {
         Self {
             workspace: WorkspaceService::new(),
             players: PlayersService::new(),
             run_service: RunService::new(true),
             agent_input_service: AgentInputService::new(),
+            data_store_service: DataStoreService::new(game_id, async_bridge),
         }
     }
 }
@@ -33,9 +38,9 @@ pub struct Game {
 }
 
 impl Game {
-    pub fn new() -> Self {
+    pub fn new(game_id: Uuid, async_bridge: Option<Arc<AsyncBridge>>) -> Self {
         Self {
-            data_model: Arc::new(Mutex::new(GameDataModel::new())),
+            data_model: Arc::new(Mutex::new(GameDataModel::new(game_id, async_bridge))),
         }
     }
 
@@ -54,6 +59,10 @@ impl Game {
     pub fn agent_input_service(&self) -> AgentInputService {
         self.data_model.lock().unwrap().agent_input_service.clone()
     }
+
+    pub fn data_store_service(&self) -> DataStoreService {
+        self.data_model.lock().unwrap().data_store_service.clone()
+    }
 }
 
 impl UserData for Game {
@@ -66,6 +75,9 @@ impl UserData for Game {
                 "RunService" => Ok(Value::UserData(lua.create_userdata(dm.run_service.clone())?)),
                 "AgentInputService" => Ok(Value::UserData(
                     lua.create_userdata(dm.agent_input_service.clone())?,
+                )),
+                "DataStoreService" => Ok(Value::UserData(
+                    lua.create_userdata(dm.data_store_service.clone())?,
                 )),
                 _ => Ok(Value::Nil),
             }
@@ -86,10 +98,18 @@ pub struct LuaRuntime {
     lua: Lua,
     game: Game,
     script_loaded: bool,
+    /// Manages pending async threads (for DataStore operations, etc.)
+    pub async_thread_manager: Arc<Mutex<AsyncThreadManager>>,
 }
 
 impl LuaRuntime {
-    pub fn new() -> Result<Self> {
+    /// Creates a new LuaRuntime with optional async bridge for DataStore operations.
+    ///
+    /// # Arguments
+    /// * `game_id` - The unique identifier for this game instance
+    /// * `async_bridge` - Optional bridge for async database operations. If None, DataStore
+    ///                    operations will return errors.
+    pub fn new(game_id: Uuid, async_bridge: Option<Arc<AsyncBridge>>) -> Result<Self> {
         let lua = Lua::new();
 
         register_all_types(&lua)?;
@@ -98,7 +118,7 @@ impl LuaRuntime {
 
         register_raycast_params(&lua)?;
 
-        let game = Game::new();
+        let game = Game::new(game_id, async_bridge);
         lua.globals().set("game", game.clone())?;
 
         lua.globals().set("Workspace", game.workspace())?;
@@ -163,9 +183,7 @@ impl LuaRuntime {
 
         // Add tick() global - returns time since game start
         let start_time = Instant::now();
-        let tick_fn = lua.create_function(move |_, ()| {
-            Ok(start_time.elapsed().as_secs_f64())
-        })?;
+        let tick_fn = lua.create_function(move |_, ()| Ok(start_time.elapsed().as_secs_f64()))?;
         lua.globals().set("tick", tick_fn)?;
 
         let table_table = lua.globals().get::<mlua::Table>("table")?;
@@ -200,10 +218,13 @@ impl LuaRuntime {
             })?;
         table_table.set("remove", remove_fn)?;
 
+        let async_thread_manager = Arc::new(Mutex::new(AsyncThreadManager::new()));
+
         Ok(Self {
             lua,
             game,
             script_loaded: false,
+            async_thread_manager,
         })
     }
 
@@ -218,8 +239,19 @@ impl LuaRuntime {
             return Ok(());
         }
 
+        // 1. Poll pending async threads (for DataStore operations, etc.)
+        // Note: With create_async_function, mlua handles the yielding internally.
+        // The async threads complete when the tokio oneshot channel resolves.
+        {
+            let mut manager = self.async_thread_manager.lock().unwrap();
+            if let Err(e) = manager.poll_all(&self.lua) {
+                eprintln!("[LuaRuntime] Error polling async threads: {}", e);
+            }
+        }
+
+        // 2. Fire Heartbeat as coroutines (allows callbacks to yield)
         let heartbeat = self.game.run_service().heartbeat();
-        heartbeat.fire(
+        heartbeat.fire_as_coroutines(
             &self.lua,
             MultiValue::from_iter([Value::Number(delta_time as f64)]),
         )?;
@@ -378,15 +410,20 @@ impl LuaRuntime {
 mod tests {
     use super::*;
 
+    /// Helper to create a test runtime without async bridge
+    fn test_runtime() -> LuaRuntime {
+        LuaRuntime::new(Uuid::new_v4(), None).expect("Failed to create runtime")
+    }
+
     #[test]
     fn test_runtime_creation() {
-        let runtime = LuaRuntime::new().expect("Failed to create runtime");
+        let runtime = test_runtime();
         assert!(!runtime.script_loaded);
     }
 
     #[test]
     fn test_simple_script() {
-        let mut runtime = LuaRuntime::new().expect("Failed to create runtime");
+        let mut runtime = test_runtime();
         runtime
             .load_script(
                 r#"
@@ -405,7 +442,7 @@ mod tests {
 
     #[test]
     fn test_heartbeat() {
-        let mut runtime = LuaRuntime::new().expect("Failed to create runtime");
+        let mut runtime = test_runtime();
         runtime
             .load_script(
                 r#"
@@ -433,7 +470,7 @@ mod tests {
 
     #[test]
     fn test_tick_function() {
-        let runtime = LuaRuntime::new().expect("Failed to create runtime");
+        let runtime = test_runtime();
         let result: f64 = runtime.lua().load("return tick()").eval().unwrap();
         assert!(result >= 0.0);
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -443,7 +480,7 @@ mod tests {
 
     #[test]
     fn test_player_has_character() {
-        let runtime = LuaRuntime::new().expect("Failed to create runtime");
+        let runtime = test_runtime();
         let (player, hrp_id) = runtime.add_player(12345, "TestPlayer");
 
         // Verify HRP ID is valid
@@ -475,6 +512,5 @@ mod tests {
         // Check character is in workspace
         assert!(char_inst.parent().is_some());
     }
-
 }
 

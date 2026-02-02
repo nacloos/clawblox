@@ -1,4 +1,4 @@
-use mlua::{Function, Lua, MultiValue, RegistryKey, Result, UserData, UserDataFields, UserDataMethods};
+use mlua::{Function, Lua, MultiValue, RegistryKey, Result, Thread, UserData, UserDataFields, UserDataMethods};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -154,6 +154,73 @@ impl RBXScriptSignal {
         }
 
         Ok(())
+    }
+
+    /// Fires the signal with each callback running in its own coroutine.
+    ///
+    /// This allows callbacks to yield (e.g., for async operations like DataStore:GetAsync)
+    /// without blocking other callbacks. Returns the coroutine threads for tracking.
+    ///
+    /// Yielded threads should be tracked by the CoroutineManager if they call async functions.
+    pub fn fire_as_coroutines(&self, lua: &Lua, args: MultiValue) -> Result<Vec<Thread>> {
+        let mut to_remove = Vec::new();
+        let mut threads = Vec::new();
+
+        let connections: Vec<_> = {
+            let inner = self.inner.lock().unwrap();
+            inner.connections.iter().map(|c| (c.id, c.once)).collect()
+        };
+
+        for (id, once) in connections {
+            let callback_key = {
+                let inner = self.inner.lock().unwrap();
+                inner
+                    .connections
+                    .iter()
+                    .find(|c| c.id == id)
+                    .map(|c| &c.callback)
+                    .and_then(|k| lua.registry_value::<Function>(k).ok())
+            };
+
+            if let Some(callback) = callback_key {
+                // Create a new coroutine for this callback
+                let thread = lua.create_thread(callback)?;
+
+                // Resume the coroutine with the arguments
+                match thread.resume::<()>(args.clone()) {
+                    Ok(()) => {
+                        // Callback completed without yielding
+                        // Check if thread yielded after completion (async functions do this)
+                        if thread.status() == mlua::ThreadStatus::Resumable {
+                            threads.push(thread);
+                        }
+                    }
+                    Err(e) => {
+                        // Check if the thread yielded (this is normal for async operations)
+                        if thread.status() == mlua::ThreadStatus::Resumable {
+                            // Thread yielded - track it for later resumption
+                            threads.push(thread);
+                        } else {
+                            // Actual error
+                            eprintln!(
+                                "[Lua Error] Callback error in signal '{}': {}",
+                                self.name, e
+                            );
+                        }
+                    }
+                }
+
+                if once {
+                    to_remove.push(id);
+                }
+            }
+        }
+
+        for id in to_remove {
+            self.inner.lock().unwrap().remove_connection(id);
+        }
+
+        Ok(threads)
     }
 
     pub fn name(&self) -> &str {

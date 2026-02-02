@@ -1,8 +1,10 @@
 use crossbeam_channel::{Receiver, Sender};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
 
+use super::async_bridge::AsyncBridge;
 use super::lua::instance::attributes_to_json;
 use super::lua::services::AgentInput;
 use super::lua::LuaRuntime;
@@ -30,6 +32,8 @@ pub struct GameInstance {
     next_user_id: u64,
     /// Time when the game instance was created (for server_time_ms calculation)
     start_time: Instant,
+    /// Async bridge for database operations (DataStoreService)
+    async_bridge: Option<Arc<AsyncBridge>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -58,7 +62,11 @@ pub enum GameAction {
 
 impl GameInstance {
     /// Creates a new game instance without a script
-    pub fn new(game_id: Uuid) -> Self {
+    ///
+    /// # Arguments
+    /// * `game_id` - Unique identifier for this game instance
+    /// * `async_bridge` - Optional async bridge for DataStoreService support
+    pub fn new(game_id: Uuid, async_bridge: Option<Arc<AsyncBridge>>) -> Self {
         let (action_sender, action_receiver) = crossbeam_channel::unbounded();
 
         Self {
@@ -74,6 +82,7 @@ impl GameInstance {
             status: GameStatus::Playing,
             next_user_id: 1, // Start at 1, stays well within Lua's safe integer range
             start_time: Instant::now(),
+            async_bridge,
         }
     }
 
@@ -83,15 +92,24 @@ impl GameInstance {
     }
 
     /// Creates a new game instance with a Lua script
-    pub fn new_with_script(game_id: Uuid, script: &str) -> Self {
-        let mut instance = Self::new(game_id);
+    ///
+    /// # Arguments
+    /// * `game_id` - Unique identifier for this game instance
+    /// * `script` - Lua script source code to execute
+    /// * `async_bridge` - Optional async bridge for DataStoreService support
+    pub fn new_with_script(
+        game_id: Uuid,
+        script: &str,
+        async_bridge: Option<Arc<AsyncBridge>>,
+    ) -> Self {
+        let mut instance = Self::new(game_id, async_bridge);
         instance.load_script(script);
         instance
     }
 
     /// Loads and executes a Lua script
     pub fn load_script(&mut self, source: &str) {
-        match LuaRuntime::new() {
+        match LuaRuntime::new(self.game_id, self.async_bridge.clone()) {
             Ok(mut runtime) => {
                 if let Err(e) = runtime.load_script(source) {
                     eprintln!("[Lua Error] Failed to load script: {}", e);
@@ -875,7 +893,7 @@ mod tests {
 
     #[test]
     fn test_player_goto_action() {
-        let mut instance = GameInstance::new(Uuid::new_v4());
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
 
         // Load a simple script that creates a floor
         instance.load_script(r#"
@@ -925,7 +943,7 @@ mod tests {
 
     #[test]
     fn test_observation_includes_world_entities() {
-        let mut instance = GameInstance::new(Uuid::new_v4());
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
 
         // Load a script that creates some geometry
         instance.load_script(r#"
@@ -968,7 +986,7 @@ mod tests {
 
     #[test]
     fn test_los_blocked_by_wall() {
-        let mut instance = GameInstance::new(Uuid::new_v4());
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
 
         // Create a wall between two player spawn points
         instance.load_script(r#"
@@ -1027,7 +1045,7 @@ mod tests {
 
     #[test]
     fn test_los_clear() {
-        let mut instance = GameInstance::new(Uuid::new_v4());
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
 
         // Just a floor, no obstructions
         instance.load_script(r#"
@@ -1076,7 +1094,7 @@ mod tests {
 
     #[test]
     fn test_shooting_and_killing() {
-        let mut instance = GameInstance::new(Uuid::new_v4());
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
 
         // Load a minimal shooting test script (no debug prints, fast startup)
         instance.load_script(r#"

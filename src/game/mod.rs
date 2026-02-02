@@ -1,14 +1,17 @@
+pub mod async_bridge;
 pub mod instance;
 pub mod lua;
 pub mod physics;
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
+use sqlx::PgPool;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+use async_bridge::AsyncBridge;
 use instance::{GameAction, GameInstance, GameStatus, PlayerObservation, SpectatorObservation};
 
 /// Handle to the game manager - now uses DashMap for per-game locks
@@ -26,14 +29,17 @@ pub struct GameManagerState {
     /// Cached spectator observations, keyed by game_id
     /// Updated once per tick, read lock-free by WebSocket spectator
     pub spectator_cache: DashMap<Uuid, SpectatorObservation>,
+    /// Shared async bridge for database operations (DataStoreService)
+    pub async_bridge: Option<Arc<AsyncBridge>>,
 }
 
 impl GameManagerState {
-    pub fn new() -> Self {
+    pub fn new(async_bridge: Option<Arc<AsyncBridge>>) -> Self {
         Self {
             games: DashMap::new(),
             observation_cache: DashMap::new(),
             spectator_cache: DashMap::new(),
+            async_bridge,
         }
     }
 }
@@ -44,8 +50,22 @@ pub struct GameManager {
 }
 
 impl GameManager {
-    pub fn new(tick_rate: u64) -> (Self, GameManagerHandle) {
-        let state = Arc::new(GameManagerState::new());
+    /// Creates a new GameManager with database pool for DataStoreService support.
+    ///
+    /// # Arguments
+    /// * `tick_rate` - Game loop ticks per second
+    /// * `pool` - Database connection pool for async operations
+    pub fn new(tick_rate: u64, pool: Arc<PgPool>) -> (Self, GameManagerHandle) {
+        let async_bridge = Arc::new(AsyncBridge::new(pool));
+        let state = Arc::new(GameManagerState::new(Some(async_bridge)));
+        let handle = Arc::clone(&state);
+
+        (Self { state, tick_rate }, handle)
+    }
+
+    /// Creates a new GameManager without database support (for testing).
+    pub fn new_without_db(tick_rate: u64) -> (Self, GameManagerHandle) {
+        let state = Arc::new(GameManagerState::new(None));
         let handle = Arc::clone(&state);
 
         (Self { state, tick_rate }, handle)
@@ -91,7 +111,7 @@ impl GameManager {
 
 pub fn create_game(state: &GameManagerHandle) -> Uuid {
     let game_id = Uuid::new_v4();
-    let game = GameInstance::new(game_id);
+    let game = GameInstance::new(game_id, state.async_bridge.clone());
 
     // Cache initial spectator observation before inserting game
     let spectator_obs = game.get_spectator_observation();
@@ -121,8 +141,8 @@ pub fn get_or_create_instance_with_script(
     }
 
     let game = match script {
-        Some(code) => GameInstance::new_with_script(game_id, code),
-        None => GameInstance::new(game_id),
+        Some(code) => GameInstance::new_with_script(game_id, code, state.async_bridge.clone()),
+        None => GameInstance::new(game_id, state.async_bridge.clone()),
     };
 
     // Cache initial spectator observation before inserting game

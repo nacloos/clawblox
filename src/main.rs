@@ -15,8 +15,9 @@ async fn main() {
     let pool = db::create_pool()
         .await
         .expect("Failed to connect to database");
+    let pool = std::sync::Arc::new(pool);
 
-    let (game_manager, game_handle) = GameManager::new(60);
+    let (game_manager, game_handle) = GameManager::new(60, pool.clone());
 
     thread::spawn(move || {
         game_manager.run();
@@ -31,7 +32,7 @@ async fn main() {
         .not_found_service(ServeFile::new("frontend/dist/index.html"));
 
     let app = Router::new()
-        .nest("/api/v1", api::routes(pool, game_handle))
+        .nest("/api/v1", api::routes((*pool).clone(), game_handle))
         .route_service("/skill.md", ServeFile::new("static/skill.md"))
         .nest_service("/static", ServeDir::new("static"))
         .fallback_service(frontend_dir)
