@@ -237,6 +237,13 @@ async fn handle_spectate_ws(socket: WebSocket, state: GameplayState, game_id: Uu
     let mut last_tick: u64 = 0;
     let mut same_tick_count: u32 = 0;
 
+    // Debug: track timing
+    let mut last_loop_time = std::time::Instant::now();
+    let mut loop_count: u64 = 0;
+    let mut send_count: u64 = 0;
+    let mut skip_count: u64 = 0;
+    let start_time = std::time::Instant::now();
+
     loop {
         tokio::select! {
             // Check for incoming messages (ping/pong, close)
@@ -254,6 +261,23 @@ async fn handle_spectate_ws(socket: WebSocket, state: GameplayState, game_id: Uu
 
             // Send game state on tick
             _ = tick_interval.tick() => {
+                loop_count += 1;
+                let now = std::time::Instant::now();
+                let loop_delta = now.duration_since(last_loop_time).as_millis();
+                last_loop_time = now;
+
+                // Log every second
+                if loop_count % 30 == 0 {
+                    let elapsed = start_time.elapsed().as_secs();
+                    println!("[WS] t={}s loops={} sends={} skips={} last_delta={}ms",
+                        elapsed, loop_count, send_count, skip_count, loop_delta);
+                }
+
+                // Warn if loop took too long (>50ms)
+                if loop_delta > 50 {
+                    println!("[WS] DELAY: {}ms between loops (tick={})", loop_delta, last_tick);
+                }
+
                 let observation = game::get_spectator_observation(&state.game_manager, game_id);
 
                 match observation {
@@ -262,6 +286,7 @@ async fn handle_spectate_ws(socket: WebSocket, state: GameplayState, game_id: Uu
                             // New tick - send immediately
                             last_tick = obs.tick;
                             same_tick_count = 0;
+                            send_count += 1;
                             if let Ok(json) = serde_json::to_string(&obs) {
                                 if sender.send(Message::Text(json.into())).await.is_err() {
                                     break;
@@ -271,9 +296,11 @@ async fn handle_spectate_ws(socket: WebSocket, state: GameplayState, game_id: Uu
                             // Same tick - send occasionally to keep connection alive
                             // and help client detect if updates have stopped
                             same_tick_count += 1;
+                            skip_count += 1;
                             // Send every ~5th check (~150ms) when no new ticks
                             if same_tick_count >= 5 {
                                 same_tick_count = 0;
+                                send_count += 1;
                                 if let Ok(json) = serde_json::to_string(&obs) {
                                     if sender.send(Message::Text(json.into())).await.is_err() {
                                         break;

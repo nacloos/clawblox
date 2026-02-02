@@ -1,5 +1,6 @@
 use crossbeam_channel::{Receiver, Sender};
 use std::collections::HashMap;
+use std::time::Instant;
 use uuid::Uuid;
 
 use super::lua::instance::attributes_to_json;
@@ -27,6 +28,8 @@ pub struct GameInstance {
     pub status: GameStatus,
     /// Counter for generating unique user IDs that fit in Lua's safe integer range (< 2^53)
     next_user_id: u64,
+    /// Time when the game instance was created (for server_time_ms calculation)
+    start_time: Instant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -70,7 +73,13 @@ impl GameInstance {
             action_sender,
             status: GameStatus::Playing,
             next_user_id: 1, // Start at 1, stays well within Lua's safe integer range
+            start_time: Instant::now(),
         }
+    }
+
+    /// Returns milliseconds since game instance was created
+    pub fn elapsed_ms(&self) -> u64 {
+        self.start_time.elapsed().as_millis() as u64
     }
 
     /// Creates a new game instance with a Lua script
@@ -167,33 +176,46 @@ impl GameInstance {
 
     /// Main game loop tick - called at 60 Hz
     pub fn tick(&mut self) {
+        use std::time::Instant;
         let dt = 1.0 / 60.0;
+
+        // Debug timing (log every 60 ticks)
+        let should_log = self.tick % 60 == 0 && self.tick > 0;
+        let t0 = Instant::now();
 
         // Process queued actions
         while let Ok(queued) = self.action_receiver.try_recv() {
             self.process_action(queued);
         }
+        let t1 = Instant::now();
 
         // Sync Lua workspace gravity to physics
         self.sync_gravity();
+        let t2 = Instant::now();
 
         // Sync new/changed Lua parts to physics (skip character-controlled parts)
         self.sync_lua_to_physics();
+        let t3 = Instant::now();
 
         // Update query pipeline so character controller can detect collisions with new geometry
         self.physics.query_pipeline.update(&self.physics.collider_set);
+        let t4 = Instant::now();
 
         // Sync Lua humanoid MoveTo targets to physics character controllers
         self.sync_humanoid_move_targets();
+        let t5 = Instant::now();
 
         // Update character controller movement
         self.update_character_movement(dt);
+        let t6 = Instant::now();
 
         // Step physics simulation
         self.physics.step(dt);
+        let t7 = Instant::now();
 
         // Sync physics results back to Lua (for Anchored=false parts and characters)
         self.sync_physics_to_lua();
+        let t8 = Instant::now();
 
         // Process agent inputs (fire InputReceived events)
         if let Some(runtime) = &self.lua_runtime {
@@ -201,12 +223,38 @@ impl GameInstance {
                 eprintln!("[Lua Error] Failed to process agent inputs: {}", e);
             }
         }
+        let t9 = Instant::now();
 
         // Run Lua Heartbeat
         if let Some(runtime) = &self.lua_runtime {
             if let Err(e) = runtime.tick(dt) {
                 eprintln!("[Lua Error] Tick error: {}", e);
             }
+        }
+        let t10 = Instant::now();
+
+        if should_log {
+            let num_colliders = self.physics.collider_set.len();
+            let num_bodies = self.physics.rigid_body_set.len();
+            println!("[Tick] colliders={} bodies={} charMove={:.2}ms | actions={:.2}ms lua2phys={:.2}ms query={:.2}ms physics={:.2}ms",
+                num_colliders, num_bodies, (t6-t5).as_micros() as f64 / 1000.0,
+                (t1-t0).as_micros() as f64 / 1000.0,
+                (t3-t2).as_micros() as f64 / 1000.0,
+                (t4-t3).as_micros() as f64 / 1000.0,
+                (t7-t6).as_micros() as f64 / 1000.0);
+            // Original detailed log
+            println!("[Tick] actions={:.2}ms gravity={:.2}ms lua2phys={:.2}ms query={:.2}ms moveto={:.2}ms charMove={:.2}ms physics={:.2}ms phys2lua={:.2}ms inputs={:.2}ms heartbeat={:.2}ms",
+                (t1-t0).as_micros() as f64 / 1000.0,
+                (t2-t1).as_micros() as f64 / 1000.0,
+                (t3-t2).as_micros() as f64 / 1000.0,
+                (t4-t3).as_micros() as f64 / 1000.0,
+                (t5-t4).as_micros() as f64 / 1000.0,
+                (t6-t5).as_micros() as f64 / 1000.0,
+                (t7-t6).as_micros() as f64 / 1000.0,
+                (t8-t7).as_micros() as f64 / 1000.0,
+                (t9-t8).as_micros() as f64 / 1000.0,
+                (t10-t9).as_micros() as f64 / 1000.0,
+            );
         }
 
         self.tick += 1;
@@ -728,6 +776,7 @@ impl GameInstance {
 
         SpectatorObservation {
             tick: self.tick,
+            server_time_ms: self.elapsed_ms(),
             game_status: match self.status {
                 GameStatus::Waiting => "waiting".to_string(),
                 GameStatus::Playing => "playing".to_string(),
@@ -819,6 +868,8 @@ pub struct GameEvent {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SpectatorObservation {
     pub tick: u64,
+    /// Milliseconds since game instance was created (for client clock synchronization)
+    pub server_time_ms: u64,
     pub game_status: String,
     pub players: Vec<SpectatorPlayerInfo>,
     pub entities: Vec<SpectatorEntity>,

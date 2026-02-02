@@ -1,15 +1,14 @@
 import { SpectatorObservation } from '../api'
 
-// Server timing
-const SERVER_TICK_MS = 16.67 // 60 Hz
+// Configuration
+const INITIAL_RENDER_DELAY_MS = 200 // Increased for debugging
+const MIN_RENDER_DELAY_MS = 50
+const MAX_RENDER_DELAY_MS = 500
+const CLOCK_SAMPLES = 10
+const BUFFER_SIZE = 20
 
-// Buffering - Roblox-style with larger delay for jitter absorption
-const BUFFER_SIZE = 20 // More history for velocity estimation
-const INTERPOLATION_DELAY_TICKS = 4 // Render 4 ticks behind (~67ms) - more buffer
-
-// Extrapolation settings
-const MAX_EXTRAPOLATION_TICKS = 6 // Max ~100ms of extrapolation
-const VELOCITY_SMOOTHING = 0.3 // Blend factor for velocity updates
+// Debug
+let debugLogTimer = 0
 
 export interface EntitySnapshot {
   id: number
@@ -34,68 +33,72 @@ export interface PlayerSnapshot {
 
 export interface StateSnapshot {
   tick: number
-  receiveTime: number
+  serverTimeMs: number // Server timestamp (ms since game start)
+  localReceiveTime: number // Local time when received (for clock sync)
   entities: Map<number, EntitySnapshot>
   players: Map<string, PlayerSnapshot>
 }
 
-// Tracked velocity for extrapolation
-interface EntityVelocity {
-  vx: number
-  vy: number
-  vz: number
-  lastTick: number
-}
-
 export interface InterpolatedResult {
-  before: StateSnapshot | null
+  before: StateSnapshot
   after: StateSnapshot | null
   alpha: number
   isExtrapolating: boolean
 }
 
+/**
+ * Compute median of an array of numbers
+ */
+function median(values: number[]): number {
+  if (values.length === 0) return 0
+  const sorted = [...values].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 !== 0
+    ? sorted[mid]
+    : (sorted[mid - 1] + sorted[mid]) / 2
+}
+
+/**
+ * StateBuffer with server-time based interpolation.
+ *
+ * Key insight: Render time is derived from server time, not tracked independently.
+ * This eliminates speed adjustment hacks and provides smooth interpolation.
+ *
+ * How it works:
+ * 1. Server includes timestamp (server_time_ms) in each message
+ * 2. Client calculates clock offset: offset = local_time - server_time (smoothed median)
+ * 3. Fixed render delay: Always render at server_time - DELAY
+ * 4. Simple interpolation: Find two snapshots bracketing target time, lerp between them
+ * 5. Never extrapolate aggressively: If no future data, hold last position
+ */
 export class StateBuffer {
   private buffer: StateSnapshot[] = []
-  private readonly maxSize = BUFFER_SIZE
 
-  // Render timing
-  private lastUpdateTime: number = 0
-  private renderTick: number = 0
-  private lastFrameTime: number = 0
+  // Clock synchronization: local_time ≈ server_time + offset
+  private clockOffset: number = 0
+  private clockOffsetSamples: number[] = []
 
-  // Velocity tracking for extrapolation (Roblox-style)
-  private entityVelocities: Map<number, EntityVelocity> = new Map()
-  private playerVelocities: Map<string, EntityVelocity> = new Map()
-
-  // Cached result
-  private cachedResult: InterpolatedResult | null = null
-  private cachedFrameTime: number = 0
-
-  // Jitter detection
-  private lastReceiveInterval: number = 33 // Expected ~30fps from server
-  private jitterBuffer: number = 0 // Additional buffer when jitter detected
+  // Adaptive render delay
+  private renderDelay: number = INITIAL_RENDER_DELAY_MS
 
   push(observation: SpectatorObservation): void {
-    const receiveTime = performance.now()
+    const localTime = performance.now()
+    const serverTime = observation.server_time_ms
 
-    // Track receive intervals to detect jitter
-    if (this.buffer.length > 0) {
-      const lastReceive = this.buffer[this.buffer.length - 1].receiveTime
-      const interval = receiveTime - lastReceive
-
-      // Detect jitter: if interval varies significantly, increase buffer
-      const expectedInterval = this.lastReceiveInterval
-      const jitter = Math.abs(interval - expectedInterval)
-      if (jitter > 20) { // More than 20ms variance
-        this.jitterBuffer = Math.min(this.jitterBuffer + 0.5, 3) // Add up to 3 extra ticks
-      } else {
-        this.jitterBuffer = Math.max(this.jitterBuffer - 0.1, 0) // Slowly reduce
-      }
-
-      // Smooth the expected interval
-      this.lastReceiveInterval = this.lastReceiveInterval * 0.9 + interval * 0.1
+    // Log first few pushes and every 30th after
+    if (this.buffer.length < 5 || this.buffer.length % 30 === 0) {
+      console.log('[StateBuffer.push]', {
+        tick: observation.tick,
+        serverTimeMs: serverTime,
+        localTime: Math.round(localTime),
+        bufferLen: this.buffer.length,
+      })
     }
 
+    // Update clock offset (smoothed median filters outliers from network spikes)
+    this.updateClockOffset(localTime, serverTime)
+
+    // Convert observation to snapshot
     const entities = new Map<number, EntitySnapshot>()
     for (const entity of observation.entities) {
       entities.set(entity.id, { ...entity })
@@ -108,158 +111,60 @@ export class StateBuffer {
 
     const snapshot: StateSnapshot = {
       tick: observation.tick,
-      receiveTime,
+      serverTimeMs: serverTime,
+      localReceiveTime: localTime,
       entities,
       players,
     }
 
-    // Update velocity estimates before adding new snapshot
-    this.updateVelocities(snapshot)
-
     this.buffer.push(snapshot)
 
-    while (this.buffer.length > this.maxSize) {
+    // Trim old snapshots
+    while (this.buffer.length > BUFFER_SIZE) {
       this.buffer.shift()
     }
-
-    if (this.buffer.length === 1) {
-      this.renderTick = observation.tick - INTERPOLATION_DELAY_TICKS
-      this.lastUpdateTime = receiveTime
-    }
-
-    this.cachedResult = null
   }
 
   /**
-   * Update velocity estimates based on position deltas (Roblox-style)
+   * Update clock offset using median filtering.
+   * offset = local_time - server_time
+   * So: server_time_now = local_time_now - offset
    */
-  private updateVelocities(newSnapshot: StateSnapshot): void {
-    if (this.buffer.length === 0) return
+  private updateClockOffset(localTime: number, serverTime: number): void {
+    const sample = localTime - serverTime
+    this.clockOffsetSamples.push(sample)
 
-    const prevSnapshot = this.buffer[this.buffer.length - 1]
-    const tickDelta = newSnapshot.tick - prevSnapshot.tick
-    if (tickDelta <= 0) return
-
-    const dt = tickDelta * SERVER_TICK_MS / 1000 // Convert to seconds
-
-    // Update entity velocities
-    for (const [id, entity] of newSnapshot.entities) {
-      const prevEntity = prevSnapshot.entities.get(id)
-      if (prevEntity) {
-        const vx = (entity.position[0] - prevEntity.position[0]) / dt
-        const vy = (entity.position[1] - prevEntity.position[1]) / dt
-        const vz = (entity.position[2] - prevEntity.position[2]) / dt
-
-        const existing = this.entityVelocities.get(id)
-        if (existing) {
-          // Smooth velocity updates to reduce jitter
-          existing.vx = existing.vx * (1 - VELOCITY_SMOOTHING) + vx * VELOCITY_SMOOTHING
-          existing.vy = existing.vy * (1 - VELOCITY_SMOOTHING) + vy * VELOCITY_SMOOTHING
-          existing.vz = existing.vz * (1 - VELOCITY_SMOOTHING) + vz * VELOCITY_SMOOTHING
-          existing.lastTick = newSnapshot.tick
-        } else {
-          this.entityVelocities.set(id, { vx, vy, vz, lastTick: newSnapshot.tick })
-        }
-      }
+    if (this.clockOffsetSamples.length > CLOCK_SAMPLES) {
+      this.clockOffsetSamples.shift()
     }
 
-    // Update player velocities
-    for (const [id, player] of newSnapshot.players) {
-      const prevPlayer = prevSnapshot.players.get(id)
-      if (prevPlayer) {
-        const vx = (player.position[0] - prevPlayer.position[0]) / dt
-        const vy = (player.position[1] - prevPlayer.position[1]) / dt
-        const vz = (player.position[2] - prevPlayer.position[2]) / dt
-
-        const existing = this.playerVelocities.get(id)
-        if (existing) {
-          existing.vx = existing.vx * (1 - VELOCITY_SMOOTHING) + vx * VELOCITY_SMOOTHING
-          existing.vy = existing.vy * (1 - VELOCITY_SMOOTHING) + vy * VELOCITY_SMOOTHING
-          existing.vz = existing.vz * (1 - VELOCITY_SMOOTHING) + vz * VELOCITY_SMOOTHING
-          existing.lastTick = newSnapshot.tick
-        } else {
-          this.playerVelocities.set(id, { vx, vy, vz, lastTick: newSnapshot.tick })
-        }
-      }
-    }
+    // Use median to filter outliers (network spikes)
+    this.clockOffset = median(this.clockOffsetSamples)
   }
 
   /**
-   * Get velocity for an entity (for extrapolation)
+   * Get interpolated state for rendering.
+   *
+   * Returns snapshots bracketing the target render time with interpolation alpha.
+   * If no future data available, returns the last snapshot with alpha=0 (hold position).
    */
-  getEntityVelocity(entityId: number): [number, number, number] | null {
-    const vel = this.entityVelocities.get(entityId)
-    if (!vel) return null
-    return [vel.vx, vel.vy, vel.vz]
-  }
-
-  /**
-   * Get velocity for a player (for extrapolation)
-   */
-  getPlayerVelocity(playerId: string): [number, number, number] | null {
-    const vel = this.playerVelocities.get(playerId)
-    if (!vel) return null
-    return [vel.vx, vel.vy, vel.vz]
-  }
-
-  private updateRenderTick(renderTime: number): void {
-    if (Math.abs(renderTime - this.lastFrameTime) < 0.1) {
-      return
-    }
-    this.lastFrameTime = renderTime
-
-    if (this.buffer.length === 0) {
-      return
-    }
-
-    const latestTick = this.buffer[this.buffer.length - 1].tick
-    const earliestTick = this.buffer[0].tick
-
-    const elapsed = renderTime - this.lastUpdateTime
-    this.lastUpdateTime = renderTime
-
-    // Advance at server tick rate
-    this.renderTick += elapsed / SERVER_TICK_MS
-
-    // Target tick includes jitter buffer
-    const effectiveDelay = INTERPOLATION_DELAY_TICKS + this.jitterBuffer
-    const targetTick = latestTick - effectiveDelay
-
-    const minTick = earliestTick
-    // Allow extrapolation up to MAX_EXTRAPOLATION_TICKS beyond latest
-    const maxTick = latestTick + MAX_EXTRAPOLATION_TICKS
-
-    if (this.renderTick < minTick) {
-      this.renderTick = minTick
-    } else if (this.renderTick > maxTick) {
-      // Hard cap at max extrapolation
-      this.renderTick = maxTick
-    } else if (this.renderTick > targetTick + 1) {
-      // Gradually slow down if ahead of target (but don't hard clamp)
-      this.renderTick = this.renderTick * 0.95 + targetTick * 0.05
-    } else if (this.renderTick < targetTick - 1) {
-      // Speed up slightly if falling behind
-      this.renderTick = this.renderTick * 0.95 + targetTick * 0.05
-    }
-  }
-
-  getInterpolatedState(renderTime: number): InterpolatedResult | null {
+  getInterpolatedState(): InterpolatedResult | null {
     if (this.buffer.length === 0) {
       return null
     }
 
-    if (this.cachedResult && Math.abs(renderTime - this.cachedFrameTime) < 0.1) {
-      return this.cachedResult
-    }
+    // Calculate target server time to render
+    const localNow = performance.now()
+    const serverNow = localNow - this.clockOffset
+    const targetServerTime = serverNow - this.renderDelay
 
-    this.updateRenderTick(renderTime)
-
+    // Find snapshots bracketing targetServerTime
     let before: StateSnapshot | null = null
     let after: StateSnapshot | null = null
 
     for (let i = 0; i < this.buffer.length; i++) {
       const snapshot = this.buffer[i]
-      if (snapshot.tick <= this.renderTick) {
+      if (snapshot.serverTimeMs <= targetServerTime) {
         before = snapshot
       } else {
         after = snapshot
@@ -267,121 +172,151 @@ export class StateBuffer {
       }
     }
 
-    const latestTick = this.buffer[this.buffer.length - 1].tick
-    const isExtrapolating = this.renderTick > latestTick
+    // Debug logging (once per second)
+    const now = performance.now()
+    if (now - debugLogTimer > 1000) {
+      debugLogTimer = now
+      const latest = this.buffer[this.buffer.length - 1]
+      const earliest = this.buffer[0]
+      console.log('[StateBuffer]', {
+        bufferSize: this.buffer.length,
+        clockOffset: Math.round(this.clockOffset),
+        renderDelay: this.renderDelay,
+        targetServerTime: Math.round(targetServerTime),
+        earliestServerTime: earliest.serverTimeMs,
+        latestServerTime: latest.serverTimeMs,
+        bufferSpanMs: latest.serverTimeMs - earliest.serverTimeMs,
+        hasBefore: !!before,
+        hasAfter: !!after,
+        beforeTime: before?.serverTimeMs,
+        afterTime: after?.serverTimeMs,
+      })
+    }
 
+    // No data before target - use earliest snapshot
     if (!before) {
-      this.cachedResult = {
+      return {
         before: this.buffer[0],
         after: this.buffer.length > 1 ? this.buffer[1] : null,
         alpha: 0,
         isExtrapolating: false,
       }
-      this.cachedFrameTime = renderTime
-      return this.cachedResult
     }
 
+    // No data after target - HOLD last position (don't extrapolate)
     if (!after) {
-      // Extrapolation: use last two snapshots + velocity
-      if (this.buffer.length >= 2) {
-        const prev = this.buffer[this.buffer.length - 2]
-        const curr = this.buffer[this.buffer.length - 1]
-        const tickDelta = curr.tick - prev.tick
-        if (tickDelta > 0) {
-          // Calculate how far to extrapolate
-          const ticksPastCurr = this.renderTick - curr.tick
-          const alpha = 1 + (ticksPastCurr / tickDelta)
-
-          // Limit extrapolation
-          const clampedAlpha = Math.min(alpha, 1 + MAX_EXTRAPOLATION_TICKS / tickDelta)
-
-          this.cachedResult = {
-            before: prev,
-            after: curr,
-            alpha: clampedAlpha,
-            isExtrapolating: true,
-          }
-          this.cachedFrameTime = renderTime
-          return this.cachedResult
-        }
-      }
-
-      this.cachedResult = {
-        before: this.buffer[this.buffer.length - 1],
+      return {
+        before,
         after: null,
         alpha: 0,
         isExtrapolating: true,
       }
-      this.cachedFrameTime = renderTime
-      return this.cachedResult
     }
 
-    // Normal interpolation
-    const tickDelta = after.tick - before.tick
-    if (tickDelta <= 0) {
-      this.cachedResult = { before, after, alpha: 0, isExtrapolating: false }
-      this.cachedFrameTime = renderTime
-      return this.cachedResult
+    // Normal interpolation between two snapshots
+    const timeDelta = after.serverTimeMs - before.serverTimeMs
+    if (timeDelta <= 0) {
+      return {
+        before,
+        after,
+        alpha: 0,
+        isExtrapolating: false,
+      }
     }
 
-    const alpha = (this.renderTick - before.tick) / tickDelta
-
-    this.cachedResult = {
+    const alpha = (targetServerTime - before.serverTimeMs) / timeDelta
+    return {
       before,
       after,
       alpha: Math.max(0, Math.min(1, alpha)),
-      isExtrapolating,
+      isExtrapolating: false,
     }
-    this.cachedFrameTime = renderTime
-    return this.cachedResult
   }
 
+  /**
+   * Get the latest snapshot (for entity list, etc.)
+   */
   getLatest(): StateSnapshot | null {
     if (this.buffer.length === 0) return null
     return this.buffer[this.buffer.length - 1]
   }
 
+  /**
+   * Get all entity IDs from latest snapshot
+   */
   getEntityIds(): number[] {
     const latest = this.getLatest()
     if (!latest) return []
     return Array.from(latest.entities.keys())
   }
 
+  /**
+   * Get all player IDs from latest snapshot
+   */
   getPlayerIds(): string[] {
     const latest = this.getLatest()
     if (!latest) return []
     return Array.from(latest.players.keys())
   }
 
+  /**
+   * Check if buffer has any data
+   */
   hasData(): boolean {
     return this.buffer.length > 0
   }
 
+  /**
+   * Clear all state
+   */
   clear(): void {
     this.buffer = []
-    this.renderTick = 0
-    this.lastUpdateTime = 0
-    this.lastFrameTime = 0
-    this.cachedResult = null
-    this.cachedFrameTime = 0
-    this.entityVelocities.clear()
-    this.playerVelocities.clear()
-    this.jitterBuffer = 0
+    this.clockOffset = 0
+    this.clockOffsetSamples = []
+    this.renderDelay = INITIAL_RENDER_DELAY_MS
   }
 
   /**
-   * Debug: get current buffer status
+   * Debug info for monitoring
    */
-  getDebugInfo(): { bufferSize: number; renderTick: number; latestTick: number; jitterBuffer: number } {
+  getDebugInfo(): {
+    bufferSize: number
+    clockOffset: number
+    renderDelay: number
+    latestServerTime: number
+    targetRenderTime: number
+  } {
+    const localNow = performance.now()
+    const serverNow = localNow - this.clockOffset
+    const targetServerTime = serverNow - this.renderDelay
+
     return {
       bufferSize: this.buffer.length,
-      renderTick: this.renderTick,
-      latestTick: this.buffer.length > 0 ? this.buffer[this.buffer.length - 1].tick : 0,
-      jitterBuffer: this.jitterBuffer,
+      clockOffset: this.clockOffset,
+      renderDelay: this.renderDelay,
+      latestServerTime: this.buffer.length > 0 ? this.buffer[this.buffer.length - 1].serverTimeMs : 0,
+      targetRenderTime: targetServerTime,
     }
+  }
+
+  /**
+   * Adjust render delay (for adaptive buffering based on jitter detection)
+   */
+  setRenderDelay(delayMs: number): void {
+    this.renderDelay = Math.max(MIN_RENDER_DELAY_MS, Math.min(MAX_RENDER_DELAY_MS, delayMs))
+  }
+
+  /**
+   * Get current render delay
+   */
+  getRenderDelay(): number {
+    return this.renderDelay
   }
 }
 
+/**
+ * Interpolate between two positions
+ */
 export function interpolatePosition(
   before: [number, number, number],
   after: [number, number, number],
@@ -395,20 +330,8 @@ export function interpolatePosition(
 }
 
 /**
- * Extrapolate position using velocity
+ * Squared distance between two points
  */
-export function extrapolatePosition(
-  position: [number, number, number],
-  velocity: [number, number, number],
-  deltaSeconds: number
-): [number, number, number] {
-  return [
-    position[0] + velocity[0] * deltaSeconds,
-    position[1] + velocity[1] * deltaSeconds,
-    position[2] + velocity[2] * deltaSeconds,
-  ]
-}
-
 export function distanceSquared(
   a: [number, number, number],
   b: [number, number, number]

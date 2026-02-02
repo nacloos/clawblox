@@ -2,7 +2,7 @@ import { useRef, useMemo } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import Entity from './Entity'
 import * as THREE from 'three'
-import { StateBuffer } from '../lib/stateBuffer'
+import { StateBuffer, interpolatePosition } from '../lib/stateBuffer'
 
 // Camera smoothing factor (higher = faster response)
 const CAMERA_SMOOTHING = 8
@@ -39,21 +39,20 @@ function CameraController({
   useFrame(({ camera }, delta) => {
     if (followPlayerId) {
       // Get interpolated player position from buffer
-      const result = stateBuffer.getInterpolatedState(performance.now())
-      if (result?.before) {
+      const result = stateBuffer.getInterpolatedState()
+      if (result) {
         const playerBefore = result.before.players.get(followPlayerId)
         const playerAfter = result.after?.players.get(followPlayerId)
 
         if (playerBefore) {
           let x: number, y: number, z: number
 
-          if (playerAfter && result.alpha <= 1) {
+          if (playerAfter && result.alpha > 0) {
             // Interpolate player position
-            x = playerBefore.position[0] + (playerAfter.position[0] - playerBefore.position[0]) * result.alpha
-            y = playerBefore.position[1] + (playerAfter.position[1] - playerBefore.position[1]) * result.alpha
-            z = playerBefore.position[2] + (playerAfter.position[2] - playerBefore.position[2]) * result.alpha
+            const pos = interpolatePosition(playerBefore.position, playerAfter.position, result.alpha)
+            ;[x, y, z] = pos
           } else {
-            // Use latest known position
+            // Use before snapshot position (hold position)
             ;[x, y, z] = playerBefore.position
           }
 

@@ -1,10 +1,7 @@
 import { memo, useRef } from 'react'
 import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
-import { StateBuffer, EntitySnapshot, interpolatePosition, distanceSquared } from '../lib/stateBuffer'
-
-// Teleportation threshold (skip interpolation if delta > this)
-const TELEPORT_THRESHOLD_SQ = 25 // 5^2
+import { StateBuffer, EntitySnapshot, interpolatePosition } from '../lib/stateBuffer'
 
 interface EntityProps {
   entityId: number
@@ -65,14 +62,14 @@ function rotationToQuaternion(rot: [[number, number, number], [number, number, n
   return quat
 }
 
-// Get interpolated entity state from buffer
+// Get interpolated entity position and rotation from buffer
 function getInterpolatedEntity(
   stateBuffer: StateBuffer,
   entityId: number
 ): { entity: EntitySnapshot | null; targetPos: [number, number, number] | null; targetQuat: THREE.Quaternion | null } {
-  const result = stateBuffer.getInterpolatedState(performance.now())
+  const result = stateBuffer.getInterpolatedState()
 
-  if (!result?.before) {
+  if (!result) {
     return { entity: null, targetPos: null, targetQuat: null }
   }
 
@@ -86,20 +83,20 @@ function getInterpolatedEntity(
   let targetPos: [number, number, number]
   let targetQuat: THREE.Quaternion | null = null
 
-  if (entityAfter && result.alpha <= 1.5) {
-    // Interpolate or extrapolate position
+  if (entityAfter && result.alpha > 0) {
+    // Interpolate position
     targetPos = interpolatePosition(entityBefore.position, entityAfter.position, result.alpha)
 
     // Interpolate rotation if both have rotation
     if (entityBefore.rotation && entityAfter.rotation) {
       const quatBefore = rotationToQuaternion(entityBefore.rotation)
       const quatAfter = rotationToQuaternion(entityAfter.rotation)
-      targetQuat = quatBefore.clone().slerp(quatAfter, Math.min(result.alpha, 1))
+      targetQuat = quatBefore.clone().slerp(quatAfter, result.alpha)
     } else if (entityBefore.rotation) {
       targetQuat = rotationToQuaternion(entityBefore.rotation)
     }
   } else {
-    // Use latest known position
+    // Use before snapshot position (hold position when no after data)
     targetPos = entityBefore.position
     if (entityBefore.rotation) {
       targetQuat = rotationToQuaternion(entityBefore.rotation)
@@ -112,10 +109,9 @@ function getInterpolatedEntity(
   return { entity, targetPos, targetQuat }
 }
 
-// Animated pickup component - direct position from buffer + bobbing animation
+// Animated pickup component
 function PickupEntity({ entityId, stateBuffer }: EntityProps) {
   const meshRef = useRef<THREE.Mesh>(null)
-  const lastPos = useRef<[number, number, number] | null>(null)
 
   // Get initial entity to determine pickup type
   const latest = stateBuffer.getLatest()
@@ -126,19 +122,10 @@ function PickupEntity({ entityId, stateBuffer }: EntityProps) {
   useFrame(({ clock }) => {
     if (!meshRef.current) return
 
-    const { entity, targetPos } = getInterpolatedEntity(stateBuffer, entityId)
-    if (!entity || !targetPos) return
+    const { targetPos } = getInterpolatedEntity(stateBuffer, entityId)
+    if (!targetPos) return
 
-    // Check for teleportation (large jump) - just update lastPos reference
-    if (lastPos.current) {
-      const distSq = distanceSquared(lastPos.current, targetPos)
-      if (distSq > TELEPORT_THRESHOLD_SQ) {
-        // Large jump detected - this is fine, just render the new position
-      }
-    }
-    lastPos.current = targetPos
-
-    // Render interpolated position directly (no extra smoothing)
+    // Render interpolated position directly
     meshRef.current.position.x = targetPos[0]
     meshRef.current.position.z = targetPos[2]
     // Bobbing animation for y
@@ -157,7 +144,7 @@ function PickupEntity({ entityId, stateBuffer }: EntityProps) {
   )
 }
 
-// Enemy entity with health bar - direct position from buffer
+// Enemy entity with health bar
 function EnemyEntity({ entityId, stateBuffer }: EntityProps) {
   const groupRef = useRef<THREE.Group>(null)
   const healthBarRef = useRef<THREE.Mesh>(null)
@@ -193,7 +180,6 @@ function EnemyEntity({ entityId, stateBuffer }: EntityProps) {
 }
 
 // Part entity - renders based on shape property (Roblox-style)
-// Direct position/rotation from buffer interpolation
 function PartEntity({ entityId, stateBuffer }: EntityProps) {
   const meshRef = useRef<THREE.Mesh>(null)
 
@@ -285,7 +271,6 @@ function Entity({ entityId, stateBuffer }: EntityProps) {
 }
 
 // Memoize to prevent unnecessary re-renders
-// Only re-render when entityId changes (entity list structural change)
 export default memo(Entity, (prev, next) => {
   return prev.entityId === next.entityId && prev.stateBuffer === next.stateBuffer
 })

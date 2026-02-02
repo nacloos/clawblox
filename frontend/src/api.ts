@@ -21,6 +21,8 @@ export interface SpectatorEntity {
 
 export interface SpectatorObservation {
   tick: number
+  /** Milliseconds since game instance was created (for client clock synchronization) */
+  server_time_ms: number
   game_status: string
   players: SpectatorPlayerInfo[]
   entities: SpectatorEntity[]
