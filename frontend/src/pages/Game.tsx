@@ -1,19 +1,80 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { ArrowLeft, Users } from 'lucide-react'
-import { createGameWebSocket, fetchGameState, SpectatorObservation } from '../api'
+import { createGameWebSocket, fetchGameState, SpectatorObservation, SpectatorPlayerInfo } from '../api'
 import GameScene from '../components/GameScene'
 import PlayerList from '../components/PlayerList'
 import { Button } from '@/components/ui/button'
+import { StateBuffer } from '../lib/stateBuffer'
+
+function arraysEqual<T>(a: T[], b: T[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
+}
 
 export default function Game() {
   const { id } = useParams<{ id: string }>()
-  const [gameState, setGameState] = useState<SpectatorObservation | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting')
   const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null)
+
+  // Use refs for high-frequency state to avoid React re-renders
+  const stateBufferRef = useRef(new StateBuffer())
+
+  // React state only for structural changes (entity/player list changes)
+  const [entityIds, setEntityIds] = useState<number[]>([])
+  const [players, setPlayers] = useState<SpectatorPlayerInfo[]>([])
+  const [gameStatus, setGameStatus] = useState<string | null>(null)
+
   const wsRef = useRef<{ close: () => void } | null>(null)
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const handleState = useCallback((state: SpectatorObservation) => {
+    // Push to buffer (no re-render)
+    stateBufferRef.current.push(state)
+
+    // Only update React state if entity list changed
+    const newIds = state.entities.map(e => e.id).sort((a, b) => a - b)
+    setEntityIds(prev => {
+      if (!arraysEqual(prev, newIds)) {
+        return newIds
+      }
+      return prev
+    })
+
+    // Update players for the player list (structural changes only)
+    setPlayers(prev => {
+      const prevIds = prev.map(p => p.id).sort()
+      const newPlayerIds = state.players.map(p => p.id).sort()
+      // Check if player list structure changed (ids changed)
+      if (!arraysEqual(prevIds, newPlayerIds)) {
+        return state.players
+      }
+      // Also update if player names changed
+      const nameChanged = state.players.some((p, i) => {
+        const prevPlayer = prev.find(pp => pp.id === p.id)
+        return prevPlayer && prevPlayer.name !== p.name
+      })
+      if (nameChanged) {
+        return state.players
+      }
+      return prev
+    })
+
+    // Update game status if changed
+    setGameStatus(prev => {
+      if (prev !== state.game_status) {
+        return state.game_status
+      }
+      return prev
+    })
+
+    setConnectionStatus('connected')
+    setError(null)
+  }, [])
 
   const connect = useCallback(() => {
     if (!id) return
@@ -23,11 +84,7 @@ export default function Game() {
 
     wsRef.current = createGameWebSocket(
       id,
-      (state) => {
-        setGameState(state)
-        setConnectionStatus('connected')
-        setError(null)
-      },
+      handleState,
       (err) => {
         setError(err)
         setConnectionStatus('disconnected')
@@ -40,7 +97,7 @@ export default function Game() {
         }, 2000)
       }
     )
-  }, [id])
+  }, [id, handleState])
 
   useEffect(() => {
     if (!id) return
@@ -48,7 +105,7 @@ export default function Game() {
     // Initial fetch to get state while WebSocket connects
     fetchGameState(id)
       .then((state) => {
-        setGameState(state)
+        handleState(state)
         setError(null)
       })
       .catch((e) => {
@@ -64,17 +121,19 @@ export default function Game() {
         clearTimeout(reconnectTimeoutRef.current)
       }
     }
-  }, [id, connect])
+  }, [id, connect, handleState])
 
   // Reset selection if selected player disconnects
   useEffect(() => {
-    if (!gameState || !selectedPlayerId) return
+    if (players.length === 0 || !selectedPlayerId) return
 
-    const playerExists = gameState.players.some(p => p.id === selectedPlayerId)
+    const playerExists = players.some(p => p.id === selectedPlayerId)
     if (!playerExists) {
       setSelectedPlayerId(null)
     }
-  }, [gameState, selectedPlayerId])
+  }, [players, selectedPlayerId])
+
+  const hasGameData = stateBufferRef.current.hasData()
 
   return (
     <div className="h-full flex flex-col bg-background">
@@ -86,11 +145,11 @@ export default function Game() {
           </Button>
         </Link>
 
-        {gameState && (
+        {hasGameData && (
           <div className="flex items-center gap-4 ml-auto text-sm">
             <span className="text-muted-foreground flex items-center gap-1.5">
               <Users className="h-4 w-4" />
-              {gameState.players.length}
+              {players.length}
             </span>
             {connectionStatus === 'connected' && (
               <span className="w-2 h-2 rounded-full bg-green-500" />
@@ -116,8 +175,8 @@ export default function Game() {
               </Link>
             </div>
           </div>
-        ) : gameState ? (
-          gameState.game_status === 'not_running' ? (
+        ) : hasGameData ? (
+          gameStatus === 'not_running' ? (
             <div className="flex items-center justify-center h-full">
               <div className="text-center">
                 <p className="text-muted-foreground mb-2">This game is not running yet.</p>
@@ -128,9 +187,13 @@ export default function Game() {
             </div>
           ) : (
             <>
-              <GameScene gameState={gameState} followPlayerId={selectedPlayerId} />
+              <GameScene
+                stateBuffer={stateBufferRef.current}
+                entityIds={entityIds}
+                followPlayerId={selectedPlayerId}
+              />
               <PlayerList
-                players={gameState.players}
+                players={players}
                 selectedPlayerId={selectedPlayerId}
                 onSelectPlayer={setSelectedPlayerId}
               />

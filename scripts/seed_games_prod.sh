@@ -20,8 +20,9 @@ if [ -z "$DATABASE_URL" ]; then
     exit 1
 fi
 
-# Read the game script
+# Read the game script and skill definition
 ARSENAL_SCRIPT=$(cat "$PROJECT_ROOT/games/arsenal/game.lua")
+ARSENAL_SKILL=$(cat "$PROJECT_ROOT/games/arsenal/SKILL.md")
 
 echo "Connecting to production database..."
 
@@ -37,15 +38,16 @@ DELETE FROM games WHERE id IN (
 "
 
 # Insert Block Arsenal game
-psql "$DATABASE_URL" -v script="$ARSENAL_SCRIPT" <<'EOF'
-INSERT INTO games (id, name, description, game_type, status, script_code)
+psql "$DATABASE_URL" -v script="$ARSENAL_SCRIPT" -v skill="$ARSENAL_SKILL" <<'EOF'
+INSERT INTO games (id, name, description, game_type, status, script_code, skill_md)
 VALUES (
     'a0000000-0000-0000-0000-000000000005',
     'Block Arsenal',
     'Gun Game / Arms Race - Progress through 15 weapons by getting kills. First to kill with the Golden Knife wins!',
     'lua',
     'waiting',
-    :'script'
+    :'script',
+    :'skill'
 );
 EOF
 

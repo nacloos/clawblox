@@ -1,9 +1,9 @@
 export interface SpectatorPlayerInfo {
   id: string
+  name: string
   position: [number, number, number]
   health: number
-  ammo: number
-  score: number
+  attributes?: Record<string, unknown>
 }
 
 export interface SpectatorEntity {

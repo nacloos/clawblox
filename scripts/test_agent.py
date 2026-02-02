@@ -18,8 +18,20 @@ from dataclasses import dataclass, field
 
 import requests
 
-API_BASE = os.getenv("CLAWBLOX_API_URL", "http://localhost:8080/api/v1")
+# Load .env file if present
+env_path = Path(__file__).parent.parent / ".env"
+if env_path.exists():
+    for line in env_path.read_text().splitlines():
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip())
+
+API_BASE_LOCAL = os.getenv("CLAWBLOX_API_URL", "http://localhost:8080/api/v1")
+API_BASE_PROD = os.getenv("CLAWBLOX_API_URL_PROD", "https://clawblox.com/api/v1")
+API_BASE = API_BASE_LOCAL  # Default, can be overridden by --prod flag
+
 KEYS_CACHE = Path("/tmp/clawblox_agent_keys.json")
+KEYS_CACHE_PROD = Path("/tmp/clawblox_agent_keys_prod.json")
 
 
 @dataclass
@@ -150,11 +162,11 @@ def register_agent(name: str) -> str | None:
     return None
 
 
-def get_api_keys(num_needed: int) -> list[str]:
+def get_api_keys(num_needed: int, is_prod: bool = False) -> list[str]:
     """Get or register enough API keys for num_needed agents"""
-    # Start with env key
+    # Start with env key (use prod-specific key if in prod mode)
     keys = []
-    env_key = os.getenv("CLAWBLOX_API_KEY")
+    env_key = os.getenv("CLAWBLOX_API_KEY_PROD" if is_prod else "CLAWBLOX_API_KEY")
     if env_key:
         keys.append(env_key)
 
@@ -360,12 +372,21 @@ def print_live_stats():
 
 
 def main():
+    global API_BASE, KEYS_CACHE
+
     parser = argparse.ArgumentParser(description="Test exploration agents")
     parser.add_argument("-n", "--num-agents", type=int, default=1, help="Number of agents")
     parser.add_argument("-d", "--duration", type=float, default=None, help="Run for N seconds")
     parser.add_argument("--stats-interval", type=float, default=10.0, help="Print latency stats every N seconds")
     parser.add_argument("--rate", type=float, default=1.0, help="Request cycles per second per agent (default: 1.0 for LLM-realistic pacing)")
+    parser.add_argument("--prod", action="store_true", help="Run against production (clawblox.com)")
     args = parser.parse_args()
+
+    # Switch to production if requested
+    if args.prod:
+        API_BASE = API_BASE_PROD
+        KEYS_CACHE = KEYS_CACHE_PROD
+        print("*** PRODUCTION MODE ***", flush=True)
 
     cycle_delay = 1.0 / args.rate if args.rate > 0 else 0.1
 
@@ -373,7 +394,7 @@ def main():
     print(f"Rate: {args.rate} cycles/s per agent ({cycle_delay:.2f}s delay)", flush=True)
 
     # Get API keys
-    api_keys = get_api_keys(args.num_agents)
+    api_keys = get_api_keys(args.num_agents, is_prod=args.prod)
     print(f"Got {len(api_keys)} API key(s)", flush=True)
 
     # Find game

@@ -39,24 +39,22 @@ async fn get_agent_id_from_api_key(
     pool: &PgPool,
 ) -> Result<Uuid, (StatusCode, String)> {
     // Check cache first
-    if let Some(agent_id) = cache.get(api_key) {
-        return Ok(*agent_id);
+    if let Some(entry) = cache.get(api_key) {
+        return Ok(entry.0);
     }
 
-    // Cache miss - query DB
-    let agent = sqlx::query_as::<_, (Uuid,)>("SELECT id FROM agents WHERE api_key = $1")
+    // Cache miss - query DB for both id and name
+    let agent = sqlx::query_as::<_, (Uuid, String)>("SELECT id, name FROM agents WHERE api_key = $1")
         .bind(api_key)
         .fetch_optional(pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
 
-    let agent_id = agent.0;
-
     // Cache the result
-    cache.insert(api_key.to_string(), agent_id);
+    cache.insert(api_key.to_string(), agent.clone());
 
-    Ok(agent_id)
+    Ok(agent.0)
 }
 
 pub fn routes(pool: PgPool, game_manager: GameManagerHandle, api_key_cache: ApiKeyCache) -> Router {

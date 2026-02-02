@@ -1,4 +1,4 @@
-import { Heart, Target, Trophy } from 'lucide-react'
+import { Heart, Trophy, Crosshair } from 'lucide-react'
 import { SpectatorPlayerInfo } from '../api'
 import { Badge } from '@/components/ui/badge'
 
@@ -14,35 +14,44 @@ export default function PlayerList({ players, selectedPlayerId, onSelectPlayer }
       <div className="text-sm font-medium text-foreground mb-3">Players</div>
 
       <div className="space-y-2">
-        {players.map((player) => (
-          <button
-            key={player.id}
-            onClick={() => onSelectPlayer(selectedPlayerId === player.id ? null : player.id)}
-            className={`w-full text-left p-2 rounded-md transition-colors ${
-              selectedPlayerId === player.id
-                ? 'bg-accent border border-accent-foreground/20'
-                : 'hover:bg-accent/50'
-            }`}
-          >
-            <div className="text-sm font-medium text-foreground truncate mb-1.5">
-              {player.id}
-            </div>
-            <div className="flex flex-wrap gap-1">
-              <Badge variant="outline" className="text-xs gap-1">
-                <Heart className="h-3 w-3 text-red-400" />
-                {player.health}
-              </Badge>
-              <Badge variant="outline" className="text-xs gap-1">
-                <Target className="h-3 w-3 text-blue-400" />
-                {player.ammo}
-              </Badge>
-              <Badge variant="secondary" className="text-xs gap-1">
-                <Trophy className="h-3 w-3 text-yellow-400" />
-                {player.score}
-              </Badge>
-            </div>
-          </button>
-        ))}
+        {players.map((player) => {
+          const kills = player.attributes?.Kills as number | undefined
+          const currentWeapon = player.attributes?.CurrentWeapon as number | undefined
+
+          return (
+            <button
+              key={player.id}
+              onClick={() => onSelectPlayer(selectedPlayerId === player.id ? null : player.id)}
+              className={`w-full text-left p-2 rounded-md transition-colors ${
+                selectedPlayerId === player.id
+                  ? 'bg-accent border border-accent-foreground/20'
+                  : 'hover:bg-accent/50'
+              }`}
+            >
+              <div className="text-sm font-medium text-foreground truncate mb-1.5">
+                {player.name}
+              </div>
+              <div className="flex flex-wrap gap-1">
+                <Badge variant="outline" className="text-xs gap-1">
+                  <Heart className="h-3 w-3 text-red-400" />
+                  {player.health}
+                </Badge>
+                {kills !== undefined && (
+                  <Badge variant="secondary" className="text-xs gap-1">
+                    <Trophy className="h-3 w-3 text-yellow-400" />
+                    {kills}
+                  </Badge>
+                )}
+                {currentWeapon !== undefined && (
+                  <Badge variant="outline" className="text-xs gap-1">
+                    <Crosshair className="h-3 w-3 text-blue-400" />
+                    {currentWeapon}
+                  </Badge>
+                )}
+              </div>
+            </button>
+          )
+        })}
 
         {players.length === 0 && (
           <div className="text-sm text-muted-foreground text-center py-2">

@@ -1,14 +1,14 @@
-import { memo, useRef, useEffect } from 'react'
+import { memo, useRef } from 'react'
 import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
-import { damp3, dampQ } from 'maath/easing'
-import { SpectatorEntity } from '../api'
+import { StateBuffer, EntitySnapshot, interpolatePosition, distanceSquared } from '../lib/stateBuffer'
 
-// Smoothing factor for position/rotation interpolation (higher = faster)
-const SMOOTHING = 12
+// Teleportation threshold (skip interpolation if delta > this)
+const TELEPORT_THRESHOLD_SQ = 25 // 5^2
 
 interface EntityProps {
-  entity: SpectatorEntity
+  entityId: number
+  stateBuffer: StateBuffer
 }
 
 function getMaterialProps(material?: string, color?: string) {
@@ -51,72 +51,7 @@ function toColor(colorArray?: [number, number, number]): string {
   return `rgb(${Math.round(colorArray[0] * 255)}, ${Math.round(colorArray[1] * 255)}, ${Math.round(colorArray[2] * 255)})`
 }
 
-// Animated pickup component - smooth position + bobbing animation
-function PickupEntity({ entity }: EntityProps) {
-  const meshRef = useRef<THREE.Mesh>(null)
-  const targetPos = useRef(new THREE.Vector3(entity.position[0], entity.position[1], entity.position[2]))
-  const isHealth = entity.pickup_type === 'health'
-  const baseColor = isHealth ? '#22c55e' : '#3b82f6'
-
-  useEffect(() => {
-    targetPos.current.set(entity.position[0], entity.position[1], entity.position[2])
-  }, [entity.position[0], entity.position[1], entity.position[2]])
-
-  useFrame(({ clock }, delta) => {
-    if (!meshRef.current) return
-    // Smooth interpolation for x and z
-    meshRef.current.position.x += (targetPos.current.x - meshRef.current.position.x) * Math.min(1, SMOOTHING * delta)
-    meshRef.current.position.z += (targetPos.current.z - meshRef.current.position.z) * Math.min(1, SMOOTHING * delta)
-    // Bobbing animation for y
-    meshRef.current.position.y = targetPos.current.y + 0.3 + Math.sin(clock.getElapsedTime() * 2) * 0.1
-  })
-
-  const [x, y, z] = entity.position
-
-  return (
-    <mesh ref={meshRef} position={[x, y + 0.3, z]} castShadow>
-      <sphereGeometry args={[0.4, 16, 16]} />
-      <meshStandardMaterial
-        color={baseColor}
-        emissive={baseColor}
-        emissiveIntensity={0.3}
-      />
-    </mesh>
-  )
-}
-
-// Enemy entity with health bar - uses smooth interpolation
-function EnemyEntity({ entity }: EntityProps) {
-  const groupRef = useRef<THREE.Group>(null)
-  const targetPos = useRef(new THREE.Vector3(...entity.position))
-  const healthRatio = (entity.health ?? 80) / 80
-
-  useEffect(() => {
-    targetPos.current.set(...entity.position)
-  }, [entity.position[0], entity.position[1], entity.position[2]])
-
-  useFrame((_, delta) => {
-    if (!groupRef.current) return
-    damp3(groupRef.current.position, targetPos.current, SMOOTHING, delta)
-  })
-
-  const [x, y, z] = entity.position
-
-  return (
-    <group ref={groupRef} position={[x, y, z]}>
-      <mesh castShadow>
-        <boxGeometry args={[1, 1.5, 1]} />
-        <meshStandardMaterial color="#e74c3c" />
-      </mesh>
-      <mesh position={[0, 1.5, 0]}>
-        <boxGeometry args={[1 * healthRatio, 0.1, 0.1]} />
-        <meshBasicMaterial color="#ef4444" />
-      </mesh>
-    </group>
-  )
-}
-
-// Convert Roblox rotation matrix to Three.js Quaternion for smooth interpolation
+// Convert Roblox rotation matrix to Three.js Quaternion
 function rotationToQuaternion(rot: [[number, number, number], [number, number, number], [number, number, number]]): THREE.Quaternion {
   const matrix = new THREE.Matrix4()
   matrix.set(
@@ -130,60 +65,187 @@ function rotationToQuaternion(rot: [[number, number, number], [number, number, n
   return quat
 }
 
-// Part entity - renders based on shape property (Roblox-style)
-// Uses smooth interpolation for position and rotation
-function PartEntity({ entity }: EntityProps) {
-  const meshRef = useRef<THREE.Mesh>(null)
-  const targetPos = useRef(new THREE.Vector3(...entity.position))
-  const targetQuat = useRef(entity.rotation ? rotationToQuaternion(entity.rotation) : new THREE.Quaternion())
+// Get interpolated entity state from buffer
+function getInterpolatedEntity(
+  stateBuffer: StateBuffer,
+  entityId: number
+): { entity: EntitySnapshot | null; targetPos: [number, number, number] | null; targetQuat: THREE.Quaternion | null } {
+  const result = stateBuffer.getInterpolatedState(performance.now())
 
-  const size = entity.size || [1, 1, 1]
-  const color = toColor(entity.color)
-  const materialProps = getMaterialProps(entity.material, color)
-  const shape = entity.shape || 'Block'
+  if (!result?.before) {
+    return { entity: null, targetPos: null, targetQuat: null }
+  }
 
-  // Update targets when entity data changes
-  useEffect(() => {
-    targetPos.current.set(...entity.position)
-    if (entity.rotation) {
-      targetQuat.current.copy(rotationToQuaternion(entity.rotation))
+  const entityBefore = result.before.entities.get(entityId)
+  if (!entityBefore) {
+    return { entity: null, targetPos: null, targetQuat: null }
+  }
+
+  const entityAfter = result.after?.entities.get(entityId)
+
+  let targetPos: [number, number, number]
+  let targetQuat: THREE.Quaternion | null = null
+
+  if (entityAfter && result.alpha <= 1.5) {
+    // Interpolate or extrapolate position
+    targetPos = interpolatePosition(entityBefore.position, entityAfter.position, result.alpha)
+
+    // Interpolate rotation if both have rotation
+    if (entityBefore.rotation && entityAfter.rotation) {
+      const quatBefore = rotationToQuaternion(entityBefore.rotation)
+      const quatAfter = rotationToQuaternion(entityAfter.rotation)
+      targetQuat = quatBefore.clone().slerp(quatAfter, Math.min(result.alpha, 1))
+    } else if (entityBefore.rotation) {
+      targetQuat = rotationToQuaternion(entityBefore.rotation)
     }
-  }, [entity.position[0], entity.position[1], entity.position[2], entity.rotation])
+  } else {
+    // Use latest known position
+    targetPos = entityBefore.position
+    if (entityBefore.rotation) {
+      targetQuat = rotationToQuaternion(entityBefore.rotation)
+    }
+  }
 
-  // Smooth interpolation each frame
-  useFrame((_, delta) => {
+  // Use the most recent entity data for static properties
+  const entity = entityAfter || entityBefore
+
+  return { entity, targetPos, targetQuat }
+}
+
+// Animated pickup component - direct position from buffer + bobbing animation
+function PickupEntity({ entityId, stateBuffer }: EntityProps) {
+  const meshRef = useRef<THREE.Mesh>(null)
+  const lastPos = useRef<[number, number, number] | null>(null)
+
+  // Get initial entity to determine pickup type
+  const latest = stateBuffer.getLatest()
+  const initialEntity = latest?.entities.get(entityId)
+  const isHealth = initialEntity?.pickup_type === 'health'
+  const baseColor = isHealth ? '#22c55e' : '#3b82f6'
+
+  useFrame(({ clock }) => {
     if (!meshRef.current) return
-    damp3(meshRef.current.position, targetPos.current, SMOOTHING, delta)
-    dampQ(meshRef.current.quaternion, targetQuat.current, SMOOTHING, delta)
+
+    const { entity, targetPos } = getInterpolatedEntity(stateBuffer, entityId)
+    if (!entity || !targetPos) return
+
+    // Check for teleportation (large jump) - just update lastPos reference
+    if (lastPos.current) {
+      const distSq = distanceSquared(lastPos.current, targetPos)
+      if (distSq > TELEPORT_THRESHOLD_SQ) {
+        // Large jump detected - this is fine, just render the new position
+      }
+    }
+    lastPos.current = targetPos
+
+    // Render interpolated position directly (no extra smoothing)
+    meshRef.current.position.x = targetPos[0]
+    meshRef.current.position.z = targetPos[2]
+    // Bobbing animation for y
+    meshRef.current.position.y = targetPos[1] + 0.3 + Math.sin(clock.getElapsedTime() * 2) * 0.1
   })
 
-  // Initial position from entity data
-  const [x, y, z] = entity.position
-  const initialQuat = entity.rotation ? rotationToQuaternion(entity.rotation) : new THREE.Quaternion()
+  return (
+    <mesh ref={meshRef} position={[0, 0, 0]} castShadow>
+      <sphereGeometry args={[0.4, 16, 16]} />
+      <meshStandardMaterial
+        color={baseColor}
+        emissive={baseColor}
+        emissiveIntensity={0.3}
+      />
+    </mesh>
+  )
+}
+
+// Enemy entity with health bar - direct position from buffer
+function EnemyEntity({ entityId, stateBuffer }: EntityProps) {
+  const groupRef = useRef<THREE.Group>(null)
+  const healthBarRef = useRef<THREE.Mesh>(null)
+
+  useFrame(() => {
+    if (!groupRef.current) return
+
+    const { entity, targetPos } = getInterpolatedEntity(stateBuffer, entityId)
+    if (!entity || !targetPos) return
+
+    // Render interpolated position directly
+    groupRef.current.position.set(targetPos[0], targetPos[1], targetPos[2])
+
+    // Update health bar
+    if (healthBarRef.current) {
+      const healthRatio = (entity.health ?? 80) / 80
+      healthBarRef.current.scale.x = healthRatio
+    }
+  })
+
+  return (
+    <group ref={groupRef} position={[0, 0, 0]}>
+      <mesh castShadow>
+        <boxGeometry args={[1, 1.5, 1]} />
+        <meshStandardMaterial color="#e74c3c" />
+      </mesh>
+      <mesh ref={healthBarRef} position={[0, 1.5, 0]}>
+        <boxGeometry args={[1, 0.1, 0.1]} />
+        <meshBasicMaterial color="#ef4444" />
+      </mesh>
+    </group>
+  )
+}
+
+// Part entity - renders based on shape property (Roblox-style)
+// Direct position/rotation from buffer interpolation
+function PartEntity({ entityId, stateBuffer }: EntityProps) {
+  const meshRef = useRef<THREE.Mesh>(null)
+
+  // Get initial entity for static properties
+  const latest = stateBuffer.getLatest()
+  const initialEntity = latest?.entities.get(entityId)
+
+  const size = initialEntity?.size || [1, 1, 1]
+  const color = toColor(initialEntity?.color)
+  const materialProps = getMaterialProps(initialEntity?.material, color)
+  const shape = initialEntity?.shape || 'Block'
+
+  useFrame(() => {
+    if (!meshRef.current) return
+
+    const { targetPos, targetQuat } = getInterpolatedEntity(stateBuffer, entityId)
+    if (!targetPos) return
+
+    // Render interpolated position directly
+    meshRef.current.position.set(targetPos[0], targetPos[1], targetPos[2])
+
+    // Render interpolated rotation directly
+    if (targetQuat) {
+      meshRef.current.quaternion.copy(targetQuat)
+    }
+  })
 
   switch (shape) {
-    case 'Ball':
+    case 'Ball': {
       const radius = Math.min(size[0], size[1], size[2]) / 2
       return (
-        <mesh ref={meshRef} position={[x, y, z]} quaternion={initialQuat} castShadow receiveShadow>
+        <mesh ref={meshRef} position={[0, 0, 0]} castShadow receiveShadow>
           <sphereGeometry args={[radius, 24, 24]} />
           <meshStandardMaterial {...materialProps} />
         </mesh>
       )
+    }
 
-    case 'Cylinder':
+    case 'Cylinder': {
       const cylRadius = size[0] / 2
       const cylHeight = size[1]
       return (
-        <mesh ref={meshRef} position={[x, y, z]} quaternion={initialQuat} castShadow receiveShadow>
+        <mesh ref={meshRef} position={[0, 0, 0]} castShadow receiveShadow>
           <capsuleGeometry args={[cylRadius, cylHeight - cylRadius * 2, 8, 16]} />
           <meshStandardMaterial {...materialProps} />
         </mesh>
       )
+    }
 
     case 'Wedge':
       return (
-        <mesh ref={meshRef} position={[x, y, z]} quaternion={initialQuat} castShadow receiveShadow>
+        <mesh ref={meshRef} position={[0, 0, 0]} castShadow receiveShadow>
           <boxGeometry args={size as [number, number, number]} />
           <meshStandardMaterial {...materialProps} />
         </mesh>
@@ -192,7 +254,7 @@ function PartEntity({ entity }: EntityProps) {
     case 'Block':
     default:
       return (
-        <mesh ref={meshRef} position={[x, y, z]} quaternion={initialQuat} castShadow receiveShadow>
+        <mesh ref={meshRef} position={[0, 0, 0]} castShadow receiveShadow>
           <boxGeometry args={size as [number, number, number]} />
           <meshStandardMaterial {...materialProps} />
         </mesh>
@@ -200,56 +262,30 @@ function PartEntity({ entity }: EntityProps) {
   }
 }
 
-function Entity({ entity }: EntityProps) {
+function Entity({ entityId, stateBuffer }: EntityProps) {
+  // Get the entity type from the latest snapshot
+  const latest = stateBuffer.getLatest()
+  const entity = latest?.entities.get(entityId)
+
+  if (!entity) {
+    return null
+  }
+
   // Special rendering for specific entity types (legacy support)
   if (entity.type === 'pickup') {
-    return <PickupEntity entity={entity} />
+    return <PickupEntity entityId={entityId} stateBuffer={stateBuffer} />
   }
 
   if (entity.type === 'enemy') {
-    return <EnemyEntity entity={entity} />
+    return <EnemyEntity entityId={entityId} stateBuffer={stateBuffer} />
   }
 
   // Default: render as Part based on shape
-  return <PartEntity entity={entity} />
+  return <PartEntity entityId={entityId} stateBuffer={stateBuffer} />
 }
 
 // Memoize to prevent unnecessary re-renders
+// Only re-render when entityId changes (entity list structural change)
 export default memo(Entity, (prev, next) => {
-  const p = prev.entity
-  const n = next.entity
-
-  // Compare rotation matrices
-  const rotEqual = (p.rotation === n.rotation) || (
-    p.rotation && n.rotation &&
-    p.rotation[0][0] === n.rotation[0][0] &&
-    p.rotation[0][1] === n.rotation[0][1] &&
-    p.rotation[0][2] === n.rotation[0][2] &&
-    p.rotation[1][0] === n.rotation[1][0] &&
-    p.rotation[1][1] === n.rotation[1][1] &&
-    p.rotation[1][2] === n.rotation[1][2] &&
-    p.rotation[2][0] === n.rotation[2][0] &&
-    p.rotation[2][1] === n.rotation[2][1] &&
-    p.rotation[2][2] === n.rotation[2][2]
-  )
-
-  // Compare key properties that would affect rendering
-  return (
-    p.id === n.id &&
-    p.type === n.type &&
-    p.position[0] === n.position[0] &&
-    p.position[1] === n.position[1] &&
-    p.position[2] === n.position[2] &&
-    rotEqual &&
-    p.size?.[0] === n.size?.[0] &&
-    p.size?.[1] === n.size?.[1] &&
-    p.size?.[2] === n.size?.[2] &&
-    p.color?.[0] === n.color?.[0] &&
-    p.color?.[1] === n.color?.[1] &&
-    p.color?.[2] === n.color?.[2] &&
-    p.material === n.material &&
-    p.shape === n.shape &&
-    p.health === n.health &&
-    p.pickup_type === n.pickup_type
-  )
+  return prev.entityId === next.entityId && prev.stateBuffer === next.stateBuffer
 })

@@ -34,30 +34,38 @@ pub fn routes(pool: PgPool, game_manager: GameManagerHandle, api_key_cache: ApiK
         .with_state(state)
 }
 
-/// Gets agent_id from API key, checking cache first, then DB (and caching result)
-async fn get_agent_id_from_api_key(
+/// Gets agent_id and name from API key, checking cache first, then DB (and caching result)
+async fn get_agent_info_from_api_key(
     api_key: &str,
     cache: &ApiKeyCache,
     pool: &PgPool,
-) -> Result<Uuid, (StatusCode, String)> {
+) -> Result<(Uuid, String), (StatusCode, String)> {
     // Check cache first
-    if let Some(agent_id) = cache.get(api_key) {
-        return Ok(*agent_id);
+    if let Some(entry) = cache.get(api_key) {
+        return Ok(entry.clone());
     }
 
-    // Cache miss - query DB
-    let agent = sqlx::query_as::<_, (Uuid,)>("SELECT id FROM agents WHERE api_key = $1")
+    // Cache miss - query DB for both id and name
+    let agent = sqlx::query_as::<_, (Uuid, String)>("SELECT id, name FROM agents WHERE api_key = $1")
         .bind(api_key)
         .fetch_optional(pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
 
-    let agent_id = agent.0;
-
     // Cache the result
-    cache.insert(api_key.to_string(), agent_id);
+    cache.insert(api_key.to_string(), agent.clone());
 
+    Ok(agent)
+}
+
+/// Gets just agent_id from API key (for operations that don't need name)
+async fn get_agent_id_from_api_key(
+    api_key: &str,
+    cache: &ApiKeyCache,
+    pool: &PgPool,
+) -> Result<Uuid, (StatusCode, String)> {
+    let (agent_id, _) = get_agent_info_from_api_key(api_key, cache, pool).await?;
     Ok(agent_id)
 }
 
@@ -387,8 +395,8 @@ async fn join_game(
     let api_key = extract_api_key(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
 
-    // Use cache for agent auth
-    let agent_id = get_agent_id_from_api_key(&api_key, &state.api_key_cache, &state.pool).await?;
+    // Get agent id and name for join
+    let (agent_id, agent_name) = get_agent_info_from_api_key(&api_key, &state.api_key_cache, &state.pool).await?;
 
     // Check if instance is already running (avoids DB query for script)
     if !game::is_instance_running(&state.game_manager, game_id) {
@@ -408,8 +416,8 @@ async fn join_game(
         );
     }
 
-    // Join the instance
-    game::join_game(&state.game_manager, game_id, agent_id)
+    // Join the instance with agent name
+    game::join_game(&state.game_manager, game_id, agent_id, &agent_name)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     // Fire-and-forget: insert game_players record in background

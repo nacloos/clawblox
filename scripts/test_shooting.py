@@ -14,7 +14,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 import requests
 
-load_dotenv(Path(__file__).parent / ".env")
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 API_BASE = os.getenv("CLAWBLOX_API_URL", "http://localhost:8080/api/v1")
 API_KEY = os.getenv("CLAWBLOX_API_KEY")
@@ -85,13 +85,14 @@ def main():
         while True:
             obs = observe(game_id, headers)
             pos = obs["player"]["position"]
-            weapon = obs["player"]["attributes"].get("WeaponName", "Unknown")
+            kills = obs["player"]["attributes"].get("Kills", 0)
+            deaths = obs["player"]["attributes"].get("Deaths", 0)
 
             offset = offsets[offset_idx]
             target = [pos[0] + offset[0], pos[1] + offset[1], pos[2] + offset[2]]
             offset_idx = (offset_idx + 1) % len(offsets)
 
-            print(f"Pos: ({pos[0]:6.1f}, {pos[1]:5.1f}, {pos[2]:6.1f}) | Weapon: {weapon:15s} | Target: ({target[0]:6.1f}, {target[1]:5.1f}, {target[2]:6.1f})")
+            print(f"Pos: ({pos[0]:6.1f}, {pos[1]:5.1f}, {pos[2]:6.1f}) | K/D: {kills}/{deaths} | Target: ({target[0]:6.1f}, {target[1]:5.1f}, {target[2]:6.1f})")
 
             shoot(game_id, target, headers)
             time.sleep(2.0)

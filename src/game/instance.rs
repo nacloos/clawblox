@@ -21,6 +21,7 @@ pub struct GameInstance {
     pub tick: u64,
     pub players: HashMap<Uuid, u64>, // agent_id -> lua player user_id
     pub player_hrp_ids: HashMap<Uuid, u64>, // agent_id -> HumanoidRootPart lua_id
+    pub player_names: HashMap<Uuid, String>, // agent_id -> player name
     pub action_receiver: Receiver<QueuedAction>,
     pub action_sender: Sender<QueuedAction>,
     pub status: GameStatus,
@@ -64,6 +65,7 @@ impl GameInstance {
             tick: 0,
             players: HashMap::new(),
             player_hrp_ids: HashMap::new(),
+            player_names: HashMap::new(),
             action_receiver,
             action_sender,
             status: GameStatus::Playing,
@@ -95,7 +97,7 @@ impl GameInstance {
     }
 
     /// Adds a player to the game
-    pub fn add_player(&mut self, agent_id: Uuid) -> bool {
+    pub fn add_player(&mut self, agent_id: Uuid, name: &str) -> bool {
         if self.players.contains_key(&agent_id) {
             return false;
         }
@@ -104,10 +106,10 @@ impl GameInstance {
         let user_id = self.next_user_id;
         self.next_user_id += 1;
         self.players.insert(agent_id, user_id);
+        self.player_names.insert(agent_id, name.to_string());
 
         if let Some(runtime) = &self.lua_runtime {
-            let player_name = format!("Player_{}", agent_id.as_simple());
-            let (player, hrp_id) = runtime.add_player(user_id, &player_name);
+            let (player, hrp_id) = runtime.add_player(user_id, name);
 
             // Offset spawn position based on player count to avoid overlap
             let player_index = self.players.len() as f32;
@@ -133,6 +135,8 @@ impl GameInstance {
             if let Some(hrp_id) = self.player_hrp_ids.remove(&agent_id) {
                 self.physics.remove_character(hrp_id);
             }
+            // Remove player name
+            self.player_names.remove(&agent_id);
 
             if let Some(runtime) = &self.lua_runtime {
                 if let Some(player) = runtime.players().get_player_by_user_id(user_id) {
@@ -664,28 +668,58 @@ impl GameInstance {
                 if let Some(player) = runtime.players().get_player_by_user_id(user_id) {
                     let player_data = player.data.lock().unwrap();
 
-                    // Get position from character's HumanoidRootPart
-                    let position = player_data.player_data.as_ref()
+                    // Get position and health in one pass (avoid redundant locking)
+                    let (position, health) = player_data.player_data.as_ref()
                         .and_then(|pd| pd.character.as_ref())
                         .and_then(|weak| weak.upgrade())
-                        .and_then(|char_data| {
-                            let char = char_data.lock().unwrap();
-                            char.model_data.as_ref()
+                        .map(|char_ref| {
+                            let char = char_ref.lock().unwrap();
+
+                            // Get position from HumanoidRootPart
+                            let pos = char.model_data.as_ref()
                                 .and_then(|m| m.primary_part.as_ref())
                                 .and_then(|weak| weak.upgrade())
                                 .and_then(|hrp_data| {
                                     let hrp = hrp_data.lock().unwrap();
                                     hrp.part_data.as_ref().map(|p| [p.position.x, p.position.y, p.position.z])
                                 })
+                                .unwrap_or([0.0, 3.0, 0.0]);
+
+                            // Get health from Humanoid (while we have character locked)
+                            let hp = char.children.iter()
+                                .find_map(|child| {
+                                    let child_data = child.lock().unwrap();
+                                    if child_data.name == "Humanoid" {
+                                        child_data.humanoid_data.as_ref().map(|h| h.health as i32)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or(100);
+
+                            (pos, hp)
                         })
-                        .unwrap_or([0.0, 3.0, 0.0]); // Default spawn height
+                        .unwrap_or(([0.0, 3.0, 0.0], 100));
+
+                    // Get player name from our cache, or fall back to Player_<uuid>
+                    let name = self.player_names.get(&agent_id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("Player_{}", agent_id.as_simple()));
+
+                    // Get all attributes and convert to JSON Value
+                    let attrs = attributes_to_json(&player_data.attributes);
+                    let attributes = if attrs.is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::to_value(&attrs).unwrap_or(serde_json::Value::Null))
+                    };
 
                     players.push(SpectatorPlayerInfo {
                         id: agent_id,
+                        name,
                         position,
-                        health: 100,
-                        ammo: 0,
-                        score: 0,
+                        health,
+                        attributes,
                     });
                     drop(player_data);
                 }
@@ -793,10 +827,11 @@ pub struct SpectatorObservation {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SpectatorPlayerInfo {
     pub id: Uuid,
+    pub name: String,
     pub position: [f32; 3],
     pub health: i32,
-    pub ammo: i32,
-    pub score: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -842,7 +877,7 @@ mod tests {
 
         // Add a player
         let agent_id = Uuid::new_v4();
-        assert!(instance.add_player(agent_id));
+        assert!(instance.add_player(agent_id, "TestPlayer"));
 
         // Verify player has HRP registered
         assert!(instance.player_hrp_ids.contains_key(&agent_id));
@@ -898,7 +933,7 @@ mod tests {
         "#);
 
         let agent_id = Uuid::new_v4();
-        instance.add_player(agent_id);
+        instance.add_player(agent_id, "TestPlayer");
 
         // Run a tick to sync physics
         instance.tick();
@@ -942,8 +977,8 @@ mod tests {
 
         let agent_a = Uuid::new_v4();
         let agent_b = Uuid::new_v4();
-        instance.add_player(agent_a);
-        instance.add_player(agent_b);
+        instance.add_player(agent_a, "PlayerA");
+        instance.add_player(agent_b, "PlayerB");
 
         // Run a tick to sync physics
         instance.tick();
@@ -994,8 +1029,8 @@ mod tests {
 
         let agent_a = Uuid::new_v4();
         let agent_b = Uuid::new_v4();
-        instance.add_player(agent_a);
-        instance.add_player(agent_b);
+        instance.add_player(agent_a, "PlayerA");
+        instance.add_player(agent_b, "PlayerB");
 
         // Run several ticks to sync physics
         for _ in 0..5 {
@@ -1101,8 +1136,8 @@ mod tests {
         // Add two players
         let attacker_id = Uuid::new_v4();
         let victim_id = Uuid::new_v4();
-        instance.add_player(attacker_id);
-        instance.add_player(victim_id);
+        instance.add_player(attacker_id, "Attacker");
+        instance.add_player(victim_id, "Victim");
 
         let attacker_user_id = *instance.players.get(&attacker_id).unwrap();
 

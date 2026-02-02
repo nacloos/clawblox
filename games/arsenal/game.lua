@@ -1,5 +1,5 @@
--- Block Arsenal
--- Gun Game / Arms Race - First to kill with every weapon wins
+-- Block Arsenal - Simplified Sandbox Mode
+-- Continuous deathmatch with projectile-based combat
 
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
@@ -12,26 +12,13 @@ local ARENA_SIZE = 200
 local RESPAWN_TIME = 3
 local HEALTH_REGEN_DELAY = 5
 local HEALTH_REGEN_RATE = 10
-local MELEE_DAMAGE = 35
-local MELEE_RANGE = 8
-local MELEE_COOLDOWN = 0.8
 
-local WEAPONS = {
-    {name = "Pistol",         type = "hitscan",     damage = 25,  fireRate = 0.3,  range = 80,  pellets = 1, spread = 0},
-    {name = "SMG",            type = "hitscan",     damage = 14,  fireRate = 0.08, range = 50,  pellets = 1, spread = 0.05},
-    {name = "Shotgun",        type = "pellet",      damage = 12,  fireRate = 0.9,  range = 30,  pellets = 8, spread = 0.15},
-    {name = "Assault Rifle",  type = "hitscan",     damage = 22,  fireRate = 0.12, range = 100, pellets = 1, spread = 0.02},
-    {name = "Sniper Rifle",   type = "hitscan",     damage = 100, fireRate = 1.5,  range = 250, pellets = 1, spread = 0},
-    {name = "LMG",            type = "hitscan",     damage = 18,  fireRate = 0.07, range = 80,  pellets = 1, spread = 0.03},
-    {name = "Revolver",       type = "hitscan",     damage = 55,  fireRate = 0.5,  range = 90,  pellets = 1, spread = 0},
-    {name = "Burst Rifle",    type = "burst",       damage = 18,  fireRate = 0.35, range = 90,  pellets = 1, spread = 0.01, burstCount = 3},
-    {name = "Auto Shotgun",   type = "pellet",      damage = 9,   fireRate = 0.35, range = 25,  pellets = 6, spread = 0.12},
-    {name = "DMR",            type = "hitscan",     damage = 48,  fireRate = 0.4,  range = 150, pellets = 1, spread = 0},
-    {name = "Minigun",        type = "hitscan",     damage = 12,  fireRate = 0.04, range = 70,  pellets = 1, spread = 0.04, spinUp = 1.0},
-    {name = "Crossbow",       type = "projectile",  damage = 85,  fireRate = 1.0,  range = 120, speed = 80},
-    {name = "Dual Pistols",   type = "dual",        damage = 20,  fireRate = 0.2,  range = 70,  pellets = 1, spread = 0.02},
-    {name = "Rocket Launcher",type = "projectile",  damage = 100, fireRate = 2.0,  range = 150, speed = 50, splash = 15},
-    {name = "Golden Knife",   type = "melee",       damage = 999, fireRate = 0.4,  range = 6},
+-- Single unified weapon config
+local WEAPON = {
+    damage = 25,
+    fireRate = 0.3,       -- seconds between shots
+    projectileSpeed = 100, -- studs/sec
+    range = 100,          -- max travel distance
 }
 
 local SPAWN_POINTS = {
@@ -45,11 +32,9 @@ local SPAWN_POINTS = {
 -- GAME STATE
 --------------------------------------------------------------------------------
 
-local gameState = "waiting" -- waiting, countdown, active, victory
-local matchStartTime = 0
-local winner = nil
+local gameState = "waiting" -- waiting, countdown, active
 local projectiles = {}
-local playerData = {} -- keyed by UserId: {lastFireTime, lastMeleeTime, lastDamageTime, lastKiller, respawnTime}
+local playerData = {} -- keyed by UserId: {lastFireTime, lastDamageTime, lastKiller, respawnTime}
 
 -- Helper to get playerData by player object
 local function getPlayerData(player)
@@ -172,25 +157,15 @@ end
 -- PLAYER MANAGEMENT
 --------------------------------------------------------------------------------
 
-local function setWeapon(player, weaponIndex)
-    player:SetAttribute("CurrentWeapon", weaponIndex)
-    player:SetAttribute("WeaponName", WEAPONS[weaponIndex].name)
-end
-
 local function initializePlayer(player)
-    setWeapon(player, 1)
     player:SetAttribute("Kills", 0)
     player:SetAttribute("Deaths", 0)
-    player:SetAttribute("MeleeKills", 0)
 
     setPlayerData(player, {
         lastFireTime = 0,
-        lastMeleeTime = 0,
         lastDamageTime = 0,
         lastKiller = nil,
         respawnTime = 0,
-        burstRemaining = 0,
-        spinUpTime = 0,
     })
 end
 
@@ -275,7 +250,7 @@ local function findPlayerFromPart(part)
     return nil
 end
 
-local function dealDamage(attacker, victim, damage, isMelee)
+local function dealDamage(attacker, victim, damage)
     local humanoid = getHumanoid(victim)
     if not humanoid or humanoid.Health <= 0 then
         return false
@@ -290,9 +265,7 @@ local function dealDamage(attacker, victim, damage, isMelee)
     if character then
         for _, part in ipairs(character:GetChildren()) do
             if part:IsA("Part") or part:IsA("MeshPart") then
-                local originalColor = part.Color
                 part.Color = Color3.fromRGB(255, 100, 100)
-                -- Would use TweenService here for smooth transition
             end
         end
     end
@@ -303,7 +276,7 @@ local function dealDamage(attacker, victim, damage, isMelee)
     return false
 end
 
-local function onPlayerKilled(killer, victim, wasMelee)
+local function onPlayerKilled(killer, victim)
     if gameState ~= "active" then
         return
     end
@@ -312,167 +285,47 @@ local function onPlayerKilled(killer, victim, wasMelee)
     killer:SetAttribute("Kills", killer:GetAttribute("Kills") + 1)
     victim:SetAttribute("Deaths", victim:GetAttribute("Deaths") + 1)
 
-    local killerWeapon = killer:GetAttribute("CurrentWeapon")
-    local victimWeapon = victim:GetAttribute("CurrentWeapon")
-    local weaponName = WEAPONS[killerWeapon].name
-
-    if wasMelee and killerWeapon ~= 15 then
-        -- Melee kill with non-final weapon: demote victim, no advance
-        local newVictimWeapon = math.max(1, victimWeapon - 1)
-        setWeapon(victim, newVictimWeapon)
-        killer:SetAttribute("MeleeKills", killer:GetAttribute("MeleeKills") + 1)
-        print("[KNIFE] " .. killer.Name .. " DEMOTED " .. victim.Name .. " to " .. WEAPONS[newVictimWeapon].name)
-    else
-        -- Gun kill or golden knife: advance killer
-        if killerWeapon == 15 then
-            -- Victory!
-            winner = killer
-            gameState = "victory"
-            print("=== " .. killer.Name .. " WINS WITH THE GOLDEN KNIFE! ===")
-        else
-            local newWeapon = killerWeapon + 1
-            setWeapon(killer, newWeapon)
-            print("[" .. weaponName .. "] " .. killer.Name .. " -> " .. victim.Name .. " | Now using: " .. WEAPONS[newWeapon].name)
-        end
-    end
+    print("[KILL] " .. killer.Name .. " -> " .. victim.Name)
 
     -- Set respawn timer
     getPlayerData(victim).respawnTime = tick() + RESPAWN_TIME
 end
 
 --------------------------------------------------------------------------------
--- WEAPON SYSTEM
+-- PROJECTILE SYSTEM
 --------------------------------------------------------------------------------
 
-local function createTracer(origin, hitPos)
-    local tracer = Instance.new("Part")
-    tracer.Name = "Tracer"
-    tracer.Anchored = true
-    tracer.CanCollide = false
-    tracer.Color = Color3.fromRGB(255, 255, 100)
-    tracer.Material = Enum.Material.Neon
-
-    local distance = (hitPos - origin).Magnitude
-    tracer.Size = Vector3.new(0.1, 0.1, distance)
-    tracer.CFrame = CFrame.new(origin, hitPos) * CFrame.new(0, 0, -distance/2)
-    tracer:SetAttribute("Lifetime", 0.1)
-    tracer.Parent = Workspace
-
-    table.insert(projectiles, tracer)
-end
-
-local function fireHitscan(player, weapon, direction)
+local function spawnProjectile(player, direction)
     local character = player.Character
     if not character then
-        warn("fireHitscan: player has no Character")
+        warn("spawnProjectile: player has no Character")
         return
     end
 
     local hrp = character:FindFirstChild("HumanoidRootPart")
     if not hrp then
-        warn("fireHitscan: character has no HumanoidRootPart")
+        warn("spawnProjectile: character has no HumanoidRootPart")
         return
     end
-
-    local origin = hrp.Position + Vector3.new(0, 1, 0)
-    local pelletCount = weapon.pellets or 1
-
-    for i = 1, pelletCount do
-        -- Apply spread
-        local spread = weapon.spread or 0
-        local spreadDir = direction
-        if spread > 0 then
-            spreadDir = Vector3.new(
-                direction.X + (math.random() - 0.5) * spread * 2,
-                direction.Y + (math.random() - 0.5) * spread * 2,
-                direction.Z + (math.random() - 0.5) * spread * 2
-            ).Unit
-        end
-
-        local raycastParams = RaycastParams.new()
-        raycastParams.FilterType = Enum.RaycastFilterType.Exclude
-        raycastParams.FilterDescendantsInstances = {character}
-
-        local result = Workspace:Raycast(origin, spreadDir * weapon.range, raycastParams)
-
-        local hitPos = origin + spreadDir * weapon.range
-        if result then
-            hitPos = result.Position
-            local hitPlayer = findPlayerFromPart(result.Instance)
-            if hitPlayer and hitPlayer ~= player then
-                local killed = dealDamage(player, hitPlayer, weapon.damage, false)
-                if killed then
-                    onPlayerKilled(player, hitPlayer, false)
-                end
-            end
-        end
-
-        createTracer(origin, hitPos)
-    end
-end
-
-local function fireMelee(player, weapon)
-    local character = player.Character
-    if not character then return end
-
-    local hrp = character:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-
-    local origin = hrp.Position
-    local aimDir = player:GetAttribute("AimDirection")
-    if not aimDir then
-        aimDir = hrp.CFrame.LookVector
-    end
-
-    -- Check for players in melee range
-    for _, other in ipairs(Players:GetPlayers()) do
-        if other ~= player then
-            local otherPos = getCharacterPosition(other)
-            if otherPos then
-                local toOther = otherPos - origin
-                local distance = toOther.Magnitude
-
-                if distance <= weapon.range then
-                    -- Check if roughly facing the target
-                    local dot = toOther.Unit:Dot(aimDir)
-                    if dot > 0.5 then
-                        local killed = dealDamage(player, other, weapon.damage, true)
-                        if killed then
-                            local isFinalWeapon = player:GetAttribute("CurrentWeapon") == 15
-                            onPlayerKilled(player, other, not isFinalWeapon)
-                        end
-                        return -- Only hit one target
-                    end
-                end
-            end
-        end
-    end
-end
-
-local function spawnProjectile(player, weapon, direction)
-    local character = player.Character
-    if not character then return end
-
-    local hrp = character:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
 
     local origin = hrp.Position + Vector3.new(0, 1, 0) + direction * 2
 
     local projectile = Instance.new("Part")
     projectile.Name = "Projectile"
-    projectile.Size = Vector3.new(0.5, 0.5, 2)
-    projectile.CFrame = CFrame.new(origin, origin + direction)  -- Set position and rotation
+    projectile.Size = Vector3.new(0.3, 0.3, 1.2)
+    projectile.CFrame = CFrame.new(origin, origin + direction)
     projectile.Anchored = false
-    projectile.CanCollide = true
-    projectile.Color = weapon.name == "Rocket Launcher" and Color3.fromRGB(255, 100, 50) or Color3.fromRGB(139, 90, 43)
+    projectile.CanCollide = false  -- No physics collision, we check manually
+    projectile.Color = Color3.fromRGB(255, 200, 50)
+    projectile.Material = Enum.Material.Neon
 
-    projectile:SetAttribute("Damage", weapon.damage)
+    projectile:SetAttribute("Damage", WEAPON.damage)
     projectile:SetAttribute("Owner", player.Name)
-    projectile:SetAttribute("Lifetime", 5)
-    projectile:SetAttribute("Splash", weapon.splash or 0)
+    projectile:SetAttribute("StartPos", origin)
+    projectile:SetAttribute("MaxRange", WEAPON.range)
 
     -- Set velocity
-    projectile.Velocity = direction * weapon.speed
+    projectile.Velocity = direction * WEAPON.projectileSpeed
     projectile.Parent = Workspace
 
     table.insert(projectiles, projectile)
@@ -487,12 +340,10 @@ local function tryFire(player)
         return
     end
 
-    local weaponIndex = player:GetAttribute("CurrentWeapon") or 1
-    local weapon = WEAPONS[weaponIndex]
     local now = tick()
 
     -- Check fire rate
-    if now - data.lastFireTime < weapon.fireRate then
+    if now - data.lastFireTime < WEAPON.fireRate then
         return
     end
 
@@ -515,70 +366,7 @@ local function tryFire(player)
     aimDir = aimDir.Unit
 
     data.lastFireTime = now
-
-    if weapon.type == "hitscan" or weapon.type == "pellet" then
-        fireHitscan(player, weapon, aimDir)
-    elseif weapon.type == "burst" then
-        -- Fire 3 shots rapidly
-        fireHitscan(player, weapon, aimDir)
-        data.burstRemaining = (weapon.burstCount or 3) - 1
-    elseif weapon.type == "dual" then
-        fireHitscan(player, weapon, aimDir)
-    elseif weapon.type == "projectile" then
-        spawnProjectile(player, weapon, aimDir)
-    elseif weapon.type == "melee" then
-        fireMelee(player, weapon)
-    end
-end
-
-local function tryMelee(player)
-    if gameState ~= "active" then return end
-
-    local data = getPlayerData(player)
-    if not data then return end
-
-    local now = tick()
-
-    -- Check melee cooldown
-    if now - data.lastMeleeTime < MELEE_COOLDOWN then
-        return
-    end
-
-    data.lastMeleeTime = now
-
-    local character = player.Character
-    if not character then return end
-
-    local hrp = character:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-
-    local origin = hrp.Position
-    local aimDir = player:GetAttribute("AimDirection")
-    if not aimDir then
-        aimDir = hrp.CFrame.LookVector
-    end
-
-    -- Check for players in melee range
-    for _, other in ipairs(Players:GetPlayers()) do
-        if other ~= player then
-            local otherPos = getCharacterPosition(other)
-            if otherPos then
-                local toOther = otherPos - origin
-                local distance = toOther.Magnitude
-
-                if distance <= MELEE_RANGE then
-                    local dot = toOther.Unit:Dot(aimDir)
-                    if dot > 0.3 then
-                        local killed = dealDamage(player, other, MELEE_DAMAGE, true)
-                        if killed then
-                            onPlayerKilled(player, other, true)
-                        end
-                        return
-                    end
-                end
-            end
-        end
-    end
+    spawnProjectile(player, aimDir)
 end
 
 --------------------------------------------------------------------------------
@@ -589,71 +377,58 @@ local function updateProjectiles(dt)
     local toRemove = {}
 
     for i, proj in ipairs(projectiles) do
+        local shouldRemove = false
+
         if proj and proj.Parent then
-            local lifetime = proj:GetAttribute("Lifetime")
-            if lifetime then
-                lifetime = lifetime - dt
-                proj:SetAttribute("Lifetime", lifetime)
+            local damage = proj:GetAttribute("Damage")
+            local ownerName = proj:GetAttribute("Owner")
+            local startPos = proj:GetAttribute("StartPos")
+            local maxRange = proj:GetAttribute("MaxRange")
 
-                if lifetime <= 0 then
-                    table.insert(toRemove, i)
-                else
-                    -- Check for collision with players (for projectiles)
-                    local damage = proj:GetAttribute("Damage")
-                    local ownerName = proj:GetAttribute("Owner")
-                    local splash = proj:GetAttribute("Splash") or 0
+            -- Check if projectile has traveled too far
+            if startPos and maxRange then
+                local traveled = (proj.Position - startPos).Magnitude
+                if traveled > maxRange then
+                    shouldRemove = true
+                end
+            end
 
-                    if damage and ownerName then
-                        for _, player in ipairs(Players:GetPlayers()) do
-                            if player.Name ~= ownerName then
-                                local pos = getCharacterPosition(player)
-                                if pos then
-                                    local dist = (pos - proj.Position).Magnitude
-                                    if dist < 3 then
-                                        -- Direct hit
-                                        local owner = nil
-                                        for _, p in ipairs(Players:GetPlayers()) do
-                                            if p.Name == ownerName then
-                                                owner = p
-                                                break
-                                            end
-                                        end
-
-                                        if owner then
-                                            local killed = dealDamage(owner, player, damage, false)
-                                            if killed then
-                                                onPlayerKilled(owner, player, false)
-                                            end
-                                        end
-
-                                        -- Handle splash damage
-                                        if splash > 0 then
-                                            for _, otherPlayer in ipairs(Players:GetPlayers()) do
-                                                if otherPlayer ~= player and otherPlayer.Name ~= ownerName then
-                                                    local otherPos = getCharacterPosition(otherPlayer)
-                                                    if otherPos then
-                                                        local splashDist = (otherPos - proj.Position).Magnitude
-                                                        if splashDist < splash then
-                                                            local splashDamage = damage * (1 - splashDist / splash)
-                                                            if owner then
-                                                                dealDamage(owner, otherPlayer, splashDamage, false)
-                                                            end
-                                                        end
-                                                    end
-                                                end
-                                            end
-                                        end
-
-                                        table.insert(toRemove, i)
+            -- Check for collision with players
+            if not shouldRemove and damage and ownerName then
+                for _, player in ipairs(Players:GetPlayers()) do
+                    if player.Name ~= ownerName then
+                        local pos = getCharacterPosition(player)
+                        if pos then
+                            local dist = (pos - proj.Position).Magnitude
+                            if dist < 3 then
+                                -- Direct hit
+                                local owner = nil
+                                for _, p in ipairs(Players:GetPlayers()) do
+                                    if p.Name == ownerName then
+                                        owner = p
                                         break
                                     end
                                 end
+
+                                if owner then
+                                    local killed = dealDamage(owner, player, damage)
+                                    if killed then
+                                        onPlayerKilled(owner, player)
+                                    end
+                                end
+
+                                shouldRemove = true
+                                break
                             end
                         end
                     end
                 end
             end
         else
+            shouldRemove = true
+        end
+
+        if shouldRemove then
             table.insert(toRemove, i)
         end
     end
@@ -697,33 +472,11 @@ local function updateRespawns()
     end
 end
 
-local function updateBursts(dt)
-    for _, player in ipairs(Players:GetPlayers()) do
-        local data = getPlayerData(player)
-        if data and data.burstRemaining > 0 then
-            local weapon = WEAPONS[player:GetAttribute("CurrentWeapon")]
-            if weapon and weapon.type == "burst" then
-                local aimDir = player:GetAttribute("AimDirection")
-                if aimDir then
-                    fireHitscan(player, weapon, aimDir)
-                end
-                data.burstRemaining = data.burstRemaining - 1
-            end
-        end
-    end
-end
-
 local function updateFiring()
     for _, player in ipairs(Players:GetPlayers()) do
         local firing = player:GetAttribute("Firing")
         if firing then
             tryFire(player)
-        end
-
-        local meleeAttack = player:GetAttribute("MeleeAttack")
-        if meleeAttack then
-            tryMelee(player)
-            player:SetAttribute("MeleeAttack", false)
         end
     end
 end
@@ -732,15 +485,15 @@ local function printLeaderboard()
     print("\n=== LEADERBOARD ===")
     local players = Players:GetPlayers()
     table.sort(players, function(a, b)
-        return (a:GetAttribute("CurrentWeapon") or 1) > (b:GetAttribute("CurrentWeapon") or 1)
+        local aKills = a:GetAttribute("Kills") or 0
+        local bKills = b:GetAttribute("Kills") or 0
+        return aKills > bKills
     end)
 
     for i, player in ipairs(players) do
-        local weapon = player:GetAttribute("CurrentWeapon") or 1
         local kills = player:GetAttribute("Kills") or 0
         local deaths = player:GetAttribute("Deaths") or 0
-        print(string.format("%d. %s [%s] K/D: %d/%d",
-            i, player.Name, WEAPONS[weapon].name, kills, deaths))
+        print(string.format("%d. %s K/D: %d/%d", i, player.Name, kills, deaths))
     end
     print("===================\n")
 end
@@ -750,7 +503,6 @@ end
 --------------------------------------------------------------------------------
 
 local countdownTime = 0
-local victoryTime = 0
 local leaderboardTimer = 0
 
 local function startCountdown()
@@ -768,31 +520,8 @@ end
 
 local function startMatch()
     gameState = "active"
-    matchStartTime = tick()
-    winner = nil
-    print("=== MATCH STARTED! ===")
-    print("First to kill with the Golden Knife wins!")
-end
-
-local function endMatch()
-    gameState = "victory"
-    victoryTime = 5
-
-    if winner then
-        print("=== " .. winner.Name .. " WINS! ===")
-        -- Apply golden effect to winner
-        local character = winner.Character
-        if character then
-            for _, part in ipairs(character:GetChildren()) do
-                if part:IsA("Part") or part:IsA("MeshPart") then
-                    part.Color = Color3.fromRGB(255, 215, 0)
-                    part.Material = Enum.Material.Neon
-                end
-            end
-        end
-    end
-
-    printLeaderboard()
+    print("=== SANDBOX MODE STARTED ===")
+    print("Eliminate opponents - no win condition, just frag!")
 end
 
 local function updateMatch(dt)
@@ -811,19 +540,11 @@ local function updateMatch(dt)
         end
 
     elseif gameState == "active" then
-        -- Game is running, handled by other update functions
-
         -- Periodic leaderboard
         leaderboardTimer = leaderboardTimer + dt
         if leaderboardTimer >= 30 then
             leaderboardTimer = 0
             printLeaderboard()
-        end
-
-    elseif gameState == "victory" then
-        victoryTime = victoryTime - dt
-        if victoryTime <= 0 then
-            startCountdown()
         end
     end
 end
@@ -882,9 +603,6 @@ if AgentInputService then
             else
                 warn("MoveTo: missing humanoid or position for", player.Name)
             end
-
-        elseif inputType == "Melee" then
-            tryMelee(player)
         end
     end)
 end
@@ -893,11 +611,10 @@ end
 RunService.Heartbeat:Connect(function(dt)
     updateMatch(dt)
     updateFiring()
-    updateBursts(dt)
     updateProjectiles(dt)
     updateHealthRegen(dt)
     updateRespawns()
 end)
 
 print("Block Arsenal loaded!")
-print("Waiting for players... (minimum 2 to start)")
+print("Sandbox mode - waiting for players...")

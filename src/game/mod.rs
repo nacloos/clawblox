@@ -139,14 +139,14 @@ pub fn is_instance_running(state: &GameManagerHandle, game_id: Uuid) -> bool {
     state.games.contains_key(&game_id)
 }
 
-pub fn join_game(state: &GameManagerHandle, game_id: Uuid, agent_id: Uuid) -> Result<(), String> {
+pub fn join_game(state: &GameManagerHandle, game_id: Uuid, agent_id: Uuid, agent_name: &str) -> Result<(), String> {
     let game_handle = state
         .games
         .get(&game_id)
         .ok_or_else(|| "Game not found".to_string())?;
 
     let mut game = game_handle.write();
-    if !game.add_player(agent_id) {
+    if !game.add_player(agent_id, agent_name) {
         return Err("Already in game".to_string());
     }
 

@@ -1,11 +1,15 @@
 import { useRef, useMemo } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { SpectatorObservation } from '../api'
 import Entity from './Entity'
 import * as THREE from 'three'
+import { StateBuffer } from '../lib/stateBuffer'
+
+// Camera smoothing factor (higher = faster response)
+const CAMERA_SMOOTHING = 8
 
 interface GameSceneProps {
-  gameState: SpectatorObservation
+  stateBuffer: StateBuffer
+  entityIds: number[]
   followPlayerId?: string | null
 }
 
@@ -20,10 +24,10 @@ const FOLLOW_HEIGHT = 15
 const MIN_CAMERA_DISTANCE = 5
 
 function CameraController({
-  gameState,
+  stateBuffer,
   followPlayerId
 }: {
-  gameState: SpectatorObservation
+  stateBuffer: StateBuffer
   followPlayerId?: string | null
 }) {
   const { scene } = useThree()
@@ -32,59 +36,77 @@ function CameraController({
   const raycaster = useMemo(() => new THREE.Raycaster(), [])
   const rayDirection = useRef(new THREE.Vector3())
 
-  useFrame(({ camera }) => {
+  useFrame(({ camera }, delta) => {
     if (followPlayerId) {
-      const player = gameState.players.find(p => p.id === followPlayerId)
-      if (player) {
-        const [x, y, z] = player.position
-        const playerPos = new THREE.Vector3(x, y + 2, z)
+      // Get interpolated player position from buffer
+      const result = stateBuffer.getInterpolatedState(performance.now())
+      if (result?.before) {
+        const playerBefore = result.before.players.get(followPlayerId)
+        const playerAfter = result.after?.players.get(followPlayerId)
 
-        // Desired camera position (behind and above player)
-        const desiredPos = new THREE.Vector3(
-          x + FOLLOW_DISTANCE * 0.7,
-          y + FOLLOW_HEIGHT,
-          z + FOLLOW_DISTANCE * 0.7
-        )
+        if (playerBefore) {
+          let x: number, y: number, z: number
 
-        // Raycast from player to desired camera position for wall avoidance
-        rayDirection.current.copy(desiredPos).sub(playerPos).normalize()
-        const desiredDistance = desiredPos.distanceTo(playerPos)
+          if (playerAfter && result.alpha <= 1) {
+            // Interpolate player position
+            x = playerBefore.position[0] + (playerAfter.position[0] - playerBefore.position[0]) * result.alpha
+            y = playerBefore.position[1] + (playerAfter.position[1] - playerBefore.position[1]) * result.alpha
+            z = playerBefore.position[2] + (playerAfter.position[2] - playerBefore.position[2]) * result.alpha
+          } else {
+            // Use latest known position
+            ;[x, y, z] = playerBefore.position
+          }
 
-        raycaster.set(playerPos, rayDirection.current)
-        raycaster.far = desiredDistance
+          const playerPos = new THREE.Vector3(x, y + 2, z)
 
-        const intersects = raycaster.intersectObjects(scene.children, true)
+          // Desired camera position (behind and above player)
+          const desiredPos = new THREE.Vector3(
+            x + FOLLOW_DISTANCE * 0.7,
+            y + FOLLOW_HEIGHT,
+            z + FOLLOW_DISTANCE * 0.7
+          )
 
-        // Filter out non-collidable objects (like the player itself)
-        const validHits = intersects.filter(hit => {
-          const obj = hit.object
-          return obj.type === 'Mesh' && obj.visible
-        })
+          // Raycast from player to desired camera position for wall avoidance
+          rayDirection.current.copy(desiredPos).sub(playerPos).normalize()
+          const desiredDistance = desiredPos.distanceTo(playerPos)
 
-        if (validHits.length > 0 && validHits[0].distance < desiredDistance) {
-          // Move camera closer to avoid wall
-          const safeDistance = Math.max(validHits[0].distance - 1, MIN_CAMERA_DISTANCE)
-          targetPosition.current.copy(playerPos).addScaledVector(rayDirection.current, safeDistance)
-        } else {
-          targetPosition.current.copy(desiredPos)
+          raycaster.set(playerPos, rayDirection.current)
+          raycaster.far = desiredDistance
+
+          const intersects = raycaster.intersectObjects(scene.children, true)
+
+          // Filter out non-collidable objects (like the player itself)
+          const validHits = intersects.filter(hit => {
+            const obj = hit.object
+            return obj.type === 'Mesh' && obj.visible
+          })
+
+          if (validHits.length > 0 && validHits[0].distance < desiredDistance) {
+            // Move camera closer to avoid wall
+            const safeDistance = Math.max(validHits[0].distance - 1, MIN_CAMERA_DISTANCE)
+            targetPosition.current.copy(playerPos).addScaledVector(rayDirection.current, safeDistance)
+          } else {
+            targetPosition.current.copy(desiredPos)
+          }
+
+          targetLookAt.current.copy(playerPos)
         }
-
-        targetLookAt.current.copy(playerPos)
       }
     } else {
       targetPosition.current.copy(OVERVIEW_POSITION)
       targetLookAt.current.copy(OVERVIEW_TARGET)
     }
 
-    // Smooth camera movement
-    camera.position.lerp(targetPosition.current, 0.08)
+    // Frame-rate independent smooth camera movement
+    const factor = 1 - Math.exp(-CAMERA_SMOOTHING * delta)
+    camera.position.lerp(targetPosition.current, factor)
     camera.lookAt(targetLookAt.current)
   })
 
   return null
 }
 
-export default function GameScene({ gameState, followPlayerId }: GameSceneProps) {
+export default function GameScene({ stateBuffer, entityIds, followPlayerId }: GameSceneProps) {
   return (
     <Canvas
       camera={{ position: [0, 140, 70], fov: 50 }}
@@ -109,11 +131,11 @@ export default function GameScene({ gameState, followPlayerId }: GameSceneProps)
       />
       <pointLight position={[-50, 50, -50]} intensity={0.3} color="#4a9eff" />
 
-      {gameState.entities.map((entity) => (
-        <Entity key={entity.id} entity={entity} />
+      {entityIds.map((entityId) => (
+        <Entity key={entityId} entityId={entityId} stateBuffer={stateBuffer} />
       ))}
 
-      <CameraController gameState={gameState} followPlayerId={followPlayerId} />
+      <CameraController stateBuffer={stateBuffer} followPlayerId={followPlayerId} />
     </Canvas>
   )
 }

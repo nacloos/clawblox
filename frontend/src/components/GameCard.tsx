@@ -30,7 +30,7 @@ export default function GameCard({ game }: GameCardProps) {
           )}
           <div className="flex items-center gap-1.5 mt-2 text-xs text-muted-foreground">
             <Users className="h-3 w-3" />
-            <span>{game.player_count ?? 0}/{game.max_players}</span>
+            <span>{game.player_count ?? 0}</span>
           </div>
         </div>
       </div>

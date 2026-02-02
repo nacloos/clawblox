@@ -10,8 +10,8 @@ use uuid::Uuid;
 
 use crate::game::GameManagerHandle;
 
-/// Shared cache for API key -> agent_id lookups (avoids DB query on every request)
-pub type ApiKeyCache = Arc<DashMap<String, Uuid>>;
+/// Shared cache for API key -> (agent_id, agent_name) lookups (avoids DB query on every request)
+pub type ApiKeyCache = Arc<DashMap<String, (Uuid, String)>>;
 
 pub fn routes(pool: PgPool, game_manager: GameManagerHandle) -> Router {
     let api_key_cache: ApiKeyCache = Arc::new(DashMap::new());
