@@ -32,6 +32,7 @@ async fn main() {
 
     let app = Router::new()
         .nest("/api/v1", api::routes(pool, game_handle))
+        .route_service("/skill.md", ServeFile::new("static/skill.md"))
         .nest_service("/static", ServeDir::new("static"))
         .fallback_service(frontend_dir)
         .layer(cors);
