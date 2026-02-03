@@ -42,6 +42,18 @@ export interface SpectatorPlayerInfo {
   gui?: GuiElement[]
 }
 
+export interface BillboardLabel {
+  text: string
+  color: [number, number, number]
+  size: number
+}
+
+export interface BillboardGui {
+  studs_offset: [number, number, number]
+  always_on_top: boolean
+  labels: BillboardLabel[]
+}
+
 export interface SpectatorEntity {
   id: number
   type: string
@@ -53,6 +65,7 @@ export interface SpectatorEntity {
   shape?: 'Block' | 'Ball' | 'Cylinder' | 'Wedge'
   health?: number
   pickup_type?: string
+  billboard_gui?: BillboardGui
 }
 
 export interface SpectatorObservation {

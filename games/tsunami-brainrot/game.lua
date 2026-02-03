@@ -18,6 +18,7 @@ local COLLECTION_RANGE = 5
 local BRAINROT_VALUE = 10     -- Fixed value for Phase 1
 local MAX_BRAINROTS = 20      -- Max active brainrots
 local SPAWN_INTERVAL = 2      -- Seconds between spawns
+local CARRY_CAPACITY = 1      -- Starting carry capacity
 
 -- Speed upgrades
 local SPEED_UPGRADES = {
@@ -38,9 +39,10 @@ local SPEED_UPGRADES = {
 --------------------------------------------------------------------------------
 
 local gameState = "active"  -- No waiting state for Phase 1
-local playerData = {}       -- keyed by UserId: {money, speedLevel, carriedBrainrots}
+local playerData = {}       -- keyed by UserId: {money, speedLevel, carryCapacity, carriedBrainrots, placedBrainrots}
 local brainrots = {}        -- Active brainrot parts
 local lastSpawnTime = 0
+local incomeAccumulator = {} -- Per-player income accumulator for passive income
 
 -- DataStore
 local playerStore = DataStoreService:GetDataStore("PlayerData")
@@ -81,14 +83,103 @@ local function isInSafeZone(position)
     return position.X >= (COLLECTION_ZONE_END/2 - SAFE_ZONE_END)
 end
 
+local function attachBrainrotToPlayer(player, brainrot)
+    local character = player.Character
+    if not character then return false end
+
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+
+    brainrot.CanCollide = false
+
+    -- Weld to HumanoidRootPart, positioned on top
+    local weld = Instance.new("Weld")
+    weld.Name = "BrainrotWeld"
+    weld.Part0 = hrp
+    weld.Part1 = brainrot
+    weld.C0 = CFrame.new(0, 3.5, 0)  -- On top of player (HRP is 5 studs tall)
+    weld.Parent = brainrot
+
+    brainrot.Anchored = false
+
+    return true
+end
+
+local function placeBrainrotOnBase(brainrot, slotIndex, incomeRate)
+    -- Remove weld
+    local weld = brainrot:FindFirstChild("BrainrotWeld")
+    if weld then weld:Destroy() end
+
+    -- Position on base floor (deposit area at X=75)
+    local spacing = 3
+    local col = (slotIndex - 1) % 5
+    local row = math.floor((slotIndex - 1) / 5)
+    local x = 65 + col * spacing
+    local z = -6 + row * spacing
+
+    brainrot.Position = Vector3.new(x, 1, z)
+    brainrot.Anchored = true
+    brainrot.CanCollide = false  -- Don't block player movement
+    brainrot:SetAttribute("IsPlaced", true)
+
+    -- Add floating label (BillboardGui)
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "BrainrotLabel"
+    billboard.Size = UDim2.new(0, 100, 0, 50)
+    billboard.StudsOffset = Vector3.new(0, 3, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Parent = brainrot
+
+    -- Name label
+    local nameLabel = Instance.new("TextLabel")
+    nameLabel.Name = "NameLabel"
+    nameLabel.Size = UDim2.new(1, 0, 0.4, 0)
+    nameLabel.Position = UDim2.new(0, 0, 0, 0)
+    nameLabel.Text = "Brainrot"
+    nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    nameLabel.TextScaled = true
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Parent = billboard
+
+    -- Income label (green)
+    local incomeLabel = Instance.new("TextLabel")
+    incomeLabel.Name = "IncomeLabel"
+    incomeLabel.Size = UDim2.new(1, 0, 0.4, 0)
+    incomeLabel.Position = UDim2.new(0, 0, 0.5, 0)
+    incomeLabel.Text = "$" .. incomeRate .. "/s"
+    incomeLabel.TextColor3 = Color3.fromRGB(50, 255, 50)
+    incomeLabel.TextScaled = true
+    incomeLabel.BackgroundTransparency = 1
+    incomeLabel.Parent = billboard
+end
+
+local function getTotalPassiveIncome(data)
+    local total = 0
+    for _, placed in ipairs(data.placedBrainrots) do
+        total = total + placed.incomeRate
+    end
+    return total
+end
+
 local function updatePlayerAttributes(player)
     local data = getPlayerData(player)
     if not data then return end
 
+    local capacity = data.carryCapacity or CARRY_CAPACITY
+    local passiveIncome = getTotalPassiveIncome(data)
+
+    -- Calculate carried value (sum of all carried brainrot values)
+    local carriedValue = 0
+    for _, carried in ipairs(data.carriedBrainrots) do
+        carriedValue = carriedValue + (carried.value or 0)
+    end
+
     player:SetAttribute("Money", data.money)
     player:SetAttribute("SpeedLevel", data.speedLevel)
     player:SetAttribute("CarriedCount", #data.carriedBrainrots)
-    player:SetAttribute("CarriedValue", #data.carriedBrainrots * BRAINROT_VALUE)
+    player:SetAttribute("CarriedValue", carriedValue)
+    player:SetAttribute("CarryCapacity", capacity)
+    player:SetAttribute("PassiveIncome", passiveIncome)
 
     -- Update walk speed
     local humanoid = getHumanoid(player)
@@ -103,35 +194,24 @@ local function updatePlayerAttributes(player)
         if hud then
             local moneyLabel = hud:FindFirstChild("MoneyLabel")
             if moneyLabel then
-                moneyLabel.Text = "$" .. data.money
-            end
-
-            local carriedLabel = hud:FindFirstChild("CarriedLabel")
-            if carriedLabel then
-                local value = #data.carriedBrainrots * BRAINROT_VALUE
-                if #data.carriedBrainrots > 0 then
-                    carriedLabel.Text = "Carrying: " .. #data.carriedBrainrots .. " ($" .. value .. ")"
+                -- Format money like real game (e.g., $61.97B)
+                local moneyStr
+                if data.money >= 1e9 then
+                    moneyStr = string.format("$%.2fB", data.money / 1e9)
+                elseif data.money >= 1e6 then
+                    moneyStr = string.format("$%.2fM", data.money / 1e6)
+                elseif data.money >= 1e3 then
+                    moneyStr = string.format("$%.2fK", data.money / 1e3)
                 else
-                    carriedLabel.Text = "Carrying: 0"
+                    moneyStr = string.format("$%.0f", data.money)
                 end
+                moneyLabel.Text = moneyStr
             end
 
             local speedLabel = hud:FindFirstChild("SpeedLabel")
             if speedLabel then
                 local currentSpeed = SPEED_UPGRADES[data.speedLevel].speed
-                speedLabel.Text = "Speed: Lv" .. data.speedLevel .. " (" .. currentSpeed .. ")"
-            end
-
-            -- Update upgrade button visibility and text
-            local upgradeBtn = hud:FindFirstChild("UpgradeButton")
-            if upgradeBtn then
-                if data.speedLevel >= #SPEED_UPGRADES then
-                    upgradeBtn.Visible = false
-                else
-                    local nextUpgrade = SPEED_UPGRADES[data.speedLevel + 1]
-                    upgradeBtn.Text = "Upgrade Speed ($" .. nextUpgrade.cost .. ")"
-                    upgradeBtn.Visible = true
-                end
+                speedLabel.Text = tostring(currentSpeed)
             end
         end
     end
@@ -153,10 +233,10 @@ local function createPlayerGUI(player)
     hud.Name = "HUD"
     hud.Parent = playerGui
 
-    -- Money display (top left)
+    -- Money display (bottom left, like real game)
     local moneyLabel = Instance.new("TextLabel")
     moneyLabel.Name = "MoneyLabel"
-    moneyLabel.Position = UDim2.new(0, 10, 0, 10)
+    moneyLabel.Position = UDim2.new(0, 10, 1, -55)
     moneyLabel.Size = UDim2.new(0, 150, 0, 40)
     moneyLabel.Text = "$0"
     moneyLabel.TextSize = 28
@@ -166,82 +246,18 @@ local function createPlayerGUI(player)
     moneyLabel.TextXAlignment = "Left"
     moneyLabel.Parent = hud
 
-    -- Carried brainrots (below money)
-    local carriedLabel = Instance.new("TextLabel")
-    carriedLabel.Name = "CarriedLabel"
-    carriedLabel.Position = UDim2.new(0, 10, 0, 55)
-    carriedLabel.Size = UDim2.new(0, 200, 0, 30)
-    carriedLabel.Text = "Carrying: 0"
-    carriedLabel.TextSize = 20
-    carriedLabel.TextColor3 = Color3.fromRGB(255, 100, 255)
-    carriedLabel.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-    carriedLabel.BackgroundTransparency = 0.3
-    carriedLabel.TextXAlignment = "Left"
-    carriedLabel.Parent = hud
-
-    -- Speed level (below carried)
+    -- Speed display (bottom left, compact like real game)
     local speedLabel = Instance.new("TextLabel")
     speedLabel.Name = "SpeedLabel"
-    speedLabel.Position = UDim2.new(0, 10, 0, 90)
-    speedLabel.Size = UDim2.new(0, 180, 0, 25)
-    speedLabel.Text = "Speed: Lv1 (16)"
-    speedLabel.TextSize = 18
+    speedLabel.Position = UDim2.new(0, 10, 1, -90)
+    speedLabel.Size = UDim2.new(0, 80, 0, 30)
+    speedLabel.Text = "16"
+    speedLabel.TextSize = 24
     speedLabel.TextColor3 = Color3.fromRGB(100, 200, 255)
     speedLabel.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
     speedLabel.BackgroundTransparency = 0.3
-    speedLabel.TextXAlignment = "Left"
+    speedLabel.TextXAlignment = "Center"
     speedLabel.Parent = hud
-
-    -- Upgrade button (bottom right)
-    local upgradeBtn = Instance.new("TextButton")
-    upgradeBtn.Name = "UpgradeButton"
-    upgradeBtn.Position = UDim2.new(1, -220, 1, -60)
-    upgradeBtn.Size = UDim2.new(0, 200, 0, 50)
-    upgradeBtn.Text = "Upgrade Speed ($100)"
-    upgradeBtn.TextSize = 18
-    upgradeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    upgradeBtn.BackgroundColor3 = Color3.fromRGB(50, 100, 200)
-    upgradeBtn.BackgroundTransparency = 0.1
-    upgradeBtn.Parent = hud
-
-    -- Connect button click
-    upgradeBtn.MouseButton1Click:Connect(function()
-        buySpeedUpgrade(player)
-    end)
-
-    -- Deposit button (bottom center)
-    local depositBtn = Instance.new("TextButton")
-    depositBtn.Name = "DepositButton"
-    depositBtn.Position = UDim2.new(0.5, -100, 1, -60)
-    depositBtn.Size = UDim2.new(0, 200, 0, 50)
-    depositBtn.Text = "Deposit Brainrots"
-    depositBtn.TextSize = 18
-    depositBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    depositBtn.BackgroundColor3 = Color3.fromRGB(200, 180, 50)
-    depositBtn.BackgroundTransparency = 0.1
-    depositBtn.Parent = hud
-
-    -- Connect deposit button
-    depositBtn.MouseButton1Click:Connect(function()
-        depositBrainrots(player)
-    end)
-
-    -- Collect button (bottom left)
-    local collectBtn = Instance.new("TextButton")
-    collectBtn.Name = "CollectButton"
-    collectBtn.Position = UDim2.new(0, 10, 1, -60)
-    collectBtn.Size = UDim2.new(0, 200, 0, 50)
-    collectBtn.Text = "Collect Brainrot"
-    collectBtn.TextSize = 18
-    collectBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    collectBtn.BackgroundColor3 = Color3.fromRGB(255, 100, 255)
-    collectBtn.BackgroundTransparency = 0.1
-    collectBtn.Parent = hud
-
-    -- Connect collect button
-    collectBtn.MouseButton1Click:Connect(function()
-        collectBrainrot(player)
-    end)
 
     print("[GUI] Created HUD for " .. player.Name)
 end
@@ -255,7 +271,9 @@ local function loadPlayerData(player)
     local data = {
         money = 0,
         speedLevel = 1,
-        carriedBrainrots = {},
+        carryCapacity = CARRY_CAPACITY,
+        carriedBrainrots = {},  -- {part, value} - attached to player
+        placedBrainrots = {},   -- {part, value, incomeRate} - on base floor
     }
     setPlayerData(player, data)
     updatePlayerAttributes(player)
@@ -422,6 +440,13 @@ local function collectBrainrot(player)
         return false
     end
 
+    -- Check capacity
+    local capacity = data.carryCapacity or CARRY_CAPACITY
+    if #data.carriedBrainrots >= capacity then
+        print("[Collect] " .. player.Name .. " at full capacity (" .. #data.carriedBrainrots .. "/" .. capacity .. ")")
+        return false
+    end
+
     -- Find nearest brainrot within range
     local nearestIdx = nil
     local nearestDist = COLLECTION_RANGE
@@ -440,18 +465,20 @@ local function collectBrainrot(player)
         return false
     end
 
-    -- Collect the brainrot
+    -- Collect the brainrot - attach to player instead of destroying
     local brainrot = brainrots[nearestIdx]
     local value = brainrot:GetAttribute("Value") or BRAINROT_VALUE
 
-    table.insert(data.carriedBrainrots, value)
-    brainrot:Destroy()
-    table.remove(brainrots, nearestIdx)
-
-    updatePlayerAttributes(player)
-    print("[Collect] " .. player.Name .. " collected brainrot worth " .. value .. " (carrying " .. #data.carriedBrainrots .. ")")
-
-    return true
+    if attachBrainrotToPlayer(player, brainrot) then
+        table.insert(data.carriedBrainrots, {part = brainrot, value = value})
+        table.remove(brainrots, nearestIdx)
+        updatePlayerAttributes(player)
+        print("[Collect] " .. player.Name .. " collected brainrot worth " .. value .. " (carrying " .. #data.carriedBrainrots .. "/" .. capacity .. ")")
+        return true
+    else
+        warn("[Collect] Failed to attach brainrot to " .. player.Name)
+        return false
+    end
 end
 
 local function depositBrainrots(player)
@@ -462,7 +489,7 @@ local function depositBrainrots(player)
     end
 
     if not isInSafeZone(pos) then
-        print("[Deposit] " .. player.Name .. " not in safe zone (Z=" .. pos.Z .. ")")
+        print("[Deposit] " .. player.Name .. " not in safe zone (X=" .. pos.X .. ")")
         return false
     end
 
@@ -477,20 +504,27 @@ local function depositBrainrots(player)
         return false
     end
 
-    -- Calculate total value
-    local totalValue = 0
-    for _, value in ipairs(data.carriedBrainrots) do
-        totalValue = totalValue + value
+    -- Place brainrots on base floor instead of destroying
+    for _, carried in ipairs(data.carriedBrainrots) do
+        local incomeRate = carried.value / 10  -- e.g., value 10 = 1$/sec
+        local slotIndex = #data.placedBrainrots + 1
+        placeBrainrotOnBase(carried.part, slotIndex, incomeRate)
+
+        table.insert(data.placedBrainrots, {
+            part = carried.part,
+            value = carried.value,
+            incomeRate = incomeRate
+        })
     end
 
-    -- Add to money and clear carried
-    data.money = data.money + totalValue
+    local depositedCount = #data.carriedBrainrots
     data.carriedBrainrots = {}
 
     updatePlayerAttributes(player)
     savePlayerData(player)
 
-    print("[Deposit] " .. player.Name .. " deposited " .. totalValue .. " (total money: " .. data.money .. ")")
+    local totalIncome = getTotalPassiveIncome(data)
+    print("[Deposit] " .. player.Name .. " placed " .. depositedCount .. " brainrots (total income: $" .. totalIncome .. "/sec)")
 
     return true
 end
@@ -564,6 +598,22 @@ local function initializePlayer(player)
             hrp.Velocity = Vector3.new(0, 0, 0)
             print("[Spawn] " .. player.Name .. " spawned at (75, 3, 0)")
         end
+
+        -- Clear carried brainrots on respawn (they're lost on death)
+        -- Placed brainrots stay safe on base
+        local data = getPlayerData(player)
+        if data then
+            for _, carried in ipairs(data.carriedBrainrots) do
+                if carried.part and carried.part.Parent then
+                    carried.part:Destroy()
+                end
+            end
+            if #data.carriedBrainrots > 0 then
+                print("[Death] " .. player.Name .. " lost " .. #data.carriedBrainrots .. " carried brainrots")
+            end
+            data.carriedBrainrots = {}
+        end
+
         updatePlayerAttributes(player)
     end)
 
@@ -647,13 +697,46 @@ end)
 Players.PlayerRemoving:Connect(function(player)
     -- Save data before removing
     savePlayerData(player)
+
+    -- Clean up placed brainrots
+    local data = getPlayerData(player)
+    if data then
+        for _, placed in ipairs(data.placedBrainrots) do
+            if placed.part and placed.part.Parent then
+                placed.part:Destroy()
+            end
+        end
+        for _, carried in ipairs(data.carriedBrainrots) do
+            if carried.part and carried.part.Parent then
+                carried.part:Destroy()
+            end
+        end
+    end
+
     playerData[player.UserId] = nil
+    incomeAccumulator[player.UserId] = nil
 end)
 
 -- Main game loop
 RunService.Heartbeat:Connect(function(dt)
     updateBrainrotSpawning(dt)
     cleanupBrainrots()
+
+    -- Passive income from placed brainrots
+    for _, player in ipairs(Players:GetPlayers()) do
+        local data = getPlayerData(player)
+        if data and #data.placedBrainrots > 0 then
+            incomeAccumulator[player.UserId] = (incomeAccumulator[player.UserId] or 0) + dt
+
+            if incomeAccumulator[player.UserId] >= 1.0 then
+                incomeAccumulator[player.UserId] = 0
+
+                local totalIncome = getTotalPassiveIncome(data)
+                data.money = data.money + totalIncome
+                updatePlayerAttributes(player)
+            end
+        end
+    end
 end)
 
 -- Initial brainrot spawn

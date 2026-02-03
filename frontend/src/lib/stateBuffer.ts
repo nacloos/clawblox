@@ -7,6 +7,18 @@ const MAX_RENDER_DELAY_MS = 500
 const CLOCK_SAMPLES = 10
 const BUFFER_SIZE = 20
 
+export interface BillboardLabel {
+  text: string
+  color: [number, number, number]
+  size: number
+}
+
+export interface BillboardGui {
+  studs_offset: [number, number, number]
+  always_on_top: boolean
+  labels: BillboardLabel[]
+}
+
 export interface EntitySnapshot {
   id: number
   type: string
@@ -18,6 +30,7 @@ export interface EntitySnapshot {
   shape?: 'Block' | 'Ball' | 'Cylinder' | 'Wedge'
   health?: number
   pickup_type?: string
+  billboard_gui?: BillboardGui
 }
 
 export interface PlayerSnapshot {

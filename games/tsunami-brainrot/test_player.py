@@ -100,12 +100,13 @@ def run_agent(api_key: str):
             speed_level = attrs.get("SpeedLevel", 1)
             carried_count = attrs.get("CarriedCount", 0)
             carried_value = attrs.get("CarriedValue", 0)
+            passive_income = attrs.get("PassiveIncome", 0)
 
             now = time.time()
 
             # Status update every 3 seconds
             if now - last_status_time >= 3.0:
-                print(f"[{state.upper()}] pos=({pos[0]:.0f}, {pos[2]:.0f}) money={money} speed={speed_level} carrying={carried_count} (value={carried_value})")
+                print(f"[{state.upper()}] pos=({pos[0]:.0f}, {pos[2]:.0f}) money={money:.2f} speed={speed_level} carrying={carried_count} income=${passive_income}/s")
                 last_status_time = now
 
             # State machine
@@ -145,10 +146,11 @@ def run_agent(api_key: str):
                         timeout=5
                     )
 
-                # If carrying enough, return to deposit
-                if carried_count >= 5:
+                # If at capacity, return to deposit (capacity is currently 1)
+                carry_capacity = attrs.get("CarryCapacity", 1)
+                if carried_count >= carry_capacity:
                     state = "return"
-                    print(f"  Carrying {carried_count} brainrots, returning to deposit...")
+                    print(f"  Carrying {carried_count}/{carry_capacity} brainrots, returning to deposit...")
 
             elif state == "return":
                 # Move back to safe zone (right side, high X)
@@ -163,7 +165,7 @@ def run_agent(api_key: str):
                     state = "deposit"
 
             elif state == "deposit":
-                # Deposit brainrots
+                # Deposit brainrots (places them on base for passive income)
                 resp = requests.post(
                     f"{API_BASE}/games/{GAME_ID}/input",
                     headers=headers,
@@ -171,7 +173,7 @@ def run_agent(api_key: str):
                     timeout=5
                 )
                 if resp.status_code == 200:
-                    print(f"  Deposited! New money: {money + carried_value}")
+                    print(f"  Deposited! Brainrots placed on base for passive income.")
                 state = "upgrade"
 
             elif state == "upgrade":

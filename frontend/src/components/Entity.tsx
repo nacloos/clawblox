@@ -1,7 +1,8 @@
 import { memo, useRef } from 'react'
 import { useFrame } from '@react-three/fiber'
+import { Html } from '@react-three/drei'
 import * as THREE from 'three'
-import { StateBuffer, EntitySnapshot, interpolatePosition } from '../lib/stateBuffer'
+import { StateBuffer, EntitySnapshot, interpolatePosition, BillboardGui } from '../lib/stateBuffer'
 
 interface EntityProps {
   entityId: number
@@ -179,8 +180,53 @@ function EnemyEntity({ entityId, stateBuffer }: EntityProps) {
   )
 }
 
+// BillboardGui component - renders floating labels above parts
+function BillboardGuiComponent({ billboard, offset }: { billboard: BillboardGui; offset: [number, number, number] }) {
+  const toRgb = (c: [number, number, number]) =>
+    `rgb(${Math.round(c[0] * 255)}, ${Math.round(c[1] * 255)}, ${Math.round(c[2] * 255)})`
+
+  return (
+    <Html
+      position={[
+        offset[0] + billboard.studs_offset[0],
+        offset[1] + billboard.studs_offset[1],
+        offset[2] + billboard.studs_offset[2],
+      ]}
+      center
+      style={{
+        pointerEvents: 'none',
+        userSelect: 'none',
+      }}
+      zIndexRange={billboard.always_on_top ? [100, 0] : [0, 0]}
+    >
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        whiteSpace: 'nowrap',
+      }}>
+        {billboard.labels.map((label, i) => (
+          <div
+            key={i}
+            style={{
+              color: toRgb(label.color),
+              fontSize: `${Math.max(12, label.size)}px`,
+              fontWeight: 'bold',
+              textShadow: '1px 1px 2px black, -1px -1px 2px black',
+              lineHeight: 1.2,
+            }}
+          >
+            {label.text}
+          </div>
+        ))}
+      </div>
+    </Html>
+  )
+}
+
 // Part entity - renders based on shape property (Roblox-style)
 function PartEntity({ entityId, stateBuffer }: EntityProps) {
+  const groupRef = useRef<THREE.Group>(null)
   const meshRef = useRef<THREE.Mesh>(null)
 
   // Get initial entity for static properties
@@ -191,61 +237,73 @@ function PartEntity({ entityId, stateBuffer }: EntityProps) {
   const color = toColor(initialEntity?.color)
   const materialProps = getMaterialProps(initialEntity?.material, color)
   const shape = initialEntity?.shape || 'Block'
+  const billboardGui = initialEntity?.billboard_gui
 
   useFrame(() => {
-    if (!meshRef.current) return
+    if (!groupRef.current) return
 
     const { targetPos, targetQuat } = getInterpolatedEntity(stateBuffer, entityId)
     if (!targetPos) return
 
     // Render interpolated position directly
-    meshRef.current.position.set(targetPos[0], targetPos[1], targetPos[2])
+    groupRef.current.position.set(targetPos[0], targetPos[1], targetPos[2])
 
     // Render interpolated rotation directly
-    if (targetQuat) {
+    if (targetQuat && meshRef.current) {
       meshRef.current.quaternion.copy(targetQuat)
     }
   })
 
-  switch (shape) {
-    case 'Ball': {
-      const radius = Math.min(size[0], size[1], size[2]) / 2
-      return (
-        <mesh ref={meshRef} position={[0, 0, 0]} castShadow receiveShadow>
-          <sphereGeometry args={[radius, 24, 24]} />
-          <meshStandardMaterial {...materialProps} />
-        </mesh>
-      )
+  const renderMesh = () => {
+    switch (shape) {
+      case 'Ball': {
+        const radius = Math.min(size[0], size[1], size[2]) / 2
+        return (
+          <mesh ref={meshRef} castShadow receiveShadow>
+            <sphereGeometry args={[radius, 24, 24]} />
+            <meshStandardMaterial {...materialProps} />
+          </mesh>
+        )
+      }
+
+      case 'Cylinder': {
+        const cylRadius = size[0] / 2
+        const cylHeight = size[1]
+        return (
+          <mesh ref={meshRef} castShadow receiveShadow>
+            <capsuleGeometry args={[cylRadius, cylHeight - cylRadius * 2, 8, 16]} />
+            <meshStandardMaterial {...materialProps} />
+          </mesh>
+        )
+      }
+
+      case 'Wedge':
+        return (
+          <mesh ref={meshRef} castShadow receiveShadow>
+            <boxGeometry args={size as [number, number, number]} />
+            <meshStandardMaterial {...materialProps} />
+          </mesh>
+        )
+
+      case 'Block':
+      default:
+        return (
+          <mesh ref={meshRef} castShadow receiveShadow>
+            <boxGeometry args={size as [number, number, number]} />
+            <meshStandardMaterial {...materialProps} />
+          </mesh>
+        )
     }
-
-    case 'Cylinder': {
-      const cylRadius = size[0] / 2
-      const cylHeight = size[1]
-      return (
-        <mesh ref={meshRef} position={[0, 0, 0]} castShadow receiveShadow>
-          <capsuleGeometry args={[cylRadius, cylHeight - cylRadius * 2, 8, 16]} />
-          <meshStandardMaterial {...materialProps} />
-        </mesh>
-      )
-    }
-
-    case 'Wedge':
-      return (
-        <mesh ref={meshRef} position={[0, 0, 0]} castShadow receiveShadow>
-          <boxGeometry args={size as [number, number, number]} />
-          <meshStandardMaterial {...materialProps} />
-        </mesh>
-      )
-
-    case 'Block':
-    default:
-      return (
-        <mesh ref={meshRef} position={[0, 0, 0]} castShadow receiveShadow>
-          <boxGeometry args={size as [number, number, number]} />
-          <meshStandardMaterial {...materialProps} />
-        </mesh>
-      )
   }
+
+  return (
+    <group ref={groupRef}>
+      {renderMesh()}
+      {billboardGui && billboardGui.labels.length > 0 && (
+        <BillboardGuiComponent billboard={billboardGui} offset={[0, size[1] / 2, 0]} />
+      )}
+    </group>
+  )
 }
 
 function Entity({ entityId, stateBuffer }: EntityProps) {

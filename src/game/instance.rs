@@ -222,6 +222,9 @@ impl GameInstance {
         // Sync physics results back to Lua (for Anchored=false parts and characters)
         self.sync_physics_to_lua();
 
+        // Process weld constraints (update Part1 positions based on Part0)
+        self.process_welds();
+
         // Process agent inputs (fire InputReceived events)
         if let Some(runtime) = &self.lua_runtime {
             if let Err(e) = runtime.process_agent_inputs() {
@@ -355,6 +358,67 @@ impl GameInstance {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// Process weld constraints - update Part1 position based on Part0's CFrame
+    fn process_welds(&mut self) {
+        let Some(runtime) = &self.lua_runtime else {
+            return;
+        };
+
+        let descendants = runtime.workspace().get_descendants();
+
+        // Collect welds and their data first to avoid borrow conflicts
+        let mut weld_updates: Vec<(
+            crate::game::lua::instance::InstanceRef,  // Part1 ref
+            crate::game::lua::types::Vector3,         // new position
+        )> = Vec::new();
+
+        for instance in &descendants {
+            let data = instance.data.lock().unwrap();
+
+            if let Some(weld_data) = &data.weld_data {
+                if !weld_data.enabled {
+                    continue;
+                }
+
+                // Get Part0 and Part1 references
+                let part0_ref = weld_data.part0.as_ref().and_then(|w| w.upgrade());
+                let part1_ref = weld_data.part1.as_ref().and_then(|w| w.upgrade());
+
+                if let (Some(part0_ref), Some(part1_ref)) = (part0_ref, part1_ref) {
+                    // Get Part0's CFrame
+                    let part0_data = part0_ref.lock().unwrap();
+                    if let Some(p0_part) = &part0_data.part_data {
+                        let part0_cframe = p0_part.cframe;
+                        let c0 = weld_data.c0;
+                        let c1 = weld_data.c1;
+                        drop(part0_data);
+
+                        // Calculate Part1's new position:
+                        // Part1.CFrame = Part0.CFrame * C0 * C1:Inverse()
+                        // For simplicity (no rotation yet), just use position offset:
+                        // Part1.Position = Part0.Position + C0.Position - C1.Position
+                        let new_pos = crate::game::lua::types::Vector3::new(
+                            part0_cframe.position.x + c0.position.x - c1.position.x,
+                            part0_cframe.position.y + c0.position.y - c1.position.y,
+                            part0_cframe.position.z + c0.position.z - c1.position.z,
+                        );
+
+                        weld_updates.push((part1_ref, new_pos));
+                    }
+                }
+            }
+        }
+
+        // Apply updates
+        for (part1_ref, new_pos) in weld_updates {
+            let mut part1_data = part1_ref.lock().unwrap();
+            if let Some(p1_part) = &mut part1_data.part_data {
+                p1_part.position = new_pos;
+                p1_part.cframe.position = new_pos;
             }
         }
     }
@@ -764,6 +828,9 @@ impl GameInstance {
                         && rot[2][1].abs() < 0.001
                         && (rot[2][2] - 1.0).abs() < 0.001;
 
+                    // Check for BillboardGui children
+                    let billboard_gui = Self::collect_billboard_gui(&data.children);
+
                     entities.push(SpectatorEntity {
                         id: data.id.0 as u32,
                         entity_type: "part".to_string(),
@@ -779,6 +846,7 @@ impl GameInstance {
                         shape: Some(part_data.shape.name().to_string()),
                         health: None,
                         pickup_type: None,
+                        billboard_gui,
                     });
                 }
             }
@@ -872,6 +940,54 @@ impl GameInstance {
             players,
             entities,
         }
+    }
+
+    /// Collects BillboardGui data from a part's children
+    fn collect_billboard_gui(
+        children: &[crate::game::lua::instance::InstanceRef],
+    ) -> Option<BillboardGuiJson> {
+        use crate::game::lua::instance::ClassName;
+
+        for child_ref in children {
+            let child_data = child_ref.lock().unwrap();
+
+            if child_data.class_name == ClassName::BillboardGui {
+                if let Some(billboard_data) = &child_data.billboard_gui_data {
+                    // Collect TextLabel children
+                    let mut labels = Vec::new();
+
+                    for label_ref in &child_data.children {
+                        let label_data = label_ref.lock().unwrap();
+
+                        if label_data.class_name == ClassName::TextLabel {
+                            if let Some(gui_data) = &label_data.gui_data {
+                                labels.push(BillboardLabelJson {
+                                    text: gui_data.text.clone().unwrap_or_default(),
+                                    color: [
+                                        gui_data.text_color.map(|c| c.r).unwrap_or(1.0),
+                                        gui_data.text_color.map(|c| c.g).unwrap_or(1.0),
+                                        gui_data.text_color.map(|c| c.b).unwrap_or(1.0),
+                                    ],
+                                    size: gui_data.text_size.unwrap_or(14.0) as f32,
+                                });
+                            }
+                        }
+                    }
+
+                    return Some(BillboardGuiJson {
+                        studs_offset: [
+                            billboard_data.studs_offset.x,
+                            billboard_data.studs_offset.y,
+                            billboard_data.studs_offset.z,
+                        ],
+                        always_on_top: billboard_data.always_on_top,
+                        labels,
+                    });
+                }
+            }
+        }
+
+        None
     }
 }
 
@@ -1055,6 +1171,23 @@ pub struct SpectatorEntity {
     pub health: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pickup_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub billboard_gui: Option<BillboardGuiJson>,
+}
+
+/// BillboardGui serialization for 3D floating labels
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BillboardGuiJson {
+    pub studs_offset: [f32; 3],
+    pub always_on_top: bool,
+    pub labels: Vec<BillboardLabelJson>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BillboardLabelJson {
+    pub text: String,
+    pub color: [f32; 3],
+    pub size: f32,
 }
 
 #[cfg(test)]

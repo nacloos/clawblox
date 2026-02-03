@@ -40,7 +40,10 @@ pub enum ClassName {
     Players,
     RunService,
     Camera,
+    // Constraints
+    Weld,
     // GUI classes
+    BillboardGui,
     PlayerGui,
     ScreenGui,
     Frame,
@@ -64,6 +67,8 @@ impl ClassName {
             ClassName::Players => "Players",
             ClassName::RunService => "RunService",
             ClassName::Camera => "Camera",
+            ClassName::Weld => "Weld",
+            ClassName::BillboardGui => "BillboardGui",
             ClassName::PlayerGui => "PlayerGui",
             ClassName::ScreenGui => "ScreenGui",
             ClassName::Frame => "Frame",
@@ -87,6 +92,11 @@ impl ClassName {
             "Players" => matches!(self, ClassName::Players),
             "RunService" => matches!(self, ClassName::RunService),
             "Camera" => matches!(self, ClassName::Camera),
+            // Constraints
+            "Constraint" => matches!(self, ClassName::Weld),
+            "Weld" => matches!(self, ClassName::Weld),
+            // BillboardGui (3D GUI attached to parts)
+            "BillboardGui" => matches!(self, ClassName::BillboardGui),
             // GUI hierarchy: GuiBase2d is base for all 2D GUI elements
             "GuiBase2d" => matches!(
                 self,
@@ -167,6 +177,8 @@ pub struct InstanceData {
     pub player_data: Option<PlayerData>,
     pub model_data: Option<ModelData>,
     pub gui_data: Option<GuiObjectData>,
+    pub weld_data: Option<WeldData>,
+    pub billboard_gui_data: Option<BillboardGuiData>,
 
     destroyed: bool,
 }
@@ -310,6 +322,50 @@ impl Default for ModelData {
     }
 }
 
+/// Data for Weld constraints
+#[derive(Debug, Clone)]
+pub struct WeldData {
+    pub part0: Option<WeakInstanceRef>,
+    pub part1: Option<WeakInstanceRef>,
+    pub c0: CFrame,
+    pub c1: CFrame,
+    pub enabled: bool,
+}
+
+impl Default for WeldData {
+    fn default() -> Self {
+        Self {
+            part0: None,
+            part1: None,
+            c0: CFrame::identity(),
+            c1: CFrame::identity(),
+            enabled: true,
+        }
+    }
+}
+
+/// Data for BillboardGui (3D GUI that floats above parts)
+#[derive(Debug, Clone)]
+pub struct BillboardGuiData {
+    pub size: UDim2,
+    pub studs_offset: Vector3,
+    pub always_on_top: bool,
+    pub enabled: bool,
+    pub adornee: Option<WeakInstanceRef>,
+}
+
+impl Default for BillboardGuiData {
+    fn default() -> Self {
+        Self {
+            size: UDim2::new(0.0, 100, 0.0, 50),
+            studs_offset: Vector3::new(0.0, 0.0, 0.0),
+            always_on_top: false,
+            enabled: true,
+            adornee: None,
+        }
+    }
+}
+
 /// Data for GUI objects (Frame, TextLabel, TextButton, etc.)
 #[derive(Debug, Clone)]
 pub struct GuiObjectData {
@@ -333,6 +389,7 @@ pub struct GuiObjectData {
     pub text_color: Option<Color3>,
     pub text_size: Option<f32>,
     pub text_transparency: Option<f32>,
+    pub text_scaled: bool,
     pub text_x_alignment: TextXAlignment,
     pub text_y_alignment: TextYAlignment,
 
@@ -388,6 +445,7 @@ impl Default for GuiObjectData {
             text_color: None,
             text_size: None,
             text_transparency: None,
+            text_scaled: false,
             text_x_alignment: TextXAlignment::default(),
             text_y_alignment: TextYAlignment::default(),
             image: None,
@@ -495,8 +553,22 @@ impl InstanceData {
             player_data: None,
             model_data: None,
             gui_data: None,
+            weld_data: None,
+            billboard_gui_data: None,
             destroyed: false,
         }
+    }
+
+    pub fn new_weld(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::Weld, name);
+        inst.weld_data = Some(WeldData::default());
+        inst
+    }
+
+    pub fn new_billboard_gui(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::BillboardGui, name);
+        inst.billboard_gui_data = Some(BillboardGuiData::default());
+        inst
     }
 
     pub fn new_part(name: &str) -> Self {
@@ -1181,6 +1253,124 @@ impl UserData for Instance {
             Ok(())
         });
 
+        // ========== Weld Properties ==========
+
+        fields.add_field_method_get("Part0", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data
+                .weld_data
+                .as_ref()
+                .and_then(|w| w.part0.as_ref())
+                .and_then(|w| w.upgrade())
+                .map(Instance::from_ref))
+        });
+        fields.add_field_method_set("Part0", |_, this, part: Option<Instance>| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(weld) = &mut data.weld_data {
+                weld.part0 = part.map(|p| Arc::downgrade(&p.data));
+            }
+            Ok(())
+        });
+
+        fields.add_field_method_get("Part1", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data
+                .weld_data
+                .as_ref()
+                .and_then(|w| w.part1.as_ref())
+                .and_then(|w| w.upgrade())
+                .map(Instance::from_ref))
+        });
+        fields.add_field_method_set("Part1", |_, this, part: Option<Instance>| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(weld) = &mut data.weld_data {
+                weld.part1 = part.map(|p| Arc::downgrade(&p.data));
+            }
+            Ok(())
+        });
+
+        fields.add_field_method_get("C0", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.weld_data.as_ref().map(|w| w.c0))
+        });
+        fields.add_field_method_set("C0", |_, this, cframe: CFrame| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(weld) = &mut data.weld_data {
+                weld.c0 = cframe;
+            }
+            Ok(())
+        });
+
+        fields.add_field_method_get("C1", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.weld_data.as_ref().map(|w| w.c1))
+        });
+        fields.add_field_method_set("C1", |_, this, cframe: CFrame| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(weld) = &mut data.weld_data {
+                weld.c1 = cframe;
+            }
+            Ok(())
+        });
+
+        fields.add_field_method_get("Enabled", |_, this| {
+            let data = this.data.lock().unwrap();
+            // Return Enabled for Welds, BillboardGui, or existing gui_data.enabled
+            if let Some(weld) = &data.weld_data {
+                return Ok(Some(weld.enabled));
+            }
+            if let Some(billboard) = &data.billboard_gui_data {
+                return Ok(Some(billboard.enabled));
+            }
+            if let Some(gui) = &data.gui_data {
+                return Ok(Some(gui.enabled));
+            }
+            Ok(None)
+        });
+
+        // ========== BillboardGui Properties ==========
+
+        fields.add_field_method_get("StudsOffset", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.billboard_gui_data.as_ref().map(|b| b.studs_offset))
+        });
+        fields.add_field_method_set("StudsOffset", |_, this, offset: Vector3| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(billboard) = &mut data.billboard_gui_data {
+                billboard.studs_offset = offset;
+            }
+            Ok(())
+        });
+
+        fields.add_field_method_get("AlwaysOnTop", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.billboard_gui_data.as_ref().map(|b| b.always_on_top))
+        });
+        fields.add_field_method_set("AlwaysOnTop", |_, this, value: bool| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(billboard) = &mut data.billboard_gui_data {
+                billboard.always_on_top = value;
+            }
+            Ok(())
+        });
+
+        fields.add_field_method_get("Adornee", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data
+                .billboard_gui_data
+                .as_ref()
+                .and_then(|b| b.adornee.as_ref())
+                .and_then(|w| w.upgrade())
+                .map(Instance::from_ref))
+        });
+        fields.add_field_method_set("Adornee", |_, this, part: Option<Instance>| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(billboard) = &mut data.billboard_gui_data {
+                billboard.adornee = part.map(|p| Arc::downgrade(&p.data));
+            }
+            Ok(())
+        });
+
         // ========== GUI Properties ==========
 
         // AnchorPoint (GuiObject)
@@ -1359,6 +1549,19 @@ impl UserData for Instance {
             let mut data = this.data.lock().unwrap();
             if let Some(gui) = &mut data.gui_data {
                 gui.text_transparency = Some(transparency.clamp(0.0, 1.0));
+            }
+            Ok(())
+        });
+
+        // TextScaled (TextLabel, TextButton)
+        fields.add_field_method_get("TextScaled", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().map(|g| g.text_scaled))
+        });
+        fields.add_field_method_set("TextScaled", |_, this, scaled: bool| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                gui.text_scaled = scaled;
             }
             Ok(())
         });
@@ -1740,6 +1943,12 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
                     "Model" => Instance::from_data(InstanceData::new_model("Model")),
                     "Humanoid" => Instance::from_data(InstanceData::new_humanoid("Humanoid")),
                     "Folder" => Instance::new(ClassName::Folder, "Folder"),
+                    // Constraints
+                    "Weld" => Instance::from_data(InstanceData::new_weld("Weld")),
+                    // 3D GUI
+                    "BillboardGui" => {
+                        Instance::from_data(InstanceData::new_billboard_gui("BillboardGui"))
+                    }
                     // GUI classes
                     "ScreenGui" => Instance::from_data(InstanceData::new_screen_gui("ScreenGui")),
                     "Frame" => Instance::from_data(InstanceData::new_frame("Frame")),
