@@ -1,6 +1,7 @@
 use mlua::{FromLua, Lua, Result, UserData, UserDataFields, UserDataMethods, Value};
 use std::sync::{Arc, Mutex};
 
+use crate::game::constants::physics as consts;
 use crate::game::lua::instance::{ClassName, Instance};
 use crate::game::lua::types::{CFrame, RaycastFilterType, Vector3};
 
@@ -108,7 +109,7 @@ pub struct WorkspaceServiceData {
 impl WorkspaceServiceData {
     pub fn new() -> Self {
         Self {
-            gravity: 196.2,
+            gravity: consts::DEFAULT_GRAVITY,
             current_camera: None,
             children: Vec::new(),
         }

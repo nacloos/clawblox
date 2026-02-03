@@ -14,6 +14,9 @@ ARSENAL_SKILL=$(cat "$PROJECT_ROOT/games/arsenal/SKILL.md")
 TSUNAMI_SCRIPT=$(cat "$PROJECT_ROOT/games/tsunami-brainrot/game.lua")
 TSUNAMI_SKILL=$(cat "$PROJECT_ROOT/games/tsunami-brainrot/SKILL.md")
 
+FLATTEST_SCRIPT=$(cat "$PROJECT_ROOT/games/flat-test/game.lua")
+FLATTEST_SKILL=$(cat "$PROJECT_ROOT/games/flat-test/SKILL.md")
+
 # Delete existing seeded games
 psql -d clawblox -c "
 DELETE FROM games WHERE id IN (
@@ -22,7 +25,8 @@ DELETE FROM games WHERE id IN (
     'a0000000-0000-0000-0000-000000000003',
     'a0000000-0000-0000-0000-000000000004',
     'a0000000-0000-0000-0000-000000000005',
-    'a0000000-0000-0000-0000-000000000006'
+    'a0000000-0000-0000-0000-000000000006',
+    'a0000000-0000-0000-0000-000000000007'
 );
 "
 
@@ -47,6 +51,20 @@ VALUES (
     'a0000000-0000-0000-0000-000000000006',
     'Escape Tsunami For Brainrots',
     'Collect brainrots, deposit for money, buy speed upgrades..',
+    'lua',
+    'waiting',
+    :'script',
+    :'skill'
+);
+EOF
+
+# Insert Flat Test game
+psql -d clawblox -v script="$FLATTEST_SCRIPT" -v skill="$FLATTEST_SKILL" <<'EOF'
+INSERT INTO games (id, name, description, game_type, status, script_code, skill_md)
+VALUES (
+    'a0000000-0000-0000-0000-000000000007',
+    'Flat Test',
+    'Simple flat terrain for movement testing. No obstacles or game mechanics.',
     'lua',
     'waiting',
     :'script',

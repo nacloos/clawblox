@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
+use crate::game::constants::humanoid as humanoid_consts;
 use super::events::{create_signal, RBXScriptSignal};
 use super::services::WorkspaceService;
 use super::types::{CFrame, Color3, Material, PartType, UDim2, Vector3};
@@ -274,13 +275,13 @@ pub struct HumanoidData {
 impl Default for HumanoidData {
     fn default() -> Self {
         Self {
-            health: 100.0,
-            max_health: 100.0,
-            walk_speed: 16.0,
-            jump_power: 50.0,
-            jump_height: 7.2,
+            health: humanoid_consts::DEFAULT_HEALTH,
+            max_health: humanoid_consts::DEFAULT_MAX_HEALTH,
+            walk_speed: humanoid_consts::DEFAULT_WALK_SPEED,
+            jump_power: humanoid_consts::DEFAULT_JUMP_POWER,
+            jump_height: humanoid_consts::DEFAULT_JUMP_HEIGHT,
             auto_rotate: true,
-            hip_height: 2.0,
+            hip_height: humanoid_consts::DEFAULT_HIP_HEIGHT,
             move_to_target: None,
             died: create_signal("Died"),
             health_changed: create_signal("HealthChanged"),
@@ -1867,8 +1868,18 @@ impl UserData for Instance {
             "MoveTo",
             |_, this, (position, _part): (Vector3, Option<Instance>)| {
                 let mut data = this.data.lock().unwrap();
+                let id = data.id.0;
                 if let Some(humanoid) = &mut data.humanoid_data {
+                    eprintln!(
+                        "[Humanoid] MoveTo id={} target=({:.2},{:.2},{:.2})",
+                        id,
+                        position.x,
+                        position.y,
+                        position.z
+                    );
                     humanoid.move_to_target = Some(position);
+                } else {
+                    eprintln!("[Humanoid WARN] MoveTo called on non-humanoid instance");
                 }
                 Ok(())
             },

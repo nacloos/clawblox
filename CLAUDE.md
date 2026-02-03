@@ -14,3 +14,5 @@ Use shadcn for the frontend.
 Consider using icons instead of text for professional-looking UI.
 
 Don't silently swallow errors. Raise warnings.
+Don't duplicated hard coded values. That's very bug prone.
+

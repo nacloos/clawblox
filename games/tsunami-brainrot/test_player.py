@@ -187,12 +187,13 @@ def run_agent(agent_id: int, api_key: str, api_base: str, stop_event: threading.
             now = time.time()
 
             # Status update every 3 seconds
-            if now - last_status_time >= 3.0:
+            should_log = now - last_status_time >= 3.0
+            if should_log:
                 entity_count = len(entities)
                 print(f"{prefix} [{state.upper()}] pos=({pos[0]:.0f}, {pos[2]:.0f}) money={money:.2f} speed={speed_level} carrying={carried_count} income=${passive_income}/s base=({base_center_x:.0f},{base_center_z:.0f}) entities={entity_count}")
                 last_status_time = now
 
-            if state == "collect" and now - last_status_time < 0.1:
+            if state == "collect" and should_log:
                 if entities:
                     sample = []
                     for e in entities[:5]:
@@ -233,12 +234,12 @@ def run_agent(agent_id: int, api_key: str, api_base: str, stop_event: threading.
                             json={"type": "MoveTo", "data": {"position": brainrot["position"]}},
                             timeout=5
                         )
-                        if now - last_status_time >= 3.0:
+                        if should_log:
                             extra = f" pos_dist={nearest_by_pos_dist:.1f}" if nearest_by_pos_dist is not None else ""
                             print(f"{prefix} MoveTo brainrot dist={dist:.1f}{extra} status={resp.status_code}")
                 else:
                     # No brainrots visible - move deeper into collection zone (left side, low X)
-                    if now - last_status_time >= 3.0:
+                    if should_log:
                         print(f"{prefix} No brainrots visible (count={brainrot_count}), roaming...")
                     target_x = random.uniform(COLLECTION_X_MIN + 20, BASE_ZONE_X_START - 20)
                     target_z = random.uniform(-30, 30)
@@ -248,7 +249,7 @@ def run_agent(agent_id: int, api_key: str, api_base: str, stop_event: threading.
                         json={"type": "MoveTo", "data": {"position": [target_x, pos[1], target_z]}},
                         timeout=5
                     )
-                    if now - last_status_time >= 3.0:
+                    if should_log:
                         print(f"{prefix} Roam MoveTo target=({target_x:.0f},{target_z:.0f}) status={resp.status_code}")
 
                 # If at capacity, return to deposit (capacity is currently 1)
