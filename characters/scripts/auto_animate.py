@@ -3,14 +3,22 @@
 Auto-rigging and walk animation for humanoid characters.
 Uses Blender's built-in tools to create skeleton, then generates walk cycle.
 
+Features:
+- Proportional bone placement based on mesh bounds
+- Mesh island separation for better weight distribution
+- Weight cleanup and normalization
+- Simple walk cycle animation
+
 Usage:
     blender --background --python auto_animate.py -- input.glb output.glb
 """
 
 import bpy
+import bmesh
 import sys
 import math
 from mathutils import Vector
+from collections import defaultdict
 
 
 def clear_scene():
@@ -48,6 +56,111 @@ def get_mesh_bounds(mesh_obj):
         'center': (min_co + max_co) / 2,
         'size': max_co - min_co
     }
+
+
+def find_mesh_islands(mesh_obj):
+    """
+    Find disconnected mesh islands and their bounding boxes.
+    Returns list of (vertex_indices, bounds) tuples.
+    """
+    # Get mesh data
+    mesh = mesh_obj.data
+
+    # Build adjacency from edges
+    adjacency = defaultdict(set)
+    for edge in mesh.edges:
+        v1, v2 = edge.vertices
+        adjacency[v1].add(v2)
+        adjacency[v2].add(v1)
+
+    # Find connected components using flood fill
+    visited = set()
+    islands = []
+
+    for start_vert in range(len(mesh.vertices)):
+        if start_vert in visited:
+            continue
+
+        # BFS to find all connected vertices
+        island_verts = set()
+        queue = [start_vert]
+
+        while queue:
+            v = queue.pop()
+            if v in visited:
+                continue
+            visited.add(v)
+            island_verts.add(v)
+
+            for neighbor in adjacency[v]:
+                if neighbor not in visited:
+                    queue.append(neighbor)
+
+        if island_verts:
+            # Calculate bounds for this island
+            positions = [mesh_obj.matrix_world @ mesh.vertices[i].co for i in island_verts]
+            min_co = Vector((min(p.x for p in positions),
+                           min(p.y for p in positions),
+                           min(p.z for p in positions)))
+            max_co = Vector((max(p.x for p in positions),
+                           max(p.y for p in positions),
+                           max(p.z for p in positions)))
+
+            island_bounds = {
+                'min': min_co,
+                'max': max_co,
+                'center': (min_co + max_co) / 2,
+                'size': max_co - min_co,
+                'volume': (max_co.x - min_co.x) * (max_co.y - min_co.y) * (max_co.z - min_co.z)
+            }
+
+            islands.append((island_verts, island_bounds))
+
+    # Sort by volume (largest first - main body should be first)
+    islands.sort(key=lambda x: x[1]['volume'], reverse=True)
+
+    return islands
+
+
+def classify_island(island_bounds, mesh_bounds):
+    """
+    Classify an island by its position relative to mesh bounds.
+    Returns: 'body', 'head', 'arm_l', 'arm_r', 'leg_l', 'leg_r', 'appendage'
+    """
+    center = island_bounds['center']
+    mesh_center = mesh_bounds['center']
+
+    # Relative position (0-1 range)
+    rel_x = (center.x - mesh_bounds['min'].x) / max(mesh_bounds['size'].x, 0.001)
+    rel_z = (center.z - mesh_bounds['min'].z) / max(mesh_bounds['size'].z, 0.001)
+
+    # Size relative to mesh
+    rel_volume = island_bounds['volume'] / max(
+        mesh_bounds['size'].x * mesh_bounds['size'].y * mesh_bounds['size'].z, 0.001)
+
+    # Large island near center = body
+    if rel_volume > 0.3:
+        return 'body'
+
+    # High up = head/antenna
+    if rel_z > 0.8:
+        return 'head'
+
+    # Low = feet/legs
+    if rel_z < 0.3:
+        if rel_x < 0.4:
+            return 'leg_l'
+        elif rel_x > 0.6:
+            return 'leg_r'
+        return 'leg'
+
+    # Middle height, far from center = arms/claws
+    if rel_x < 0.3:
+        return 'arm_l'
+    elif rel_x > 0.7:
+        return 'arm_r'
+
+    return 'appendage'
 
 
 def create_simple_armature(mesh_obj, bounds):
@@ -146,6 +259,37 @@ def create_simple_armature(mesh_obj, bounds):
     return armature_obj
 
 
+def get_bone_positions(armature_obj):
+    """Get world-space positions of all bones."""
+    bone_positions = {}
+    for bone in armature_obj.data.bones:
+        head = armature_obj.matrix_world @ bone.head_local
+        tail = armature_obj.matrix_world @ bone.tail_local
+        bone_positions[bone.name] = {
+            'head': head,
+            'tail': tail,
+            'center': (head + tail) / 2
+        }
+    return bone_positions
+
+
+def find_nearest_bone(position, bone_positions, allowed_bones=None):
+    """Find the bone closest to a given position."""
+    min_dist = float('inf')
+    nearest = None
+
+    for bone_name, bone_pos in bone_positions.items():
+        if allowed_bones and bone_name not in allowed_bones:
+            continue
+
+        dist = (position - bone_pos['center']).length
+        if dist < min_dist:
+            min_dist = dist
+            nearest = bone_name
+
+    return nearest
+
+
 def parent_mesh_to_armature(mesh_obj, armature_obj):
     """Parent mesh to armature with automatic weights."""
     bpy.ops.object.select_all(action='DESELECT')
@@ -153,6 +297,132 @@ def parent_mesh_to_armature(mesh_obj, armature_obj):
     armature_obj.select_set(True)
     bpy.context.view_layer.objects.active = armature_obj
     bpy.ops.object.parent_set(type='ARMATURE_AUTO')
+
+
+def clean_weights(mesh_obj, weight_threshold=0.05, max_influences=4):
+    """
+    Clean up vertex weights:
+    - Remove weights below threshold
+    - Limit to max_influences bones per vertex
+    - Normalize so weights sum to 1
+    """
+    mesh = mesh_obj.data
+
+    for vert in mesh.vertices:
+        # Collect all weights for this vertex
+        weights = []
+        for group in vert.groups:
+            if group.weight > weight_threshold:
+                weights.append((group.group, group.weight))
+
+        # Sort by weight (highest first) and limit
+        weights.sort(key=lambda x: x[1], reverse=True)
+        weights = weights[:max_influences]
+
+        # Normalize
+        total = sum(w[1] for w in weights)
+        if total > 0:
+            weights = [(g, w / total) for g, w in weights]
+
+        # Clear all weights for this vertex
+        for group in vert.groups:
+            group.weight = 0.0
+
+        # Apply cleaned weights
+        for group_idx, weight in weights:
+            # Find or create the group entry
+            found = False
+            for group in vert.groups:
+                if group.group == group_idx:
+                    group.weight = weight
+                    found = True
+                    break
+
+
+def assign_island_weights(mesh_obj, armature_obj, islands, mesh_bounds):
+    """
+    Assign weights to mesh islands based on their classification.
+    Small/isolated islands get assigned to a single bone to prevent jitter.
+    """
+    bone_positions = get_bone_positions(armature_obj)
+    mesh = mesh_obj.data
+
+    # Bone mapping for island types
+    bone_mapping = {
+        'head': 'head',
+        'arm_l': 'hand.L',
+        'arm_r': 'hand.R',
+        'leg_l': 'foot.L',
+        'leg_r': 'foot.R',
+        'appendage': None,  # Will find nearest
+    }
+
+    # Get main body volume for comparison
+    if islands:
+        main_body_volume = islands[0][1]['volume']
+    else:
+        return
+
+    for island_verts, island_bounds in islands:
+        # Skip the main body (handled by automatic weights)
+        if island_bounds['volume'] > main_body_volume * 0.5:
+            continue
+
+        # Classify this island
+        classification = classify_island(island_bounds, mesh_bounds)
+
+        # Skip body classification
+        if classification == 'body':
+            continue
+
+        # Determine target bone
+        target_bone = bone_mapping.get(classification)
+        if target_bone is None:
+            # Find nearest bone
+            target_bone = find_nearest_bone(island_bounds['center'], bone_positions)
+
+        if target_bone is None:
+            continue
+
+        # Get vertex group for this bone
+        if target_bone not in mesh_obj.vertex_groups:
+            continue
+
+        group_idx = mesh_obj.vertex_groups[target_bone].index
+
+        # Assign full weight to all vertices in this island
+        for vert_idx in island_verts:
+            vert = mesh.vertices[vert_idx]
+
+            # Clear existing weights
+            for group in vert.groups:
+                group.weight = 0.0
+
+            # Assign to target bone
+            # Need to use vertex_groups API for assignment
+            mesh_obj.vertex_groups[target_bone].add([vert_idx], 1.0, 'REPLACE')
+
+
+def smooth_weights(mesh_obj, iterations=2):
+    """
+    Smooth vertex weights to reduce jitter.
+    Uses Blender's built-in smooth operator.
+    """
+    bpy.ops.object.select_all(action='DESELECT')
+    mesh_obj.select_set(True)
+    bpy.context.view_layer.objects.active = mesh_obj
+
+    bpy.ops.object.mode_set(mode='WEIGHT_PAINT')
+
+    for _ in range(iterations):
+        bpy.ops.object.vertex_group_smooth(
+            group_select_mode='ALL',
+            factor=0.5,
+            repeat=1,
+            expand=0.0
+        )
+
+    bpy.ops.object.mode_set(mode='OBJECT')
 
 
 def create_walk_cycle(armature_obj, frame_count=24):
@@ -277,11 +547,29 @@ def main():
     bounds = get_mesh_bounds(mesh_obj)
     print(f"  Size: {bounds['size'].x:.2f} x {bounds['size'].y:.2f} x {bounds['size'].z:.2f}")
 
+    print("Finding mesh islands...")
+    islands = find_mesh_islands(mesh_obj)
+    print(f"  Found {len(islands)} islands")
+
+    # Log island info
+    for i, (verts, ibounds) in enumerate(islands[:5]):  # First 5
+        classification = classify_island(ibounds, bounds)
+        print(f"  Island {i}: {len(verts)} verts, type={classification}")
+
     print("Creating armature...")
     armature_obj = create_simple_armature(mesh_obj, bounds)
 
     print("Parenting with automatic weights...")
     parent_mesh_to_armature(mesh_obj, armature_obj)
+
+    print("Reassigning weights for isolated parts...")
+    assign_island_weights(mesh_obj, armature_obj, islands, bounds)
+
+    print("Cleaning up weights...")
+    clean_weights(mesh_obj, weight_threshold=0.05, max_influences=4)
+
+    print("Smoothing weights...")
+    smooth_weights(mesh_obj, iterations=2)
 
     print("Creating walk cycle animation...")
     create_walk_cycle(armature_obj)
