@@ -23,6 +23,7 @@ if env_path.exists():
             os.environ.setdefault(key.strip(), value.strip())
 
 API_BASE = os.getenv("CLAWBLOX_API_URL", "http://localhost:8080/api/v1")
+API_BASE_PROD = os.getenv("CLAWBLOX_API_URL_PROD", "")
 GAME_ID = "a0000000-0000-0000-0000-000000000006"  # Tsunami Brainrot
 
 # Map constants (rotated: X is long axis, Z is short axis)
@@ -59,20 +60,20 @@ def find_nearest_brainrot(pos: list, entities: list) -> dict | None:
     return nearest
 
 
-def run_agent(api_key: str):
+def run_agent(api_key: str, api_base: str):
     """Run the test agent"""
     headers = {"Authorization": f"Bearer {api_key}"}
 
     # Leave any existing games first
     try:
-        resp = requests.get(f"{API_BASE}/games", headers=headers, timeout=5)
+        resp = requests.get(f"{api_base}/games", headers=headers, timeout=5)
         for g in resp.json().get("games", []):
-            requests.post(f"{API_BASE}/games/{g['id']}/leave", headers=headers, timeout=5)
+            requests.post(f"{api_base}/games/{g['id']}/leave", headers=headers, timeout=5)
     except:
         pass
 
     # Join the tsunami game
-    resp = requests.post(f"{API_BASE}/games/{GAME_ID}/join", headers=headers, timeout=5)
+    resp = requests.post(f"{api_base}/games/{GAME_ID}/join", headers=headers, timeout=5)
     if resp.status_code != 200:
         print(f"Failed to join: {resp.text}")
         return
@@ -90,7 +91,7 @@ def run_agent(api_key: str):
     try:
         while True:
             # Observe
-            resp = requests.get(f"{API_BASE}/games/{GAME_ID}/observe", headers=headers, timeout=5)
+            resp = requests.get(f"{api_base}/games/{GAME_ID}/observe", headers=headers, timeout=5)
             if resp.status_code != 200:
                 print(f"Observe failed: {resp.status_code}")
                 time.sleep(1)
@@ -133,7 +134,7 @@ def run_agent(api_key: str):
                     if dist < COLLECTION_RANGE:
                         # Close enough - collect it
                         resp = requests.post(
-                            f"{API_BASE}/games/{GAME_ID}/input",
+                            f"{api_base}/games/{GAME_ID}/input",
                             headers=headers,
                             json={"type": "Collect"},
                             timeout=5
@@ -143,7 +144,7 @@ def run_agent(api_key: str):
                     else:
                         # Move toward it
                         resp = requests.post(
-                            f"{API_BASE}/games/{GAME_ID}/input",
+                            f"{api_base}/games/{GAME_ID}/input",
                             headers=headers,
                             json={"type": "MoveTo", "data": {"position": brainrot["position"]}},
                             timeout=5
@@ -153,7 +154,7 @@ def run_agent(api_key: str):
                     target_x = random.uniform(COLLECTION_X_MIN + 20, SAFE_ZONE_X_START - 20)
                     target_z = random.uniform(-30, 30)
                     resp = requests.post(
-                        f"{API_BASE}/games/{GAME_ID}/input",
+                        f"{api_base}/games/{GAME_ID}/input",
                         headers=headers,
                         json={"type": "MoveTo", "data": {"position": [target_x, pos[1], target_z]}},
                         timeout=5
@@ -169,7 +170,7 @@ def run_agent(api_key: str):
                 # Move back to safe zone (right side, high X)
                 if pos[0] < SAFE_ZONE_X_START:
                     resp = requests.post(
-                        f"{API_BASE}/games/{GAME_ID}/input",
+                        f"{api_base}/games/{GAME_ID}/input",
                         headers=headers,
                         json={"type": "MoveTo", "data": {"position": [75, pos[1], 0]}},
                         timeout=5
@@ -179,7 +180,7 @@ def run_agent(api_key: str):
                 # If stuck for >5s, nudge toward base
                 if now - last_move_time > 5.0:
                     resp = requests.post(
-                        f"{API_BASE}/games/{GAME_ID}/input",
+                        f"{api_base}/games/{GAME_ID}/input",
                         headers=headers,
                         json={"type": "MoveTo", "data": {"position": [pos[0] + 5, pos[1], pos[2]]}},
                         timeout=5
@@ -189,7 +190,7 @@ def run_agent(api_key: str):
             elif state == "deposit":
                 # Deposit brainrots (places them on base for passive income)
                 resp = requests.post(
-                    f"{API_BASE}/games/{GAME_ID}/input",
+                    f"{api_base}/games/{GAME_ID}/input",
                     headers=headers,
                     json={"type": "Deposit"},
                     timeout=5
@@ -204,7 +205,7 @@ def run_agent(api_key: str):
                     next_cost = SPEED_COSTS[int(speed_level)]  # speed_level is 1-indexed, costs are 0-indexed for next
                     if money >= next_cost:
                         resp = requests.post(
-                            f"{API_BASE}/games/{GAME_ID}/input",
+                            f"{api_base}/games/{GAME_ID}/input",
                             headers=headers,
                             json={"type": "BuySpeed"},
                             timeout=5
@@ -220,25 +221,46 @@ def run_agent(api_key: str):
     except KeyboardInterrupt:
         print("\nStopping...")
     finally:
-        requests.post(f"{API_BASE}/games/{GAME_ID}/leave", headers=headers, timeout=5)
+        requests.post(f"{api_base}/games/{GAME_ID}/leave", headers=headers, timeout=5)
         print("Left game.")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Test agent for Tsunami Brainrot game")
-    parser.add_argument("--api-key", type=str, help="API key (or uses CLAWBLOX_API_KEY env var)")
+    parser.add_argument("--api-key", type=str, help="API key (or uses env var)")
+    parser.add_argument(
+        "--prod",
+        action="store_true",
+        help="Use production API base (CLAWBLOX_API_URL_PROD or explicit --api-base)",
+    )
+    parser.add_argument(
+        "--api-base",
+        type=str,
+        default=None,
+        help="Override API base URL (e.g., https://host/api/v1)",
+    )
     args = parser.parse_args()
 
-    api_key = args.api_key or os.getenv("CLAWBLOX_API_KEY")
+    api_base = API_BASE
+    if args.api_base:
+        api_base = args.api_base
+    elif args.prod:
+        if API_BASE_PROD:
+            api_base = API_BASE_PROD
+        else:
+            print("Error: --prod set but CLAWBLOX_API_URL_PROD is not configured")
+            sys.exit(1)
+
+    api_key = args.api_key or os.getenv("CLAWBLOX_API_KEY_PROD" if args.prod else "CLAWBLOX_API_KEY")
     if not api_key:
-        print("Error: No API key provided. Use --api-key or set CLAWBLOX_API_KEY")
+        print("Error: No API key provided. Use --api-key or set CLAWBLOX_API_KEY/CLAWBLOX_API_KEY_PROD")
         sys.exit(1)
 
-    print(f"API: {API_BASE}")
+    print(f"API: {api_base}")
     print(f"Game: {GAME_ID}")
     print("-" * 60)
 
-    run_agent(api_key)
+    run_agent(api_key, api_base)
 
 
 if __name__ == "__main__":
