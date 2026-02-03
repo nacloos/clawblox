@@ -1,4 +1,4 @@
-import { memo, useRef } from 'react'
+import { memo, useRef, useState } from 'react'
 import { useFrame } from '@react-three/fiber'
 import { Html } from '@react-three/drei'
 import * as THREE from 'three'
@@ -224,6 +224,25 @@ function BillboardGuiComponent({ billboard, offset }: { billboard: BillboardGui;
   )
 }
 
+function billboardEqual(a: BillboardGui | null, b: BillboardGui | null): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  if (a.always_on_top !== b.always_on_top) return false
+  if (a.studs_offset[0] !== b.studs_offset[0] || a.studs_offset[1] !== b.studs_offset[1] || a.studs_offset[2] !== b.studs_offset[2]) {
+    return false
+  }
+  if (a.labels.length !== b.labels.length) return false
+  for (let i = 0; i < a.labels.length; i++) {
+    const la = a.labels[i]
+    const lb = b.labels[i]
+    if (la.text !== lb.text || la.size !== lb.size) return false
+    if (la.color[0] !== lb.color[0] || la.color[1] !== lb.color[1] || la.color[2] !== lb.color[2]) {
+      return false
+    }
+  }
+  return true
+}
+
 // Part entity - renders based on shape property (Roblox-style)
 function PartEntity({ entityId, stateBuffer }: EntityProps) {
   const groupRef = useRef<THREE.Group>(null)
@@ -237,12 +256,13 @@ function PartEntity({ entityId, stateBuffer }: EntityProps) {
   const color = toColor(initialEntity?.color)
   const materialProps = getMaterialProps(initialEntity?.material, color)
   const shape = initialEntity?.shape || 'Block'
-  const billboardGui = initialEntity?.billboard_gui
+  const [billboardGui, setBillboardGui] = useState<BillboardGui | null>(initialEntity?.billboard_gui ?? null)
+  const billboardGuiRef = useRef<BillboardGui | null>(billboardGui)
 
   useFrame(() => {
     if (!groupRef.current) return
 
-    const { targetPos, targetQuat } = getInterpolatedEntity(stateBuffer, entityId)
+    const { entity, targetPos, targetQuat } = getInterpolatedEntity(stateBuffer, entityId)
     if (!targetPos) return
 
     // Render interpolated position directly
@@ -251,6 +271,17 @@ function PartEntity({ entityId, stateBuffer }: EntityProps) {
     // Render interpolated rotation directly
     if (targetQuat && meshRef.current) {
       meshRef.current.quaternion.copy(targetQuat)
+    }
+
+    const nextBillboard = entity?.billboard_gui ?? null
+    if (!billboardEqual(billboardGuiRef.current, nextBillboard)) {
+      console.log('BillboardGui change', {
+        entityId,
+        prev: billboardGuiRef.current,
+        next: nextBillboard,
+      })
+      billboardGuiRef.current = nextBillboard
+      setBillboardGui(nextBillboard)
     }
   })
 

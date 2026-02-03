@@ -122,35 +122,14 @@ local function placeBrainrotOnBase(brainrot, slotIndex, incomeRate)
     brainrot.CanCollide = false  -- Don't block player movement
     brainrot:SetAttribute("IsPlaced", true)
 
-    -- Add floating label (BillboardGui)
-    local billboard = Instance.new("BillboardGui")
-    billboard.Name = "BrainrotLabel"
-    billboard.Size = UDim2.new(0, 100, 0, 50)
-    billboard.StudsOffset = Vector3.new(0, 3, 0)
-    billboard.AlwaysOnTop = true
-    billboard.Parent = brainrot
-
-    -- Name label
-    local nameLabel = Instance.new("TextLabel")
-    nameLabel.Name = "NameLabel"
-    nameLabel.Size = UDim2.new(1, 0, 0.4, 0)
-    nameLabel.Position = UDim2.new(0, 0, 0, 0)
-    nameLabel.Text = "Brainrot"
-    nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-    nameLabel.TextScaled = true
-    nameLabel.BackgroundTransparency = 1
-    nameLabel.Parent = billboard
-
-    -- Income label (green)
-    local incomeLabel = Instance.new("TextLabel")
-    incomeLabel.Name = "IncomeLabel"
-    incomeLabel.Size = UDim2.new(1, 0, 0.4, 0)
-    incomeLabel.Position = UDim2.new(0, 0, 0.5, 0)
-    incomeLabel.Text = "$" .. incomeRate .. "/s"
-    incomeLabel.TextColor3 = Color3.fromRGB(50, 255, 50)
-    incomeLabel.TextScaled = true
-    incomeLabel.BackgroundTransparency = 1
-    incomeLabel.Parent = billboard
+    -- Update income label (green)
+    local billboard = brainrot:FindFirstChild("BrainrotLabel")
+    if billboard then
+        local incomeLabel = billboard:FindFirstChild("IncomeLabel")
+        if incomeLabel then
+            incomeLabel.Text = "$" .. incomeRate .. "/s"
+        end
+    end
 end
 
 local function getTotalPassiveIncome(data)
@@ -422,6 +401,37 @@ local function spawnBrainrot()
     brainrot.Material = Enum.Material.Neon
     brainrot:SetAttribute("IsBrainrot", true)
     brainrot:SetAttribute("Value", BRAINROT_VALUE)
+
+    -- Add floating label (BillboardGui) so it is always attached
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "BrainrotLabel"
+    billboard.Size = UDim2.new(0, 100, 0, 50)
+    billboard.StudsOffset = Vector3.new(0, 3, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Parent = brainrot
+
+    -- Name label
+    local nameLabel = Instance.new("TextLabel")
+    nameLabel.Name = "NameLabel"
+    nameLabel.Size = UDim2.new(1, 0, 0.4, 0)
+    nameLabel.Position = UDim2.new(0, 0, 0, 0)
+    nameLabel.Text = "Brainrot"
+    nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    nameLabel.TextScaled = true
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Parent = billboard
+
+    -- Income label (green)
+    local incomeLabel = Instance.new("TextLabel")
+    incomeLabel.Name = "IncomeLabel"
+    incomeLabel.Size = UDim2.new(1, 0, 0.4, 0)
+    incomeLabel.Position = UDim2.new(0, 0, 0.5, 0)
+    incomeLabel.Text = "$0/s"
+    incomeLabel.TextColor3 = Color3.fromRGB(50, 255, 50)
+    incomeLabel.TextScaled = true
+    incomeLabel.BackgroundTransparency = 1
+    incomeLabel.Parent = billboard
+
     brainrot.Parent = Workspace
 
     table.insert(brainrots, brainrot)

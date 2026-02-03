@@ -108,8 +108,9 @@ export function createGameWebSocket(
       } else {
         onState(data as SpectatorObservation)
       }
-    } catch {
-      onError('Failed to parse game state')
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      onError(`Failed to parse game state: ${message}`)
     }
   }
 
