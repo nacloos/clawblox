@@ -49,6 +49,14 @@ local dirtyPlayers = {}      -- Per-player dirty flag for autosave
 
 -- DataStore
 local playerStore = DataStoreService:GetDataStore("PlayerData")
+local leaderboardStore = DataStoreService:GetOrderedDataStore("Leaderboard")
+
+-- Leaderboard state
+local leaderboardCache = {}  -- Global cache: {entries = {{key, score, name}, ...}}
+local leaderboardUpdateTimer = 0
+local leaderboardFetchTimer = 0
+local LEADERBOARD_UPDATE_INTERVAL = 10  -- Seconds between updating player's score
+local LEADERBOARD_FETCH_INTERVAL = 5    -- Seconds between fetching leaderboard
 
 --------------------------------------------------------------------------------
 -- HELPER FUNCTIONS
@@ -247,7 +255,124 @@ local function createPlayerGUI(player)
     speedLabel.TextXAlignment = "Center"
     speedLabel.Parent = hud
 
+    -- Leaderboard frame (top-left)
+    local leaderboardFrame = Instance.new("Frame")
+    leaderboardFrame.Name = "LeaderboardFrame"
+    leaderboardFrame.Position = UDim2.new(0, 10, 0, 10)
+    leaderboardFrame.Size = UDim2.new(0, 220, 0, 180)
+    leaderboardFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    leaderboardFrame.BackgroundTransparency = 0.3
+    leaderboardFrame.Parent = hud
+
+    -- Leaderboard title
+    local leaderboardTitle = Instance.new("TextLabel")
+    leaderboardTitle.Name = "Title"
+    leaderboardTitle.Position = UDim2.new(0, 0, 0, 0)
+    leaderboardTitle.Size = UDim2.new(1, 0, 0, 28)
+    leaderboardTitle.Text = "Top Income"
+    leaderboardTitle.TextSize = 18
+    leaderboardTitle.TextColor3 = Color3.fromRGB(255, 215, 0)
+    leaderboardTitle.BackgroundTransparency = 1
+    leaderboardTitle.Parent = leaderboardFrame
+
+    -- Create 5 entry labels
+    for i = 1, 5 do
+        local entryLabel = Instance.new("TextLabel")
+        entryLabel.Name = "Entry" .. i
+        entryLabel.Position = UDim2.new(0, 8, 0, 28 + (i - 1) * 28)
+        entryLabel.Size = UDim2.new(1, -16, 0, 26)
+        entryLabel.Text = ""
+        entryLabel.TextSize = 16
+        entryLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+        entryLabel.BackgroundTransparency = 1
+        entryLabel.TextXAlignment = "Left"
+        entryLabel.Parent = leaderboardFrame
+    end
+
     print("[GUI] Created HUD for " .. player.Name)
+end
+
+--------------------------------------------------------------------------------
+-- LEADERBOARD FUNCTIONS
+--------------------------------------------------------------------------------
+
+local function updatePlayerLeaderboardEntry(player)
+    local data = getPlayerData(player)
+    if not data then return end
+
+    local passiveIncome = getTotalPassiveIncome(data)
+    if passiveIncome <= 0 then return end  -- Don't add players with 0 income
+
+    local key = "player_" .. player.UserId
+    local entry = {
+        score = passiveIncome,
+        name = player.Name,
+    }
+
+    local success, err = pcall(function()
+        leaderboardStore:SetAsync(key, entry)
+    end)
+
+    if success then
+        print("[Leaderboard] Updated " .. player.Name .. " with income $" .. passiveIncome .. "/s")
+    else
+        warn("[Leaderboard] Failed to update " .. player.Name .. ": " .. tostring(err))
+    end
+end
+
+local function fetchLeaderboard()
+    local success, result = pcall(function()
+        return leaderboardStore:GetSortedAsync(false, 5)  -- false = descending, top 5
+    end)
+
+    if success and result then
+        leaderboardCache = result
+        print("[Leaderboard] Fetched " .. #result .. " entries")
+    else
+        warn("[Leaderboard] Failed to fetch: " .. tostring(result))
+    end
+end
+
+local function updateLeaderboardGUI(player)
+    local playerGui = player.PlayerGui
+    if not playerGui then return end
+
+    local hud = playerGui:FindFirstChild("HUD")
+    if not hud then return end
+
+    local frame = hud:FindFirstChild("LeaderboardFrame")
+    if not frame then return end
+
+    for i = 1, 5 do
+        local entryLabel = frame:FindFirstChild("Entry" .. i)
+        if entryLabel then
+            local entry = leaderboardCache[i]
+            if entry and entry.value then
+                local name = entry.value.name or "Unknown"
+                local score = entry.value.score or 0
+                -- Truncate name if too long
+                if #name > 10 then
+                    name = string.sub(name, 1, 9) .. "."
+                end
+                -- Format score
+                local scoreStr
+                if score >= 1000 then
+                    scoreStr = string.format("%.1fK", score / 1000)
+                else
+                    scoreStr = string.format("%.0f", score)
+                end
+                entryLabel.Text = i .. ". " .. name .. " $" .. scoreStr .. "/s"
+            else
+                entryLabel.Text = ""
+            end
+        end
+    end
+end
+
+local function updateAllLeaderboardGUIs()
+    for _, player in ipairs(Players:GetPlayers()) do
+        updateLeaderboardGUI(player)
+    end
 end
 
 --------------------------------------------------------------------------------
@@ -770,6 +895,24 @@ RunService.Heartbeat:Connect(function(dt)
             savePlayerData(player)
         end
     end
+
+    -- Leaderboard updates
+    leaderboardUpdateTimer = leaderboardUpdateTimer + dt
+    if leaderboardUpdateTimer >= LEADERBOARD_UPDATE_INTERVAL then
+        leaderboardUpdateTimer = 0
+        -- Update each player's leaderboard entry
+        for _, player in ipairs(Players:GetPlayers()) do
+            updatePlayerLeaderboardEntry(player)
+        end
+    end
+
+    leaderboardFetchTimer = leaderboardFetchTimer + dt
+    if leaderboardFetchTimer >= LEADERBOARD_FETCH_INTERVAL then
+        leaderboardFetchTimer = 0
+        -- Fetch leaderboard and update all GUIs
+        fetchLeaderboard()
+        updateAllLeaderboardGUIs()
+    end
 end)
 
 -- Initial brainrot spawn
@@ -777,6 +920,10 @@ for i = 1, 10 do
     spawnBrainrot()
 end
 
+-- Initial leaderboard fetch
+fetchLeaderboard()
+
 print("=== Escape Tsunami For Brainrots (Phase 1) ===")
 print("Collect brainrots, deposit for money, buy speed upgrades!")
 print("Data is persisted via DataStore.")
+print("Leaderboard tracks top passive income earners.")
