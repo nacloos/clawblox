@@ -219,6 +219,15 @@ impl LuaRuntime {
         table_table.set("remove", remove_fn)?;
 
         let pending_coroutines = Arc::new(Mutex::new(Vec::new()));
+        let track_store = pending_coroutines.clone();
+        let track_fn = lua.create_function(move |lua, thread: Thread| {
+            if thread.status() == ThreadStatus::Resumable {
+                let key = lua.create_registry_value(thread)?;
+                track_store.lock().unwrap().push(key);
+            }
+            Ok(())
+        })?;
+        lua.globals().set("__clawblox_track_thread", track_fn)?;
 
         Ok(Self {
             lua,
@@ -591,4 +600,3 @@ mod tests {
         assert!(char_inst.parent().is_some());
     }
 }
-

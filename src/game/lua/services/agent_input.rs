@@ -2,7 +2,7 @@ use mlua::{Lua, MultiValue, UserData, UserDataFields, UserDataMethods, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::game::lua::events::{create_signal, RBXScriptSignal};
+use crate::game::lua::events::{create_signal, track_yielded_threads, RBXScriptSignal};
 use crate::game::lua::instance::Instance;
 
 /// Represents an input from an agent
@@ -69,7 +69,7 @@ impl AgentInputService {
         let lua_data = json_to_lua_value(lua, input_data)?;
 
         // Fire the generic InputReceived event
-        signal.fire(
+        let threads = signal.fire_as_coroutines(
             lua,
             MultiValue::from_iter([
                 Value::UserData(lua.create_userdata(player.clone())?),
@@ -77,6 +77,7 @@ impl AgentInputService {
                 lua_data,
             ]),
         )?;
+        track_yielded_threads(lua, threads)?;
 
         // Handle GUI click events specially
         if input_type == "GuiClick" {
@@ -115,7 +116,8 @@ impl AgentInputService {
             };
 
             if let Some(signal) = signal {
-                signal.fire(lua, MultiValue::new())?;
+                let threads = signal.fire_as_coroutines(lua, MultiValue::new())?;
+                track_yielded_threads(lua, threads)?;
             }
         }
 

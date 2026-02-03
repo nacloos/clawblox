@@ -779,7 +779,8 @@ impl Instance {
         }
 
         let destroying = self.data.lock().unwrap().destroying.clone();
-        destroying.fire(lua, mlua::MultiValue::new())?;
+        let threads = destroying.fire_as_coroutines(lua, mlua::MultiValue::new())?;
+        crate::game::lua::events::track_yielded_threads(lua, threads)?;
 
         for child in self.get_children() {
             child.destroy(lua)?;
@@ -1840,12 +1841,14 @@ impl UserData for Instance {
             };
 
             if old_health != new_health {
-                health_changed.fire(
+                let threads = health_changed.fire_as_coroutines(
                     lua,
                     mlua::MultiValue::from_iter([Value::Number(new_health as f64)]),
                 )?;
+                crate::game::lua::events::track_yielded_threads(lua, threads)?;
                 if new_health <= 0.0 && old_health > 0.0 {
-                    died.fire(lua, mlua::MultiValue::new())?;
+                    let threads = died.fire_as_coroutines(lua, mlua::MultiValue::new())?;
+                    crate::game::lua::events::track_yielded_threads(lua, threads)?;
                 }
             }
             Ok(())

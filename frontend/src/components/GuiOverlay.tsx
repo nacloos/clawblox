@@ -6,6 +6,7 @@ import GuiElement from './GuiElement'
 interface GuiOverlayProps {
   stateBuffer: StateBuffer
   followPlayerId: string | null
+  latestTick: number
   onGuiClick?: (elementId: number) => void
 }
 
@@ -13,7 +14,7 @@ interface GuiOverlayProps {
  * GuiOverlay renders the 2D GUI for the followed player
  * It's positioned absolutely over the 3D canvas
  */
-export default function GuiOverlay({ stateBuffer, followPlayerId, onGuiClick }: GuiOverlayProps) {
+export default function GuiOverlay({ stateBuffer, followPlayerId, latestTick, onGuiClick }: GuiOverlayProps) {
   // Get GUI elements from the followed player
   const guiElements = useMemo<GuiElementType[]>(() => {
     if (!followPlayerId) return []
@@ -25,7 +26,7 @@ export default function GuiOverlay({ stateBuffer, followPlayerId, onGuiClick }: 
     if (!player || !player.gui) return []
 
     return player.gui
-  }, [stateBuffer, followPlayerId, stateBuffer.getLatest()?.tick])
+  }, [stateBuffer, followPlayerId, latestTick])
 
   if (guiElements.length === 0) {
     return null

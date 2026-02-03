@@ -76,6 +76,28 @@ pub struct RBXScriptSignal {
     name: String,
 }
 
+pub fn track_yielded_threads(lua: &Lua, threads: Vec<Thread>) -> Result<()> {
+    if threads.is_empty() {
+        return Ok(());
+    }
+
+    let tracker: Function = match lua.globals().get("__clawblox_track_thread") {
+        Ok(f) => f,
+        Err(_) => {
+            eprintln!("[LuaRuntime] Missing coroutine tracker (__clawblox_track_thread)");
+            return Ok(());
+        }
+    };
+
+    for thread in threads {
+        if thread.status() == mlua::ThreadStatus::Resumable {
+            tracker.call::<()>(thread)?;
+        }
+    }
+
+    Ok(())
+}
+
 impl fmt::Debug for RBXScriptSignal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RBXScriptSignal")

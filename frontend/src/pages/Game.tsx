@@ -21,6 +21,7 @@ export default function Game() {
   const [error, setError] = useState<string | null>(null)
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting')
   const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null)
+  const [latestTick, setLatestTick] = useState<number>(0)
 
   // Use refs for high-frequency state to avoid React re-renders
   const stateBufferRef = useRef(new StateBuffer())
@@ -72,6 +73,8 @@ export default function Game() {
       }
       return prev
     })
+
+    setLatestTick(state.tick)
 
     setConnectionStatus('connected')
     setError(null)
@@ -202,6 +205,7 @@ export default function Game() {
               <GuiOverlay
                 stateBuffer={stateBufferRef.current}
                 followPlayerId={selectedPlayerId}
+                latestTick={latestTick}
                 onGuiClick={handleGuiClick}
               />
               <PlayerList
