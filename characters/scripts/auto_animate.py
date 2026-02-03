@@ -414,8 +414,11 @@ def smooth_weights(mesh_obj, iterations=2):
     bpy.ops.object.mode_set(mode='OBJECT')
 
 
-def create_walk_cycle(armature_obj, frame_count=24):
-    """Create a simple walk cycle animation."""
+def create_walk_cycle(armature_obj, frame_count=24, simple=True):
+    """
+    Create a walk/idle animation.
+    If simple=True, creates a basic bob animation to minimize weight issues.
+    """
     bpy.context.view_layer.objects.active = armature_obj
     bpy.ops.object.mode_set(mode='POSE')
 
@@ -426,11 +429,6 @@ def create_walk_cycle(armature_obj, frame_count=24):
     armature_obj.animation_data.action = action
 
     pose_bones = armature_obj.pose.bones
-
-    leg_swing = math.radians(30)
-    leg_lift = math.radians(15)
-    arm_swing = math.radians(20)
-    body_bob = 0.02
 
     def set_keyframe(bone_name, frame, rotation_euler=None, location=None):
         if bone_name not in pose_bones:
@@ -446,46 +444,85 @@ def create_walk_cycle(armature_obj, frame_count=24):
             bone.location = location
             bone.keyframe_insert(data_path="location", frame=frame)
 
-    key_frames = [1, 7, 13, 19, 24]
+    if simple:
+        # Simplified walk - smaller movements to reduce weight artifacts
+        # Still looks like walking but gentler on the mesh
+        leg_swing = math.radians(15)  # Half the full walk
+        arm_swing = math.radians(10)
+        body_bob = 0.015
 
-    for i, frame in enumerate(key_frames):
-        phase = i % 4
+        # Frame 1: Left foot forward
+        set_keyframe("root", 1, location=(0, 0, -body_bob))
+        set_keyframe("thigh.L", 1, rotation_euler=(leg_swing, 0, 0))
+        set_keyframe("thigh.R", 1, rotation_euler=(-leg_swing, 0, 0))
+        set_keyframe("upper_arm.L", 1, rotation_euler=(-arm_swing, 0, 0))
+        set_keyframe("upper_arm.R", 1, rotation_euler=(arm_swing, 0, 0))
 
-        if phase in [1, 3]:
-            set_keyframe("root", frame, location=(0, 0, body_bob))
-        else:
-            set_keyframe("root", frame, location=(0, 0, -body_bob))
+        # Frame 12: Right foot forward
+        set_keyframe("root", 12, location=(0, 0, -body_bob))
+        set_keyframe("thigh.L", 12, rotation_euler=(-leg_swing, 0, 0))
+        set_keyframe("thigh.R", 12, rotation_euler=(leg_swing, 0, 0))
+        set_keyframe("upper_arm.L", 12, rotation_euler=(arm_swing, 0, 0))
+        set_keyframe("upper_arm.R", 12, rotation_euler=(-arm_swing, 0, 0))
 
-        if phase == 0:
-            set_keyframe("thigh.L", frame, rotation_euler=(leg_swing, 0, 0))
-            set_keyframe("thigh.R", frame, rotation_euler=(-leg_swing, 0, 0))
-            set_keyframe("shin.L", frame, rotation_euler=(0, 0, 0))
-            set_keyframe("shin.R", frame, rotation_euler=(leg_lift, 0, 0))
-        elif phase == 1:
-            set_keyframe("thigh.L", frame, rotation_euler=(0, 0, 0))
-            set_keyframe("thigh.R", frame, rotation_euler=(0, 0, 0))
-            set_keyframe("shin.L", frame, rotation_euler=(leg_lift * 2, 0, 0))
-            set_keyframe("shin.R", frame, rotation_euler=(0, 0, 0))
-        elif phase == 2:
-            set_keyframe("thigh.L", frame, rotation_euler=(-leg_swing, 0, 0))
-            set_keyframe("thigh.R", frame, rotation_euler=(leg_swing, 0, 0))
-            set_keyframe("shin.L", frame, rotation_euler=(leg_lift, 0, 0))
-            set_keyframe("shin.R", frame, rotation_euler=(0, 0, 0))
-        elif phase == 3:
-            set_keyframe("thigh.L", frame, rotation_euler=(0, 0, 0))
-            set_keyframe("thigh.R", frame, rotation_euler=(0, 0, 0))
-            set_keyframe("shin.L", frame, rotation_euler=(0, 0, 0))
-            set_keyframe("shin.R", frame, rotation_euler=(leg_lift * 2, 0, 0))
+        # Frame 24: Back to start (loop)
+        set_keyframe("root", 24, location=(0, 0, -body_bob))
+        set_keyframe("thigh.L", 24, rotation_euler=(leg_swing, 0, 0))
+        set_keyframe("thigh.R", 24, rotation_euler=(-leg_swing, 0, 0))
+        set_keyframe("upper_arm.L", 24, rotation_euler=(-arm_swing, 0, 0))
+        set_keyframe("upper_arm.R", 24, rotation_euler=(arm_swing, 0, 0))
 
-        if phase in [0, 4]:
-            set_keyframe("upper_arm.L", frame, rotation_euler=(arm_swing, 0, 0))
-            set_keyframe("upper_arm.R", frame, rotation_euler=(-arm_swing, 0, 0))
-        elif phase == 2:
-            set_keyframe("upper_arm.L", frame, rotation_euler=(-arm_swing, 0, 0))
-            set_keyframe("upper_arm.R", frame, rotation_euler=(arm_swing, 0, 0))
-        else:
-            set_keyframe("upper_arm.L", frame, rotation_euler=(0, 0, 0))
-            set_keyframe("upper_arm.R", frame, rotation_euler=(0, 0, 0))
+        # Mid frames for bob up
+        set_keyframe("root", 6, location=(0, 0, body_bob))
+        set_keyframe("root", 18, location=(0, 0, body_bob))
+
+    else:
+        # Full walk cycle with limb movement
+        leg_swing = math.radians(30)
+        leg_lift = math.radians(15)
+        arm_swing = math.radians(20)
+        body_bob = 0.02
+
+        key_frames = [1, 7, 13, 19, 24]
+
+        for i, frame in enumerate(key_frames):
+            phase = i % 4
+
+            if phase in [1, 3]:
+                set_keyframe("root", frame, location=(0, 0, body_bob))
+            else:
+                set_keyframe("root", frame, location=(0, 0, -body_bob))
+
+            if phase == 0:
+                set_keyframe("thigh.L", frame, rotation_euler=(leg_swing, 0, 0))
+                set_keyframe("thigh.R", frame, rotation_euler=(-leg_swing, 0, 0))
+                set_keyframe("shin.L", frame, rotation_euler=(0, 0, 0))
+                set_keyframe("shin.R", frame, rotation_euler=(leg_lift, 0, 0))
+            elif phase == 1:
+                set_keyframe("thigh.L", frame, rotation_euler=(0, 0, 0))
+                set_keyframe("thigh.R", frame, rotation_euler=(0, 0, 0))
+                set_keyframe("shin.L", frame, rotation_euler=(leg_lift * 2, 0, 0))
+                set_keyframe("shin.R", frame, rotation_euler=(0, 0, 0))
+            elif phase == 2:
+                set_keyframe("thigh.L", frame, rotation_euler=(-leg_swing, 0, 0))
+                set_keyframe("thigh.R", frame, rotation_euler=(leg_swing, 0, 0))
+                set_keyframe("shin.L", frame, rotation_euler=(leg_lift, 0, 0))
+                set_keyframe("shin.R", frame, rotation_euler=(0, 0, 0))
+            elif phase == 3:
+                set_keyframe("thigh.L", frame, rotation_euler=(0, 0, 0))
+                set_keyframe("thigh.R", frame, rotation_euler=(0, 0, 0))
+                set_keyframe("shin.L", frame, rotation_euler=(0, 0, 0))
+                set_keyframe("shin.R", frame, rotation_euler=(leg_lift * 2, 0, 0))
+
+            if phase in [0, 4]:
+                set_keyframe("upper_arm.L", frame, rotation_euler=(arm_swing, 0, 0))
+                set_keyframe("upper_arm.R", frame, rotation_euler=(-arm_swing, 0, 0))
+            elif phase == 2:
+                set_keyframe("upper_arm.L", frame, rotation_euler=(-arm_swing, 0, 0))
+                set_keyframe("upper_arm.R", frame, rotation_euler=(arm_swing, 0, 0))
+            else:
+                set_keyframe("upper_arm.L", frame, rotation_euler=(0, 0, 0))
+                set_keyframe("upper_arm.R", frame, rotation_euler=(0, 0, 0))
 
     for fcurve in action.fcurves:
         for keyframe in fcurve.keyframe_points:
@@ -551,8 +588,11 @@ def main():
     print("Parenting with automatic weights...")
     parent_mesh_to_armature(mesh_obj, armature_obj)
 
-    print("Reassigning weights for isolated parts...")
+    print("Reassigning weights for small isolated parts...")
     assign_island_weights(mesh_obj, armature_obj, islands, bounds)
+
+    print("Ensuring all vertices have weights...")
+    ensure_all_vertices_weighted(mesh_obj, armature_obj)
 
     print("Cleaning up weights...")
     clean_weights(mesh_obj, weight_threshold=0.05, max_influences=4)
@@ -560,8 +600,8 @@ def main():
     print("Smoothing weights...")
     smooth_weights(mesh_obj, iterations=2)
 
-    print("Creating walk cycle animation...")
-    create_walk_cycle(armature_obj)
+    print("Creating simple bob animation...")
+    create_walk_cycle(armature_obj, simple=True)
 
     print("Exporting...")
     export_glb(output_path)

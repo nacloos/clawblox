@@ -10,14 +10,24 @@ local AgentInputService = game:GetService("AgentInputService")
 -- CONFIGURATION
 --------------------------------------------------------------------------------
 
-local MAP_WIDTH = 80          -- X: -40 to +40
-local SAFE_ZONE_END = 50      -- Z: 0 to 50
-local COLLECTION_ZONE_END = 200  -- Z: 50 to 200 (simplified for Phase 1)
+local MAP_LENGTH = 800            -- X: -400 to +400
+local BASE_ZONE_X_START = 350     -- Safe base zone starts at X=350
+local BASE_COUNT = 8              -- Max 8 players/bases per place
+local BASE_SIZE_X = 30            -- Base platform size (X)
+local BASE_SIZE_Z = 30            -- Base platform size (Z)
+local BASE_GAP = 6                -- Z gap between base platforms
+local BASE_ZONE_PADDING_X = 10    -- Padding inside the safe zone along X
+local BASE_ROW_MARGIN_Z = 20      -- Extra Z margin outside base row
+local BASE_PLATFORM_HEIGHT = 0.2  -- Base platform thickness (keep <= autostep)
+local BASE_ZONE_SIZE = BASE_SIZE_X + BASE_ZONE_PADDING_X * 2
+local BASE_ROW_LENGTH_Z = BASE_COUNT * BASE_SIZE_Z + (BASE_COUNT - 1) * BASE_GAP
+local MAP_WIDTH = math.max(80, BASE_ROW_LENGTH_Z + BASE_ROW_MARGIN_Z * 2)
+local STORED_BRAINROT_POSITION = Vector3.new(0, -200, 0)
 local COLLECTION_RANGE = 5
 
-local BRAINROT_VALUE = 10     -- Fixed value for Phase 1
-local MAX_BRAINROTS = 20      -- Max active brainrots
-local SPAWN_INTERVAL = 2      -- Seconds between spawns
+local BRAINROT_VALUE = 10     -- Default value for backwards compatibility
+local MAX_BRAINROTS = 30      -- Max active brainrots (increased for larger map)
+local SPAWN_INTERVAL = 1.5    -- Seconds between spawns (faster for larger map)
 local CARRY_CAPACITY = 1      -- Starting carry capacity
 local SAVE_INTERVAL = 15      -- Seconds between autosaves (if dirty)
 
@@ -35,6 +45,16 @@ local SPEED_UPGRADES = {
     {level = 10, cost = 50000, speed = 60},
 }
 
+local ZONES = {
+    {name = "Common",    xMin = 250, xMax = 350,  value = 10,   color = Color3.fromRGB(255, 100, 255), weight = 40},
+    {name = "Uncommon",  xMin = 150, xMax = 250,  value = 30,   color = Color3.fromRGB(100, 150, 255), weight = 25},
+    {name = "Rare",      xMin = 0,   xMax = 150,  value = 80,   color = Color3.fromRGB(180, 100, 255), weight = 15},
+    {name = "Epic",      xMin = -150, xMax = 0,   value = 200,  color = Color3.fromRGB(255, 150, 50),  weight = 10},
+    {name = "Legendary", xMin = -300, xMax = -150, value = 500, color = Color3.fromRGB(255, 255, 50),  weight = 7},
+    {name = "Secret",    xMin = -400, xMax = -300, value = 1500, color = Color3.fromRGB(255, 255, 255), weight = 3},
+}
+
+
 --------------------------------------------------------------------------------
 -- GAME STATE
 --------------------------------------------------------------------------------
@@ -46,6 +66,9 @@ local lastSpawnTime = 0
 local incomeAccumulator = {} -- Per-player income accumulator for passive income
 local saveAccumulator = {}   -- Per-player autosave timer
 local dirtyPlayers = {}      -- Per-player dirty flag for autosave
+local baseSlots = {}          -- base index -> userId
+local userBaseIndex = {}      -- userId -> base index
+local savedPlacedBrainrots = {} -- userId -> placedBrainrots (kept if player leaves)
 
 -- DataStore
 local playerStore = DataStoreService:GetDataStore("PlayerData")
@@ -94,8 +117,42 @@ local function getCharacterPosition(player)
 end
 
 local function isInSafeZone(position)
-    -- After rotation: safe zone is at high X values (X >= 50)
-    return position.X >= (COLLECTION_ZONE_END/2 - SAFE_ZONE_END)
+    -- Base zone is at high X values (X >= BASE_ZONE_X_START)
+    return position.X >= BASE_ZONE_X_START
+end
+
+local function getBaseCenterX()
+    return BASE_ZONE_X_START + BASE_ZONE_PADDING_X + BASE_SIZE_X / 2
+end
+
+local function getBaseCenterZForIndex(index)
+    local rowStartZ = -BASE_ROW_LENGTH_Z / 2 + BASE_SIZE_Z / 2
+    return rowStartZ + (index - 1) * (BASE_SIZE_Z + BASE_GAP)
+end
+
+local function getPlayerBaseIndex(player)
+    local data = getPlayerData(player)
+    if not data then return nil end
+    return data.playerIndex
+end
+
+local function getPlayerBaseCenter(player)
+    local baseIndex = getPlayerBaseIndex(player)
+    if not baseIndex then
+        return Vector3.new(getBaseCenterX(), 0, 0)
+    end
+    return Vector3.new(getBaseCenterX(), 0, getBaseCenterZForIndex(baseIndex))
+end
+
+local function getPlayerSpawnPosition(player)
+    local baseCenter = getPlayerBaseCenter(player)
+    return Vector3.new(baseCenter.X, 3, baseCenter.Z)
+end
+
+local function isAtPlayerBase(player, position)
+    local baseCenter = getPlayerBaseCenter(player)
+    return position.X >= (baseCenter.X - BASE_SIZE_X / 2) and position.X <= (baseCenter.X + BASE_SIZE_X / 2) and
+           position.Z >= (baseCenter.Z - BASE_SIZE_Z / 2) and position.Z <= (baseCenter.Z + BASE_SIZE_Z / 2)
 end
 
 local function attachBrainrotToPlayer(player, brainrot)
@@ -120,24 +177,26 @@ local function attachBrainrotToPlayer(player, brainrot)
     return true
 end
 
-local function placeBrainrotOnBase(brainrot, slotIndex, incomeRate)
+local function placeBrainrotOnBase(player, brainrot, slotIndex, incomeRate)
     -- Remove weld
     local weld = brainrot:FindFirstChild("BrainrotWeld")
     if weld then weld:Destroy() end
 
-    -- Position on base floor (deposit area at X=75)
+    -- Position on player's base floor (deposit area at X=375, Z offset by player index)
     local spacing = 3
-    local cols = 5
-    local col = (slotIndex - 1) % cols
-    local row = math.floor((slotIndex - 1) / cols)
-    local safeZoneCenterX = COLLECTION_ZONE_END / 2 - SAFE_ZONE_END / 2  -- X=75
-    local x = safeZoneCenterX + (col - (cols - 1) / 2) * spacing
-    local z = (row - 2) * spacing
+    local maxCols = math.max(1, math.floor((BASE_SIZE_X - 2) / spacing))
+    local maxRows = math.max(1, math.floor((BASE_SIZE_Z - 2) / spacing))
+    local col = (slotIndex - 1) % maxCols
+    local row = math.floor((slotIndex - 1) / maxCols)
+    local baseCenter = getPlayerBaseCenter(player)
+    local x = baseCenter.X - ((maxCols - 1) * spacing) / 2 + col * spacing
+    local z = baseCenter.Z - ((maxRows - 1) * spacing) / 2 + row * spacing
 
     brainrot.Position = Vector3.new(x, 1, z)
     brainrot.Anchored = true
     brainrot.CanCollide = false  -- Don't block player movement
     brainrot:SetAttribute("IsPlaced", true)
+    brainrot:SetAttribute("OwnerUserId", player.UserId)
 
     -- Update income label (green)
     local billboard = brainrot:FindFirstChild("BrainrotLabel")
@@ -380,15 +439,47 @@ end
 --------------------------------------------------------------------------------
 
 local function loadPlayerData(player)
+    -- Assign player index for per-player base
+    if userBaseIndex[player.UserId] == nil then
+        for i = 1, BASE_COUNT do
+            if baseSlots[i] == nil then
+                baseSlots[i] = player.UserId
+                userBaseIndex[player.UserId] = i
+                break
+            end
+        end
+    end
+    if userBaseIndex[player.UserId] == nil then
+        player:Kick("Server full (8 players max).")
+        return false
+    end
+
     -- Set defaults FIRST so player can receive inputs while DB loads
     local data = {
         money = 0,
         speedLevel = 1,
         carryCapacity = CARRY_CAPACITY,
         carriedBrainrots = {},  -- {part, value} - attached to player
-        placedBrainrots = {},   -- {part, value, incomeRate} - on base floor
+        placedBrainrots = savedPlacedBrainrots[player.UserId] or {},   -- {part, value, incomeRate} - on base floor
+        playerIndex = userBaseIndex[player.UserId],
     }
     setPlayerData(player, data)
+
+    local baseCenter = getPlayerBaseCenter(player)
+    player:SetAttribute("BaseIndex", data.playerIndex)
+    player:SetAttribute("BaseCenterX", baseCenter.X)
+    player:SetAttribute("BaseCenterZ", baseCenter.Z)
+    player:SetAttribute("BaseSizeX", BASE_SIZE_X)
+    player:SetAttribute("BaseSizeZ", BASE_SIZE_Z)
+
+    if #data.placedBrainrots > 0 then
+        for i, placed in ipairs(data.placedBrainrots) do
+            if placed.part and placed.part.Parent then
+                placeBrainrotOnBase(player, placed.part, i, placed.incomeRate or (placed.value or 0) / 10)
+            end
+        end
+    end
+
     updatePlayerAttributes(player)
 
     -- Now load from DataStore (yields)
@@ -403,6 +494,7 @@ local function loadPlayerData(player)
     else
         print("[DataStore] No saved data for " .. player.Name .. ", using defaults")
     end
+    return true
 end
 
 local function savePlayerData(player)
@@ -429,73 +521,93 @@ end
 --------------------------------------------------------------------------------
 
 local function createMap()
-    -- ROTATED MAP: X is now the long axis, Z is the short axis
-    -- Safe zone on right (high X), collection zone on left (low X)
-    -- X: -100 to +100, Z: -40 to +40
+    -- 800-STUD MAP: X is the long axis (-400 to +400), Z is short axis
+    -- Base zone on right (X >= 300), collection zones spread from X=-400 to X=300
 
-    local MAP_CENTER_X = 0
-    local SAFE_ZONE_X_START = COLLECTION_ZONE_END/2 - SAFE_ZONE_END  -- 50
-
-    -- Main floor
+    -- Main floor (804 x 80 studs)
     local floor = Instance.new("Part")
     floor.Name = "Floor"
-    floor.Size = Vector3.new(COLLECTION_ZONE_END + 4, 2, MAP_WIDTH)
-    floor.Position = Vector3.new(MAP_CENTER_X, -1, 0)
+    floor.Size = Vector3.new(MAP_LENGTH + 4, 2, MAP_WIDTH)
+    floor.Position = Vector3.new(0, -1, 0)
     floor.Anchored = true
     floor.Color = Color3.fromRGB(100, 150, 100)  -- Green grass
     floor.Parent = Workspace
 
-    -- Safe zone (different color) - right side of map
-    local safeZone = Instance.new("Part")
-    safeZone.Name = "SafeZone"
-    safeZone.Size = Vector3.new(SAFE_ZONE_END, 0.1, MAP_WIDTH)
-    safeZone.Position = Vector3.new(COLLECTION_ZONE_END/2 - SAFE_ZONE_END/2, 0.05, 0)  -- X=75
-    safeZone.Anchored = true
-    safeZone.Color = Color3.fromRGB(100, 200, 100)  -- Brighter green
-    safeZone.CanCollide = false
-    safeZone:SetAttribute("IsSafeZone", true)
-    safeZone.Parent = Workspace
+    -- Create zone overlays (semi-transparent colored zones)
+    for i, zone in ipairs(ZONES) do
+        local zoneWidth = zone.xMax - zone.xMin
+        local zoneCenterX = (zone.xMin + zone.xMax) / 2
 
-    -- Collection zone marker - left/center of map
-    local collectionMarker = Instance.new("Part")
-    collectionMarker.Name = "CollectionZone"
-    collectionMarker.Size = Vector3.new(COLLECTION_ZONE_END - SAFE_ZONE_END, 0.1, MAP_WIDTH)
-    collectionMarker.Position = Vector3.new(-SAFE_ZONE_END/2, 0.05, 0)  -- X=-25
-    collectionMarker.Anchored = true
-    collectionMarker.Color = Color3.fromRGB(200, 180, 100)  -- Tan/sandy
-    collectionMarker.CanCollide = false
-    collectionMarker:SetAttribute("IsCollectionZone", true)
-    collectionMarker.Parent = Workspace
+        local zoneOverlay = Instance.new("Part")
+        zoneOverlay.Name = "Zone_" .. zone.name
+        zoneOverlay.Size = Vector3.new(zoneWidth, 0.1, MAP_WIDTH)
+        zoneOverlay.Position = Vector3.new(zoneCenterX, 0.05, 0)
+        zoneOverlay.Anchored = true
+        zoneOverlay.Color = zone.color
+        zoneOverlay.Transparency = 0.7
+        zoneOverlay.CanCollide = false
+        zoneOverlay:SetAttribute("IsZone", true)
+        zoneOverlay:SetAttribute("ZoneName", zone.name)
+        zoneOverlay.Parent = Workspace
+    end
 
-    -- Deposit area (in safe zone, right side)
-    local depositArea = Instance.new("Part")
-    depositArea.Name = "DepositArea"
-    depositArea.Size = Vector3.new(20, 0.2, 20)
-    depositArea.Position = Vector3.new(75, 0.1, 0)
-    depositArea.Anchored = true
-    depositArea.Color = Color3.fromRGB(200, 200, 50)  -- Yellow
-    depositArea.CanCollide = false
-    depositArea:SetAttribute("IsDepositArea", true)
-    depositArea.Parent = Workspace
+    -- Base zone overlay (brighter green, X: 300-400)
+    local baseZone = Instance.new("Part")
+    baseZone.Name = "BaseZone"
+    baseZone.Size = Vector3.new(BASE_ZONE_SIZE, 0.1, MAP_WIDTH)
+    baseZone.Position = Vector3.new(BASE_ZONE_X_START + BASE_ZONE_SIZE / 2, 0.06, 0)  -- X=350
+    baseZone.Anchored = true
+    baseZone.Color = Color3.fromRGB(100, 200, 100)  -- Brighter green
+    baseZone.CanCollide = false
+    baseZone:SetAttribute("IsSafeZone", true)
+    baseZone.Parent = Workspace
 
-    -- Upgrade shop (in safe zone, right side)
+    -- Player base platforms + deposit areas
+    local baseCenterX = getBaseCenterX()
+    for i = 1, BASE_COUNT do
+        local baseZ = getBaseCenterZForIndex(i)
+
+        local basePlatform = Instance.new("Part")
+        basePlatform.Name = "BasePlatform_" .. i
+        basePlatform.Size = Vector3.new(BASE_SIZE_X, BASE_PLATFORM_HEIGHT, BASE_SIZE_Z)
+        basePlatform.Position = Vector3.new(baseCenterX, BASE_PLATFORM_HEIGHT / 2, baseZ)
+        basePlatform.Anchored = true
+        basePlatform.Color = Color3.fromRGB(90, 170, 90)
+        basePlatform.CanCollide = true
+        basePlatform:SetAttribute("IsBase", true)
+        basePlatform:SetAttribute("BaseIndex", i)
+        basePlatform.Parent = Workspace
+
+        local depositArea = Instance.new("Part")
+        depositArea.Name = "DepositArea_" .. i
+        depositArea.Size = Vector3.new(BASE_SIZE_X - 4, 0.1, BASE_SIZE_Z - 4)
+        depositArea.Position = Vector3.new(baseCenterX, BASE_PLATFORM_HEIGHT + 0.05, baseZ)
+        depositArea.Anchored = true
+        depositArea.Color = Color3.fromRGB(200, 200, 50)  -- Yellow
+        depositArea.CanCollide = false
+        depositArea:SetAttribute("IsDepositArea", true)
+        depositArea:SetAttribute("BaseIndex", i)
+        depositArea.Parent = Workspace
+    end
+
+    -- Speed shop (in base zone at X=390)
     local shop = Instance.new("Part")
     shop.Name = "SpeedShop"
     shop.Size = Vector3.new(10, 5, 10)
-    shop.Position = Vector3.new(85, 2.5, -25)
+    shop.Position = Vector3.new(BASE_ZONE_X_START + BASE_ZONE_SIZE - 10, 2.5, BASE_ROW_LENGTH_Z / 2 - BASE_SIZE_Z / 2)
     shop.Anchored = true
     shop.Color = Color3.fromRGB(100, 100, 200)  -- Blue
     shop:SetAttribute("IsShop", true)
     shop.Parent = Workspace
 
-    -- Walls to prevent going out of bounds (rotated)
+    -- Walls to prevent going out of bounds
     local walls = {
         -- Front/back walls (along Z axis edges)
-        {Vector3.new(0, 25, MAP_WIDTH/2 + 1), Vector3.new(COLLECTION_ZONE_END + 4, 50, 2)},   -- Front (Z+)
-        {Vector3.new(0, 25, -MAP_WIDTH/2 - 1), Vector3.new(COLLECTION_ZONE_END + 4, 50, 2)},  -- Back (Z-)
+        {Vector3.new(0, 25, MAP_WIDTH / 2 + 1), Vector3.new(MAP_LENGTH + 4, 50, 2)},   -- Front (Z+)
+        {Vector3.new(0, 25, -MAP_WIDTH / 2 - 1), Vector3.new(MAP_LENGTH + 4, 50, 2)},  -- Back (Z-)
         -- Left/right walls (along X axis edges)
-        {Vector3.new(COLLECTION_ZONE_END/2 + 1, 25, 0), Vector3.new(2, 50, MAP_WIDTH)},       -- Right (X+)
-        {Vector3.new(-COLLECTION_ZONE_END/2 - 1, 25, 0), Vector3.new(2, 50, MAP_WIDTH)},      -- Left (X-)
+        {Vector3.new(MAP_LENGTH / 2 + 1, 25, 0), Vector3.new(2, 50, MAP_WIDTH)},       -- Right (X+, at X=401)
+        {Vector3.new(-MAP_LENGTH / 2 - 1, 25, 0), Vector3.new(2, 50, MAP_WIDTH)},      -- Left (X-, at X=-401)
     }
 
     for i, data in ipairs(walls) do
@@ -509,22 +621,49 @@ local function createMap()
         wall.Parent = Workspace
     end
 
-    print("Map created (rotated): Safe zone (X>=50), Collection zone (X<50)")
+    print("Map created (800-stud): Base zone (X>=350), 6 rarity zones, 8 bases")
 end
 
 --------------------------------------------------------------------------------
 -- BRAINROT SYSTEM
 --------------------------------------------------------------------------------
 
+local function selectRandomZone()
+    -- Calculate total weight
+    local totalWeight = 0
+    for _, zone in ipairs(ZONES) do
+        totalWeight = totalWeight + zone.weight
+    end
+
+    -- Select zone based on weighted random
+    local roll = math.random() * totalWeight
+    local cumulative = 0
+    for _, zone in ipairs(ZONES) do
+        cumulative = cumulative + zone.weight
+        if roll <= cumulative then
+            return zone
+        end
+    end
+
+    -- Fallback to first zone
+    return ZONES[1]
+end
+
 local function spawnBrainrot()
     if #brainrots >= MAX_BRAINROTS then
         return
     end
 
-    -- Random position in collection zone (rotated: X is long axis, Z is short axis)
-    -- Collection zone is X from -100 to 50
-    local x = math.random(-COLLECTION_ZONE_END/2 + 10, COLLECTION_ZONE_END/2 - SAFE_ZONE_END - 10)  -- -90 to 40
-    local z = math.random(-35, 35)
+    -- Select zone based on weights (40% Common, 25% Uncommon, etc.)
+    local zone = selectRandomZone()
+
+    -- Random position within the selected zone
+    local x = math.random(zone.xMin + 5, zone.xMax - 5)
+    local zMin = -math.floor(MAP_WIDTH / 2 - 5)
+    local zMax = math.floor(MAP_WIDTH / 2 - 5)
+    local z = math.random(zMin, zMax)
+
+    local incomeRate = zone.value / 10  -- e.g., value 10 = 1$/sec
 
     local brainrot = Instance.new("Part")
     brainrot.Name = "Brainrot"
@@ -533,36 +672,48 @@ local function spawnBrainrot()
     brainrot.Anchored = true
     brainrot.CanCollide = false
     brainrot.Shape = Enum.PartType.Ball
-    brainrot.Color = Color3.fromRGB(255, 100, 255)  -- Pink/magenta
+    brainrot.Color = zone.color
     brainrot.Material = Enum.Material.Neon
     brainrot:SetAttribute("IsBrainrot", true)
-    brainrot:SetAttribute("Value", BRAINROT_VALUE)
+    brainrot:SetAttribute("Value", zone.value)
+    brainrot:SetAttribute("Zone", zone.name)
 
     -- Add floating label (BillboardGui) so it is always attached
     local billboard = Instance.new("BillboardGui")
     billboard.Name = "BrainrotLabel"
-    billboard.Size = UDim2.new(0, 100, 0, 50)
+    billboard.Size = UDim2.new(0, 120, 0, 60)
     billboard.StudsOffset = Vector3.new(0, 3, 0)
     billboard.AlwaysOnTop = true
     billboard.Parent = brainrot
 
-    -- Name label
+    -- Name label (shows zone name)
     local nameLabel = Instance.new("TextLabel")
     nameLabel.Name = "NameLabel"
-    nameLabel.Size = UDim2.new(1, 0, 0.4, 0)
+    nameLabel.Size = UDim2.new(1, 0, 0.35, 0)
     nameLabel.Position = UDim2.new(0, 0, 0, 0)
-    nameLabel.Text = "Brainrot"
-    nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    nameLabel.Text = zone.name
+    nameLabel.TextColor3 = zone.color
     nameLabel.TextScaled = true
     nameLabel.BackgroundTransparency = 1
     nameLabel.Parent = billboard
 
+    -- Value label
+    local valueLabel = Instance.new("TextLabel")
+    valueLabel.Name = "ValueLabel"
+    valueLabel.Size = UDim2.new(1, 0, 0.3, 0)
+    valueLabel.Position = UDim2.new(0, 0, 0.35, 0)
+    valueLabel.Text = "$" .. zone.value
+    valueLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    valueLabel.TextScaled = true
+    valueLabel.BackgroundTransparency = 1
+    valueLabel.Parent = billboard
+
     -- Income label (green)
     local incomeLabel = Instance.new("TextLabel")
     incomeLabel.Name = "IncomeLabel"
-    incomeLabel.Size = UDim2.new(1, 0, 0.4, 0)
-    incomeLabel.Position = UDim2.new(0, 0, 0.5, 0)
-    incomeLabel.Text = "$" .. (BRAINROT_VALUE / 10) .. "/s"
+    incomeLabel.Size = UDim2.new(1, 0, 0.3, 0)
+    incomeLabel.Position = UDim2.new(0, 0, 0.65, 0)
+    incomeLabel.Text = "$" .. incomeRate .. "/s"
     incomeLabel.TextColor3 = Color3.fromRGB(50, 255, 50)
     incomeLabel.TextScaled = true
     incomeLabel.BackgroundTransparency = 1
@@ -634,8 +785,8 @@ local function depositBrainrots(player)
         return false
     end
 
-    if not isInSafeZone(pos) then
-        print("[Deposit] " .. player.Name .. " not in safe zone (X=" .. pos.X .. ")")
+    if not isAtPlayerBase(player, pos) then
+        print("[Deposit] " .. player.Name .. " not at their base (X=" .. pos.X .. ", Z=" .. pos.Z .. ")")
         return false
     end
 
@@ -654,7 +805,7 @@ local function depositBrainrots(player)
     for _, carried in ipairs(data.carriedBrainrots) do
         local incomeRate = carried.value / 10  -- e.g., value 10 = 1$/sec
         local slotIndex = #data.placedBrainrots + 1
-        placeBrainrotOnBase(carried.part, slotIndex, incomeRate)
+        placeBrainrotOnBase(player, carried.part, slotIndex, incomeRate)
 
         table.insert(data.placedBrainrots, {
             part = carried.part,
@@ -720,9 +871,11 @@ local function spawnPlayer(player)
     if character then
         local hrp = character:FindFirstChild("HumanoidRootPart")
         if hrp then
-            -- Spawn in safe zone (rotated: safe zone is at high X values)
-            hrp.Position = Vector3.new(75, 3, 0)
+            -- Spawn at player's base (per-player Z offset)
+            local spawnPos = getPlayerSpawnPosition(player)
+            hrp.CFrame = CFrame.new(spawnPos.X, spawnPos.Y, spawnPos.Z)
             hrp.Velocity = Vector3.new(0, 0, 0)
+            print("[Spawn] " .. player.Name .. " spawned at (" .. spawnPos.X .. ", " .. spawnPos.Y .. ", " .. spawnPos.Z .. ")")
         end
     end
 
@@ -731,7 +884,9 @@ end
 
 local function initializePlayer(player)
     -- Load saved data from DataStore (yields but works in coroutine)
-    loadPlayerData(player)
+    if not loadPlayerData(player) then
+        return
+    end
 
     -- Create GUI
     createPlayerGUI(player)
@@ -741,9 +896,17 @@ local function initializePlayer(player)
         -- Wait for HumanoidRootPart
         local hrp = character:WaitForChild("HumanoidRootPart", 5)
         if hrp then
-            hrp.Position = Vector3.new(75, 3, 0)
+            local spawnPos = getPlayerSpawnPosition(player)
+            hrp.CFrame = CFrame.new(spawnPos.X, spawnPos.Y, spawnPos.Z)
             hrp.Velocity = Vector3.new(0, 0, 0)
-            print("[Spawn] " .. player.Name .. " spawned at (75, 3, 0)")
+            print("[Spawn] " .. player.Name .. " spawned at (" .. spawnPos.X .. ", " .. spawnPos.Y .. ", " .. spawnPos.Z .. ")")
+        end
+
+        -- Disable player-to-player collisions
+        for _, part in ipairs(character:GetChildren()) do
+            if part:IsA("BasePart") then
+                part.CanCollide = false
+            end
         end
 
         -- Clear carried brainrots on respawn (they're lost on death)
@@ -851,17 +1014,26 @@ Players.PlayerRemoving:Connect(function(player)
     -- Clean up placed brainrots
     local data = getPlayerData(player)
     if data then
-        for _, placed in ipairs(data.placedBrainrots) do
-            if placed.part and placed.part.Parent then
-                placed.part:Destroy()
-            end
-        end
+        savedPlacedBrainrots[player.UserId] = data.placedBrainrots
         for _, carried in ipairs(data.carriedBrainrots) do
             if carried.part and carried.part.Parent then
                 carried.part:Destroy()
             end
         end
+        for _, placed in ipairs(data.placedBrainrots) do
+            if placed.part and placed.part.Parent then
+                placed.part.Anchored = true
+                placed.part.CanCollide = false
+                placed.part.Position = STORED_BRAINROT_POSITION
+            end
+        end
     end
+
+    local baseIndex = userBaseIndex[player.UserId]
+    if baseIndex then
+        baseSlots[baseIndex] = nil
+    end
+    userBaseIndex[player.UserId] = nil
 
     playerData[player.UserId] = nil
     incomeAccumulator[player.UserId] = nil

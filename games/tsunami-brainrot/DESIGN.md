@@ -120,19 +120,45 @@ Waves approach from the far end of the map toward the base.
 | Rarity zones | No | Yes (6 zones) |
 | Wave gaps/shelters | No | Yes |
 
-## Map Layout (Rotated)
+## Map Layout (800-stud expanded)
 
 ```
-X axis (long): -100 to +100
-Z axis (short): -40 to +40
+X axis (long): -400 to +400 (800 studs total)
+Z axis (short): -40 to +40 (80 studs)
 
-[Secret Zone] [Void] [Lava] [Snowy] [Sandy] [Normal] [BASE]
-   X: -100      -80    -60    -40     -20      0-50   50-100
+[Secret]    [Legendary]  [Epic]      [Rare]      [Uncommon]  [Common]    [BASE]
+X: -400     X: -300      X: -150     X: 0        X: 150      X: 250      X: 350-400
+to -300     to -150      to 0        to 150      to 250      to 350
 ```
 
-- Base is at high X values (right side)
+### Rarity Zones
+
+| Zone      | X Range      | Value | Income/s | Color        | Spawn Weight |
+|-----------|--------------|-------|----------|--------------|--------------|
+| Common    | 250 to 350   | $10   | $1/s     | Pink         | 40%          |
+| Uncommon  | 150 to 250   | $30   | $3/s     | Blue         | 25%          |
+| Rare      | 0 to 150     | $80   | $8/s     | Purple       | 15%          |
+| Epic      | -150 to 0    | $200  | $20/s    | Orange       | 10%          |
+| Legendary | -300 to -150 | $500  | $50/s    | Yellow       | 7%           |
+| Secret    | -400 to -300 | $1500 | $150/s   | White        | 3%           |
+
+### Base Zone (X: 350-400)
+
+- Safe from tsunamis
+- Per-player deposit areas (Z offset by player index * 50)
+- Deposit area at X=375
+- Speed shop at X=390
+
+### Per-Player Bases
+
+- Each player gets their own base area offset in Z
+- Player 0: Z=0, Player 1: Z=50, Player 2: Z=100, etc.
+- Deposit only works at your own base area (X: 360-390, Z: baseOffset ± 15)
+- Placed brainrots appear in player's personal area
+
+- Base is at high X values (right side, X >= 350)
 - Waves approach from low X (left side)
-- Player spawns at X=75 (in base)
+- Player spawns at X=375, Z=playerIndex*50
 
 ## Progression Flow
 

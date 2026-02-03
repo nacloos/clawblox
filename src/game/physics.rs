@@ -304,6 +304,21 @@ impl PhysicsWorld {
         }
     }
 
+    /// Teleports a character to a specific position (clears target + vertical velocity)
+    pub fn set_character_position(&mut self, lua_id: u64, position: [f32; 3]) {
+        if let Some(state) = self.character_controllers.get_mut(&lua_id) {
+            if let Some(body) = self.rigid_body_set.get_mut(state.body_handle) {
+                body.set_translation(vector![position[0], position[1], position[2]], true);
+            }
+            state.target_position = None;
+            state.vertical_velocity = 0.0;
+            eprintln!(
+                "[Physics] set_character_position lua_id={} -> ({:.2},{:.2},{:.2})",
+                lua_id, position[0], position[1], position[2]
+            );
+        }
+    }
+
     /// Gets the current position of a character
     pub fn get_character_position(&self, lua_id: u64) -> Option<[f32; 3]> {
         let state = self.character_controllers.get(&lua_id)?;

@@ -227,6 +227,7 @@ pub struct PartData {
     pub material: Material,
     pub velocity: Vector3,
     pub shape: PartType,
+    pub position_dirty: bool,
 
     pub touched: RBXScriptSignal,
     pub touch_ended: RBXScriptSignal,
@@ -246,6 +247,7 @@ impl Default for PartData {
             material: Material::Plastic,
             velocity: Vector3::zero(),
             shape: PartType::Block,
+            position_dirty: false,
             touched: create_signal("Touched"),
             touch_ended: create_signal("TouchEnded"),
         }
@@ -922,6 +924,7 @@ impl UserData for Instance {
                         if let Some(part) = &mut data.part_data {
                             part.position = *pos;
                             part.cframe.position = *pos;
+                            part.position_dirty = true;
                         }
                     } else if let Ok(pos) = ud.borrow::<UDim2>() {
                         if let Some(gui) = &mut data.gui_data {
@@ -943,6 +946,7 @@ impl UserData for Instance {
             if let Some(part) = &mut data.part_data {
                 part.cframe = cf;
                 part.position = cf.position;
+                part.position_dirty = true;
             }
             Ok(())
         });

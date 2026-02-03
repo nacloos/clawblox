@@ -1,6 +1,6 @@
 use crossbeam_channel::{Receiver, Sender};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -25,6 +25,7 @@ pub struct GameInstance {
     pub players: HashMap<Uuid, u64>, // agent_id -> lua player user_id
     pub player_hrp_ids: HashMap<Uuid, u64>, // agent_id -> HumanoidRootPart lua_id
     pub player_names: HashMap<Uuid, String>, // agent_id -> player name
+    observation_log_counts: Mutex<HashMap<Uuid, u8>>,
     pub action_receiver: Receiver<QueuedAction>,
     pub action_sender: Sender<QueuedAction>,
     pub status: GameStatus,
@@ -85,6 +86,7 @@ impl GameInstance {
             players: HashMap::new(),
             player_hrp_ids: HashMap::new(),
             player_names: HashMap::new(),
+            observation_log_counts: Mutex::new(HashMap::new()),
             action_receiver,
             action_sender,
             status: GameStatus::Playing,
@@ -170,6 +172,9 @@ impl GameInstance {
             }
             // Remove player name
             self.player_names.remove(&agent_id);
+            if let Ok(mut counts) = self.observation_log_counts.lock() {
+                counts.remove(&agent_id);
+            }
 
             if let Some(runtime) = &self.lua_runtime {
                 if let Some(player) = runtime.players().get_player_by_user_id(user_id) {
@@ -271,14 +276,28 @@ impl GameInstance {
         let mut active_lua_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
         for part in descendants {
-            let data = part.data.lock().unwrap();
+            let mut data = part.data.lock().unwrap();
 
-            if let Some(part_data) = &data.part_data {
-                let lua_id = data.id.0;
+            let lua_id = data.id.0;
+            if let Some(part_data) = data.part_data.as_mut() {
                 active_lua_ids.insert(lua_id);
 
-                // Skip parts managed by character controllers
+                // Character-controlled parts: allow Lua-driven teleports (spawn) to sync into physics
                 if self.physics.has_character(lua_id) {
+                    if part_data.position_dirty {
+                        eprintln!(
+                            "[Sync] Teleport character lua_id={} -> ({:.2},{:.2},{:.2})",
+                            lua_id,
+                            part_data.position.x,
+                            part_data.position.y,
+                            part_data.position.z
+                        );
+                        self.physics.set_character_position(
+                            lua_id,
+                            [part_data.position.x, part_data.position.y, part_data.position.z],
+                        );
+                        part_data.position_dirty = false;
+                    }
                     continue;
                 }
 
@@ -340,6 +359,9 @@ impl GameInstance {
             if let Some(part_data) = &mut data.part_data {
                 // Check if this is a character-controlled part
                 if self.physics.has_character(lua_id) {
+                    if part_data.position_dirty {
+                        continue;
+                    }
                     if let Some(pos) = self.physics.get_character_position(lua_id) {
                         part_data.position.x = pos[0];
                         part_data.position.y = pos[1];
@@ -577,6 +599,24 @@ impl GameInstance {
 
         // Get position from character's HumanoidRootPart
         let position = self.get_player_position(agent_id).unwrap_or([0.0, 3.0, 0.0]);
+
+        {
+            let mut counts = self.observation_log_counts.lock().unwrap();
+            let count = counts.entry(agent_id).or_insert(0);
+            if *count < 5 {
+                let name = self.player_names.get(&agent_id).cloned().unwrap_or_default();
+                eprintln!(
+                    "[Obs] tick={} agent={} name={} pos=({:.2},{:.2},{:.2})",
+                    self.tick,
+                    agent_id,
+                    name,
+                    position[0],
+                    position[1],
+                    position[2]
+                );
+                *count += 1;
+            }
+        }
 
         // Get health from humanoid
         let health = self.get_player_health(agent_id).unwrap_or(100);
