@@ -5,13 +5,14 @@ use std::time::Instant;
 use uuid::Uuid;
 
 use super::async_bridge::AsyncBridge;
+use super::constants::physics as consts;
 use super::lua::instance::{attributes_to_json, ClassName, Instance, TextXAlignment, TextYAlignment};
 use super::lua::services::AgentInput;
 use super::lua::LuaRuntime;
 use super::physics::PhysicsWorld;
 
 /// Walk speed for player characters (studs per second)
-const WALK_SPEED: f32 = 16.0;
+const WALK_SPEED: f32 = consts::WALK_SPEED;
 
 /// A game instance that runs Lua scripts with Rapier physics.
 /// This is the Roblox-like architecture where:
@@ -26,6 +27,7 @@ pub struct GameInstance {
     pub player_hrp_ids: HashMap<Uuid, u64>, // agent_id -> HumanoidRootPart lua_id
     pub player_names: HashMap<Uuid, String>, // agent_id -> player name
     observation_log_counts: Mutex<HashMap<Uuid, u8>>,
+    humanoid_warn_counts: Mutex<HashMap<Uuid, u8>>,
     pub action_receiver: Receiver<QueuedAction>,
     pub action_sender: Sender<QueuedAction>,
     pub status: GameStatus,
@@ -87,6 +89,7 @@ impl GameInstance {
             player_hrp_ids: HashMap::new(),
             player_names: HashMap::new(),
             observation_log_counts: Mutex::new(HashMap::new()),
+            humanoid_warn_counts: Mutex::new(HashMap::new()),
             action_receiver,
             action_sender,
             status: GameStatus::Playing,
@@ -175,6 +178,9 @@ impl GameInstance {
             if let Ok(mut counts) = self.observation_log_counts.lock() {
                 counts.remove(&agent_id);
             }
+            if let Ok(mut counts) = self.humanoid_warn_counts.lock() {
+                counts.remove(&agent_id);
+            }
 
             if let Some(runtime) = &self.lua_runtime {
                 if let Some(player) = runtime.players().get_player_by_user_id(user_id) {
@@ -218,11 +224,21 @@ impl GameInstance {
         // Sync new/changed Lua parts to physics (skip character-controlled parts)
         self.sync_lua_to_physics();
 
-        // Update query pipeline so character controller can detect collisions with new geometry
-        self.physics.query_pipeline.update(&self.physics.collider_set);
+        // Process agent inputs (fire InputReceived events)
+        // Do this before syncing MoveTo targets so movement can apply in the same tick.
+        if let Some(runtime) = &self.lua_runtime {
+            if let Err(e) = runtime.process_agent_inputs() {
+                eprintln!("[Lua Error] Failed to process agent inputs: {}", e);
+            }
+        }
 
         // Sync Lua humanoid MoveTo targets to physics character controllers
         self.sync_humanoid_move_targets();
+
+        // Update query pipeline BEFORE character movement so move_shape has current collision state
+        // This is necessary because the previous tick's physics.step moved the character,
+        // and move_shape needs to see the updated positions.
+        self.physics.query_pipeline.update(&self.physics.collider_set);
 
         // Update character controller movement
         self.update_character_movement(dt);
@@ -235,13 +251,6 @@ impl GameInstance {
 
         // Process weld constraints (update Part1 positions based on Part0)
         self.process_welds();
-
-        // Process agent inputs (fire InputReceived events)
-        if let Some(runtime) = &self.lua_runtime {
-            if let Err(e) = runtime.process_agent_inputs() {
-                eprintln!("[Lua Error] Failed to process agent inputs: {}", e);
-            }
-        }
 
         // Run Lua Heartbeat
         if let Some(runtime) = &self.lua_runtime {
@@ -302,6 +311,10 @@ impl GameInstance {
                 }
 
                 if !self.physics.has_part(lua_id) {
+                    // Skip parts with CanCollide=false - they don't need physics
+                    if !part_data.can_collide {
+                        continue;
+                    }
                     // New part - add to physics
                     self.physics.add_part(
                         lua_id,
@@ -460,30 +473,69 @@ impl GameInstance {
         // For each player, check if their humanoid has a move target
         for (&agent_id, &user_id) in &self.players {
             let Some(&hrp_id) = self.player_hrp_ids.get(&agent_id) else {
+                if let Ok(mut counts) = self.humanoid_warn_counts.lock() {
+                    let count = counts.entry(agent_id).or_insert(0);
+                    if *count < 3 {
+                        eprintln!("[MoveTo WARN] Missing HRP for agent {}", agent_id);
+                        *count += 1;
+                    }
+                }
                 continue;
             };
 
             // Get player's character and humanoid
             let Some(player) = runtime.players().get_player_by_user_id(user_id) else {
+                if let Ok(mut counts) = self.humanoid_warn_counts.lock() {
+                    let count = counts.entry(agent_id).or_insert(0);
+                    if *count < 3 {
+                        eprintln!("[MoveTo WARN] Missing player for agent {}", agent_id);
+                        *count += 1;
+                    }
+                }
                 continue;
             };
 
             let player_data = player.data.lock().unwrap();
             let Some(character_weak) = player_data.player_data.as_ref().and_then(|pd| pd.character.as_ref()) else {
+                if let Ok(mut counts) = self.humanoid_warn_counts.lock() {
+                    let count = counts.entry(agent_id).or_insert(0);
+                    if *count < 3 {
+                        eprintln!("[MoveTo WARN] Missing character for agent {}", agent_id);
+                        *count += 1;
+                    }
+                }
                 continue;
             };
             let Some(character_ref) = character_weak.upgrade() else {
+                if let Ok(mut counts) = self.humanoid_warn_counts.lock() {
+                    let count = counts.entry(agent_id).or_insert(0);
+                    if *count < 3 {
+                        eprintln!("[MoveTo WARN] Character ref expired for agent {}", agent_id);
+                        *count += 1;
+                    }
+                }
                 continue;
             };
             drop(player_data);
 
-            // Find humanoid in character
+            // Find humanoid in character and process move target
             let character_data = character_ref.lock().unwrap();
+            let mut found_humanoid = false;
             for child_ref in &character_data.children {
                 let mut child_data = child_ref.lock().unwrap();
                 if let Some(humanoid) = &mut child_data.humanoid_data {
+                    found_humanoid = true;
                     if let Some(target) = humanoid.move_to_target.take() {
                         self.physics.set_character_target(hrp_id, Some([target.x, target.y, target.z]));
+                    }
+                }
+            }
+            if !found_humanoid {
+                if let Ok(mut counts) = self.humanoid_warn_counts.lock() {
+                    let count = counts.entry(agent_id).or_insert(0);
+                    if *count < 3 {
+                        eprintln!("[MoveTo WARN] No humanoid found for agent {}", agent_id);
+                        *count += 1;
                     }
                 }
             }
@@ -512,61 +564,28 @@ impl GameInstance {
         }
     }
 
-    /// Updates character controller movement towards targets
-    /// Uses raycast for ground detection (Roblox-style) and character controller for horizontal collision
+    /// Updates character controller movement towards targets.
+    /// Uses Rapier's kinematic character controller for full 3D translation.
     fn update_character_movement(&mut self, dt: f32) {
-        const CHARACTER_HALF_HEIGHT: f32 = 2.5; // Capsule half-height (5.0 total height / 2)
-        const SNAP_THRESHOLD: f32 = 0.5; // Max distance to snap to ground
-        const MAX_RAYCAST_DIST: f32 = 10.0; // How far down to look for ground
-        const GROUND_OFFSET: f32 = 0.02; // Small gap to prevent move_shape detecting floor penetration
-
         // Collect HRP IDs to process (avoid borrow issues)
         let hrp_ids: Vec<u64> = self.player_hrp_ids.values().copied().collect();
 
         for hrp_id in hrp_ids {
             // Get current position, target, and vertical velocity
-            let (current_pos, target, vertical_velocity, body_handle) = {
+            let (current_pos, target, vertical_velocity, grounded) = {
                 let Some(state) = self.physics.get_character_state(hrp_id) else {
                     continue;
                 };
                 let Some(pos) = self.physics.get_character_position(hrp_id) else {
                     continue;
                 };
-                (pos, state.target_position, state.vertical_velocity, state.body_handle)
+                (pos, state.target_position, state.vertical_velocity, state.grounded)
             };
 
-            // 1. Ground detection via raycast (current-frame, no delay)
-            let ray_origin = [current_pos[0], current_pos[1], current_pos[2]];
-            let ground_hit = self.physics.raycast_down(ray_origin, MAX_RAYCAST_DIST, Some(body_handle));
-
-            // 2. Vertical movement based on ground detection
             let gravity = self.physics.gravity.y;
-            let (new_y, new_vertical_velocity) = if let Some((distance, ground_y)) = ground_hit {
-                // Distance from character center to ground
-                let feet_clearance = distance - CHARACTER_HALF_HEIGHT;
+            let mut new_vertical_velocity = vertical_velocity + gravity * dt;
 
-                if feet_clearance <= SNAP_THRESHOLD && vertical_velocity <= 0.0 {
-                    // Grounded - snap to ground (with small offset to prevent move_shape penetration)
-                    (ground_y + CHARACTER_HALF_HEIGHT + GROUND_OFFSET, 0.0)
-                } else {
-                    // Above ground or moving up - apply gravity
-                    let new_vel = vertical_velocity + gravity * dt;
-                    let new_y = current_pos[1] + new_vel * dt;
-                    (new_y, new_vel)
-                }
-            } else {
-                // No ground detected - falling
-                let new_vel = vertical_velocity + gravity * dt;
-                let new_y = current_pos[1] + new_vel * dt;
-                (new_y, new_vel)
-            };
-
-            // Update vertical velocity in state
-            if let Some(state) = self.physics.get_character_state_mut(hrp_id) {
-                state.vertical_velocity = new_vertical_velocity;
-            }
-
-            // 3. Calculate horizontal movement towards target
+            // Calculate horizontal movement towards target
             let mut dx = 0.0f32;
             let mut dz = 0.0f32;
 
@@ -585,8 +604,27 @@ impl GameInstance {
                 }
             }
 
-            // 4. Apply movement: horizontal with collision + vertical direct
-            self.physics.move_character_and_set_y(hrp_id, dx, dz, new_y, dt);
+            // When grounded, use zero vertical component - snap_to_ground handles staying grounded
+            // Only apply gravity when airborne
+            // Note: The -0.001 epsilon was causing floor collisions that blocked horizontal movement
+            let desired_y = if grounded && new_vertical_velocity <= 0.0 {
+                0.0 // snap_to_ground keeps character on ground; no downward component needed
+            } else {
+                new_vertical_velocity * dt
+            };
+            let desired = [dx, desired_y, dz];
+            if let Some(movement) = self.physics.move_character(hrp_id, desired, dt) {
+                if movement.grounded && new_vertical_velocity < 0.0 {
+                    new_vertical_velocity = 0.0;
+                }
+                if desired[1] > 0.0 && movement.translation.y + 1.0e-4 < desired[1] {
+                    new_vertical_velocity = 0.0;
+                }
+            }
+
+            if let Some(state) = self.physics.get_character_state_mut(hrp_id) {
+                state.vertical_velocity = new_vertical_velocity;
+            }
         }
     }
 
@@ -1292,6 +1330,72 @@ mod tests {
     }
 
     #[test]
+    fn test_player_moveto_via_lua_input() {
+        // This test mimics what the Python test does: send MoveTo via agent input
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        // Load a simple script that creates a floor AND handles MoveTo input
+        instance.load_script(r#"
+            local AgentInputService = game:GetService("AgentInputService")
+            local Players = game:GetService("Players")
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(100, 1, 100)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            if AgentInputService then
+                AgentInputService.InputReceived:Connect(function(player, inputType, data)
+                    if inputType == "MoveTo" then
+                        local humanoid = player.Character and player.Character:FindFirstChild("Humanoid")
+                        if humanoid and data and data.position then
+                            local pos = data.position
+                            print("[Test] MoveTo " .. player.Name .. " -> (" .. pos[1] .. ", " .. pos[2] .. ", " .. pos[3] .. ")")
+                            humanoid:MoveTo(Vector3.new(pos[1], pos[2], pos[3]))
+                        end
+                    end
+                end)
+            end
+        "#);
+
+        // Add a player
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "TestPlayer"));
+
+        let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+
+        // Don't wait for landing - queue MoveTo immediately like the working test
+        let initial_pos = instance.physics.get_character_position(hrp_id).unwrap();
+        println!("Initial position: {:?}", initial_pos);
+
+        // Queue a MoveTo input via agent input service (like Python test does)
+        let user_id = *instance.players.get(&agent_id).unwrap();
+        instance.queue_agent_input(user_id, "MoveTo".to_string(), serde_json::json!({"position": [20.0, initial_pos[1], 0.0]}));
+
+        // Run 120 ticks (2 seconds)
+        for i in 0..120 {
+            instance.tick();
+            if i % 30 == 0 {
+                let pos = instance.physics.get_character_position(hrp_id).unwrap();
+                println!("Tick {}: pos=({:.2}, {:.2}, {:.2})", i, pos[0], pos[1], pos[2]);
+            }
+        }
+
+        let final_pos = instance.physics.get_character_position(hrp_id).unwrap();
+        println!("Final position: {:?}", final_pos);
+
+        let moved_x = final_pos[0] - initial_pos[0];
+        let moved_z = final_pos[2] - initial_pos[2];
+        let horizontal_distance = (moved_x * moved_x + moved_z * moved_z).sqrt();
+        println!("Horizontal distance moved: {}", horizontal_distance);
+
+        // Should move significantly (at 16 studs/sec, should move ~32 studs in 2 sec)
+        assert!(horizontal_distance > 10.0, "Player should have moved towards target via Lua MoveTo");
+    }
+
+    #[test]
     fn test_observation_includes_world_entities() {
         let mut instance = GameInstance::new(Uuid::new_v4(), None);
 
@@ -1368,22 +1472,11 @@ mod tests {
         let hrp_a = *instance.player_hrp_ids.get(&agent_a).unwrap();
         let hrp_b = *instance.player_hrp_ids.get(&agent_b).unwrap();
 
-        // Use set_character_target and tick to move them (or directly set position)
-        instance.physics.move_character_and_set_y(hrp_a, 0.0, 0.0, 2.0, 0.0);
-        instance.physics.move_character_and_set_y(hrp_b, 0.0, 0.0, 2.0, 0.0);
+        // Ensure characters have physics bodies initialized
+        instance.physics.set_character_position(hrp_a, [0.0, 2.0, -10.0]);
+        instance.physics.set_character_position(hrp_b, [0.0, 2.0, 10.0]);
 
         // Manually set positions behind the wall
-        if let Some(state) = instance.physics.get_character_state(hrp_a) {
-            if let Some(body) = instance.physics.rigid_body_set.get_mut(state.body_handle) {
-                body.set_translation(rapier3d::prelude::vector![0.0, 2.0, -10.0], true);
-            }
-        }
-        if let Some(state) = instance.physics.get_character_state(hrp_b) {
-            if let Some(body) = instance.physics.rigid_body_set.get_mut(state.body_handle) {
-                body.set_translation(rapier3d::prelude::vector![0.0, 2.0, 10.0], true);
-            }
-        }
-
         // Update query pipeline
         instance.physics.query_pipeline.update(&instance.physics.collider_set);
 

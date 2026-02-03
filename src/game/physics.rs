@@ -1,6 +1,10 @@
-use rapier3d::control::{CharacterAutostep, CharacterLength, KinematicCharacterController};
+use rapier3d::control::{
+    CharacterAutostep, CharacterLength, EffectiveCharacterMovement, KinematicCharacterController,
+};
 use rapier3d::prelude::*;
 use std::collections::HashMap;
+
+use super::constants::physics as consts;
 
 // Collision groups for Roblox-style physics behavior
 // Characters don't collide with each other, only with static geometry
@@ -15,6 +19,7 @@ pub struct CharacterControllerState {
     pub body_handle: RigidBodyHandle,
     pub vertical_velocity: f32,
     pub target_position: Option<[f32; 3]>,
+    pub grounded: bool,
 }
 
 /// Wrapper around Rapier3D physics world for game physics simulation.
@@ -42,10 +47,10 @@ pub struct PhysicsWorld {
 }
 
 impl PhysicsWorld {
-    /// Creates a new physics world with Roblox default gravity (196.2 studs/s^2)
+    /// Creates a new physics world with default gravity
     pub fn new() -> Self {
         Self {
-            gravity: vector![0.0, -196.2, 0.0], // Roblox default gravity
+            gravity: vector![0.0, -consts::DEFAULT_GRAVITY, 0.0],
             rigid_body_set: RigidBodySet::new(),
             collider_set: ColliderSet::new(),
             integration_parameters: IntegrationParameters::default(),
@@ -271,16 +276,16 @@ impl PhysicsWorld {
             .collider_set
             .insert_with_parent(collider, body_handle, &mut self.rigid_body_set);
 
-        // Create character controller with Roblox-like settings
+        // Create character controller with consistent settings (same as move_character)
         let mut controller = KinematicCharacterController::default();
         controller.autostep = Some(CharacterAutostep {
-            max_height: CharacterLength::Absolute(0.5),
-            min_width: CharacterLength::Absolute(0.3),
-            include_dynamic_bodies: false,
+            max_height: CharacterLength::Absolute(consts::AUTOSTEP_MAX_HEIGHT),
+            min_width: CharacterLength::Absolute(consts::AUTOSTEP_MIN_WIDTH),
+            include_dynamic_bodies: true,
         });
         controller.max_slope_climb_angle = 45.0_f32.to_radians();
-        controller.snap_to_ground = Some(CharacterLength::Absolute(0.1));
-        controller.offset = CharacterLength::Absolute(0.01);
+        controller.min_slope_slide_angle = 30.0_f32.to_radians();
+        controller.snap_to_ground = Some(CharacterLength::Absolute(consts::SNAP_TO_GROUND));
 
         let state = CharacterControllerState {
             controller,
@@ -288,6 +293,7 @@ impl PhysicsWorld {
             body_handle,
             vertical_velocity: 0.0,
             target_position: None,
+            grounded: false,
         };
 
         self.character_controllers.insert(lua_id, state);
@@ -312,10 +318,6 @@ impl PhysicsWorld {
             }
             state.target_position = None;
             state.vertical_velocity = 0.0;
-            eprintln!(
-                "[Physics] set_character_position lua_id={} -> ({:.2},{:.2},{:.2})",
-                lua_id, position[0], position[1], position[2]
-            );
         }
     }
 
@@ -433,52 +435,68 @@ impl PhysicsWorld {
         }
     }
 
-    /// Moves a character horizontally (with wall collision) and sets Y position directly
-    /// This combines horizontal movement and vertical positioning in one operation
-    pub fn move_character_and_set_y(&mut self, lua_id: u64, dx: f32, dz: f32, new_y: f32, dt: f32) -> Option<[f32; 3]> {
+    /// Moves a character using the kinematic controller for full 3D translation.
+    pub fn move_character(
+        &mut self,
+        lua_id: u64,
+        desired_translation: [f32; 3],
+        dt: f32,
+    ) -> Option<EffectiveCharacterMovement> {
         let state = self.character_controllers.get(&lua_id)?;
         let body_handle = state.body_handle;
         let collider_handle = state.collider_handle;
 
         let body = self.rigid_body_set.get(body_handle)?;
         let collider = self.collider_set.get(collider_handle)?;
+        let shape = collider.shape();
 
-        let current_pos = *body.translation();
+        // Use full position (translation + rotation) like physics-world
+        let current_pos = *body.position();
 
-        // Calculate horizontal movement with collision
-        // Use collision groups so characters only collide with static geometry
-        let desired = vector![dx, 0.0, dz];
+        // Create fresh controller each step (like physics-world)
+        let controller = KinematicCharacterController {
+            // Larger offset prevents getting stuck when sliding against surfaces
+            offset: CharacterLength::Absolute(0.05),
+            autostep: Some(CharacterAutostep {
+                max_height: CharacterLength::Absolute(consts::AUTOSTEP_MAX_HEIGHT),
+                min_width: CharacterLength::Absolute(consts::AUTOSTEP_MIN_WIDTH),
+                include_dynamic_bodies: true,
+            }),
+            max_slope_climb_angle: 45.0_f32.to_radians(),
+            min_slope_slide_angle: 30.0_f32.to_radians(),
+            snap_to_ground: Some(CharacterLength::Absolute(consts::SNAP_TO_GROUND)),
+            ..Default::default()
+        };
+
+        // Match physics-world's collision filter: collide with all except other characters
+        let desired = vector![desired_translation[0], desired_translation[1], desired_translation[2]];
         let filter = QueryFilter::default()
             .exclude_rigid_body(body_handle)
-            .groups(InteractionGroups::new(GROUP_CHARACTER, GROUP_STATIC));
+            .groups(InteractionGroups::new(GROUP_STATIC, Group::ALL & !GROUP_CHARACTER));
 
-        let movement = state.controller.move_shape(
+        let movement = controller.move_shape(
             dt,
             &self.rigid_body_set,
             &self.collider_set,
             &self.query_pipeline,
-            collider.shape(),
-            &Isometry::translation(current_pos.x, current_pos.y, current_pos.z),
+            shape,
+            &current_pos,
             desired,
             filter,
-            |_| {},
+            |_collision| {},
         );
 
-        // Combine: horizontal from controller, vertical set directly
-        let new_pos = vector![
-            current_pos.x + movement.translation.x,
-            new_y,
-            current_pos.z + movement.translation.z
-        ];
+        // Use set_next_kinematic_translation like physics-world
+        // This schedules the movement for the next physics step
+        let new_pos = current_pos.translation.vector + movement.translation;
 
-        // Use set_translation directly (not set_next_kinematic_translation) because:
-        // - We already computed collision-corrected movement via move_shape()
-        // - set_next_kinematic_translation schedules for NEXT step, causing 1-frame delay
-        // - Each frame we'd overwrite the previous scheduled position before it applied
         let body = self.rigid_body_set.get_mut(body_handle)?;
-        body.set_translation(new_pos, true);
+        body.set_next_kinematic_translation(new_pos);
 
-        Some([new_pos.x, new_pos.y, new_pos.z])
+        if let Some(state) = self.character_controllers.get_mut(&lua_id) {
+            state.grounded = movement.grounded;
+        }
+        Some(movement)
     }
 }
 
@@ -495,7 +513,7 @@ mod tests {
     #[test]
     fn test_physics_world_creation() {
         let world = PhysicsWorld::new();
-        assert_eq!(world.gravity.y, -196.2);
+        assert_eq!(world.gravity.y, -consts::DEFAULT_GRAVITY);
     }
 
     #[test]
@@ -574,13 +592,344 @@ mod tests {
         assert!(distance > 5.0 && distance < 6.0, "Distance to floor should be ~5.5, got {}", distance);
         assert!((ground_y - 0.5).abs() < 0.1, "Ground Y should be ~0.5 (floor top), got {}", ground_y);
 
-        // Test horizontal movement with Y positioning
-        let new_y = ground_y + 2.5; // half-height (5.0 / 2)
-        world.move_character_and_set_y(char_id, 1.0, 0.0, new_y, 1.0 / 60.0);
+        // Test movement with controller translation (should not suppress horizontal)
+        if let Some(state) = world.get_character_state_mut(char_id) {
+            state.grounded = true;
+        }
+        let movement = world.move_character(char_id, [1.0, -0.05, 0.0], 1.0 / 60.0).unwrap();
         world.step(1.0 / 60.0);
 
         let final_pos = world.get_character_position(char_id).unwrap();
+        assert!(movement.translation.x.abs() > 0.0, "Horizontal movement should be applied");
         assert!(final_pos[0] > 0.5, "Should have moved in X");
-        assert!((final_pos[1] - new_y).abs() < 0.1, "Y should be set directly");
+    }
+
+    #[test]
+    fn test_character_horizontal_movement_when_grounded() {
+        let mut world = PhysicsWorld::new();
+
+        world.add_part(
+            1,
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [100.0, 1.0, 100.0],
+            true,
+            true,
+        );
+
+        let char_id = 200;
+        world.add_character(char_id, [0.0, 3.0, 0.0], 1.0, 5.0);
+        if let Some(state) = world.get_character_state_mut(char_id) {
+            state.grounded = true;
+        }
+
+        let movement = world.move_character(char_id, [1.0, -0.05, 0.0], 1.0 / 60.0).unwrap();
+        assert!(
+            movement.translation.x.abs() > 0.0 || movement.translation.z.abs() > 0.0,
+            "Horizontal movement should not be suppressed when grounded"
+        );
+    }
+
+    #[test]
+    fn test_character_movement_after_landing_on_thin_platform() {
+        let mut world = PhysicsWorld::new();
+
+        // Floor at Y=0 (like the game)
+        world.add_part(
+            1,
+            [0.0, -1.0, 0.0],       // center at Y=-1
+            [0.0, 0.0, 0.0, 1.0],
+            [100.0, 2.0, 100.0],    // top at Y=0
+            true,
+            true,
+        );
+
+        // Thin platform at Y=0.1 (like base platform in tsunami game)
+        world.add_part(
+            2,
+            [0.0, 0.1, 0.0],        // center at Y=0.1
+            [0.0, 0.0, 0.0, 1.0],
+            [30.0, 0.2, 30.0],      // top at Y=0.2
+            true,
+            true,
+        );
+
+        // Character spawns at Y=3 (above platform)
+        let char_id = 100;
+        world.add_character(char_id, [0.0, 3.0, 0.0], 1.0, 5.0);
+
+        // Simulate falling (like the game does)
+        let dt = 1.0 / 60.0;
+        for _ in 0..30 {  // About 0.5 seconds of falling
+            world.query_pipeline.update(&world.collider_set);
+            let gravity_movement: f32 = -196.2 * dt * dt;  // Gravity acceleration
+            world.move_character(char_id, [0.0, gravity_movement.max(-0.2), 0.0], dt);
+            world.step(dt);
+        }
+
+        // Character should now be grounded
+        let pos_after_landing = world.get_character_position(char_id).unwrap();
+        println!("Position after landing: {:?}", pos_after_landing);
+
+        // Try horizontal movement (like the game does)
+        world.query_pipeline.update(&world.collider_set);
+        let movement = world.move_character(char_id, [0.26, -0.02, 0.0], dt).unwrap();
+
+        println!("Movement result: {:?}", movement.translation);
+
+        // This should NOT be blocked
+        assert!(
+            movement.translation.x.abs() > 0.1,
+            "Horizontal movement should work after landing. Got: {:?}",
+            movement.translation
+        );
+    }
+
+    #[test]
+    fn test_character_direction_reversal() {
+        let mut world = PhysicsWorld::new();
+
+        // Floor at Y=0 (top surface)
+        world.add_part(
+            1,
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [200.0, 2.0, 200.0],
+            true,
+            true,
+        );
+
+        // Character with radius=1.0, height=5.0 (same as game)
+        // Capsule: half_height=1.5, radius=1.0
+        // Bottom of capsule is at Y = center - 1.5 - 1.0 = center - 2.5
+        // For bottom to be at Y=0 (floor top), center should be at Y=2.5
+        // Add small margin: Y=2.6
+        let char_id = 100;
+        world.add_character(char_id, [0.0, 2.6, 0.0], 1.0, 5.0);
+
+        let dt = 1.0 / 60.0;
+
+        // Just update the query pipeline, don't fall
+        world.step(dt);
+        world.query_pipeline.update(&world.collider_set);
+
+        let pos_after_landing = world.get_character_position(char_id).unwrap();
+        println!("After landing: {:?}", pos_after_landing);
+
+        // Move +X for 20 frames
+        // When grounded, desired_y should be 0 (game logic zeros it)
+        println!("\n=== Moving +X ===");
+        let mut grounded = false;
+        for i in 0..20 {
+            world.query_pipeline.update(&world.collider_set);
+            // When grounded, zero vertical like the game does
+            let desired_y = if grounded { 0.0 } else { -0.008 };
+            let movement = world.move_character(char_id, [0.2, desired_y, 0.0], dt).unwrap();
+            grounded = movement.grounded;
+            world.step(dt);
+            if i < 5 || movement.translation.x.abs() < 0.01 {
+                let pos = world.get_character_position(char_id).unwrap();
+                println!("  Frame {}: pos={:.2} applied_x={:.3} grounded={}", i, pos[0], movement.translation.x, movement.grounded);
+            }
+        }
+
+        let pos_after_plus_x = world.get_character_position(char_id).unwrap();
+        println!("After +X: {:?}", pos_after_plus_x);
+        assert!(pos_after_plus_x[0] > 2.0, "+X movement should work");
+
+        // Now reverse: move -X for 20 frames
+        println!("\n=== Moving -X (reversal) ===");
+        let mut stuck_count = 0;
+        for i in 0..20 {
+            world.query_pipeline.update(&world.collider_set);
+            // When grounded, zero vertical like the game does
+            let desired_y = if grounded { 0.0 } else { -0.008 };
+            let movement = world.move_character(char_id, [-0.2, desired_y, 0.0], dt).unwrap();
+            grounded = movement.grounded;
+            world.step(dt);
+            let pos = world.get_character_position(char_id).unwrap();
+            println!("  Frame {}: pos={:.2} applied_x={:.3} grounded={}", i, pos[0], movement.translation.x, movement.grounded);
+            if movement.translation.x.abs() < 0.01 {
+                stuck_count += 1;
+            }
+        }
+
+        let pos_after_minus_x = world.get_character_position(char_id).unwrap();
+        println!("After -X: {:?}", pos_after_minus_x);
+
+        // Should have moved back toward 0
+        assert!(
+            pos_after_minus_x[0] < pos_after_plus_x[0] - 1.0,
+            "Direction reversal should work! pos_after_plus_x={} pos_after_minus_x={} stuck_frames={}",
+            pos_after_plus_x[0], pos_after_minus_x[0], stuck_count
+        );
+    }
+
+    #[test]
+    fn test_character_autostep_over_small_obstacle() {
+        let mut world = PhysicsWorld::new();
+
+        // Floor
+        world.add_part(
+            1,
+            [0.0, -0.5, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [100.0, 1.0, 100.0],  // top at Y=0
+            true,
+            true,
+        );
+
+        // Small obstacle (0.3 studs tall, should be steppable with max_height=0.5)
+        world.add_part(
+            2,
+            [5.0, 0.15, 0.0],      // center at Y=0.15
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 0.3, 4.0],       // top at Y=0.3
+            true,
+            true,
+        );
+
+        // Character starts at X=0, grounded
+        let char_id = 100;
+        world.add_character(char_id, [0.0, 2.6, 0.0], 1.0, 5.0);
+
+        let dt = 1.0 / 60.0;
+        world.step(dt);
+        world.query_pipeline.update(&world.collider_set);
+
+        let start_pos = world.get_character_position(char_id).unwrap();
+        println!("Start: {:?}", start_pos);
+
+        // Move toward and over the obstacle
+        for i in 0..60 {
+            world.query_pipeline.update(&world.collider_set);
+            let movement = world.move_character(char_id, [0.2, 0.0, 0.0], dt).unwrap();
+            world.step(dt);
+
+            let pos = world.get_character_position(char_id).unwrap();
+            if i % 10 == 0 || (pos[0] > 4.0 && pos[0] < 6.0) {
+                println!("Frame {}: pos=({:.2}, {:.2}, {:.2}) grounded={}",
+                    i, pos[0], pos[1], pos[2], movement.grounded);
+            }
+        }
+
+        let final_pos = world.get_character_position(char_id).unwrap();
+        println!("Final: {:?}", final_pos);
+
+        // Character should have moved past the obstacle (X > 6)
+        assert!(
+            final_pos[0] > 6.0,
+            "Character should autostep over 0.3 stud obstacle. Final X={:.2}",
+            final_pos[0]
+        );
+    }
+
+    #[test]
+    fn test_character_blocked_by_tall_obstacle() {
+        let mut world = PhysicsWorld::new();
+
+        // Floor
+        world.add_part(
+            1,
+            [0.0, -0.5, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [100.0, 1.0, 100.0],
+            true,
+            true,
+        );
+
+        // Tall obstacle (1.0 stud tall, should block with max_height=0.5)
+        world.add_part(
+            2,
+            [5.0, 0.5, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 1.0, 4.0],       // top at Y=1.0
+            true,
+            true,
+        );
+
+        let char_id = 100;
+        world.add_character(char_id, [0.0, 2.6, 0.0], 1.0, 5.0);
+
+        let dt = 1.0 / 60.0;
+        world.step(dt);
+        world.query_pipeline.update(&world.collider_set);
+
+        // Move toward the obstacle
+        for _ in 0..60 {
+            world.query_pipeline.update(&world.collider_set);
+            world.move_character(char_id, [0.2, 0.0, 0.0], dt);
+            world.step(dt);
+        }
+
+        let final_pos = world.get_character_position(char_id).unwrap();
+        println!("Final pos with tall obstacle: {:?}", final_pos);
+
+        // Character should be blocked (X < 5, can't step over 1.0 stud obstacle)
+        assert!(
+            final_pos[0] < 5.0,
+            "Character should be blocked by 1.0 stud obstacle. Final X={:.2}",
+            final_pos[0]
+        );
+    }
+
+    #[test]
+    fn test_character_step_up_onto_platform() {
+        // Mimics tsunami scenario: ground + raised platform
+        let mut world = PhysicsWorld::new();
+
+        // Ground (lower level) - extends UNDER the platform to avoid seam
+        world.add_part(
+            1,
+            [0.0, -0.5, 0.0],        // center
+            [0.0, 0.0, 0.0, 1.0],
+            [200.0, 1.0, 100.0],     // top at Y=0, extends from X=-100 to X=100
+            true,
+            true,
+        );
+
+        // Raised platform (like tsunami base) - sits ON TOP of ground
+        world.add_part(
+            2,
+            [50.0, 0.1, 0.0],        // center at Y=0.1
+            [0.0, 0.0, 0.0, 1.0],
+            [100.0, 0.2, 100.0],     // top at Y=0.2, bottom at Y=0, X from 0 to 100
+            true,
+            true,
+        );
+
+        // Character starts on ground (left side), will try to step up onto platform
+        let char_id = 100;
+        world.add_character(char_id, [-5.0, 2.6, 0.0], 1.0, 5.0);
+
+        let dt = 1.0 / 60.0;
+        world.step(dt);
+        world.query_pipeline.update(&world.collider_set);
+
+        let start_pos = world.get_character_position(char_id).unwrap();
+        println!("Start (on ground): {:?}", start_pos);
+
+        // Move +X toward and onto the platform
+        for i in 0..40 {
+            world.query_pipeline.update(&world.collider_set);
+            let movement = world.move_character(char_id, [0.2, 0.0, 0.0], dt).unwrap();
+            world.step(dt);
+
+            let pos = world.get_character_position(char_id).unwrap();
+            if i % 5 == 0 || (pos[0] > -2.0 && pos[0] < 5.0) {
+                println!("Frame {}: pos=({:.2}, {:.2}, {:.2}) grounded={}",
+                    i, pos[0], pos[1], pos[2], movement.grounded);
+            }
+        }
+
+        let final_pos = world.get_character_position(char_id).unwrap();
+        println!("Final: {:?}", final_pos);
+
+        // Character should step up onto platform (X > 2, past the edge at X=0)
+        assert!(
+            final_pos[0] > 2.0,
+            "Character should step UP onto 0.2 stud platform. Final X={:.2}",
+            final_pos[0]
+        );
     }
 }
