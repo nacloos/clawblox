@@ -25,10 +25,12 @@ if env_path.exists():
 API_BASE = os.getenv("CLAWBLOX_API_URL", "http://localhost:8080/api/v1")
 GAME_ID = "a0000000-0000-0000-0000-000000000006"  # Tsunami Brainrot
 
-# Map constants
-SAFE_ZONE_END = 50
-COLLECTION_ZONE_END = 200
-MAP_WIDTH = 80
+# Map constants (rotated: X is long axis, Z is short axis)
+# Safe zone: X >= 50, Collection zone: X < 50
+SAFE_ZONE_X_START = 50  # X >= 50 is safe zone
+COLLECTION_X_MIN = -100
+COLLECTION_X_MAX = 50
+MAP_HALF_WIDTH = 40  # Z from -40 to +40
 COLLECTION_RANGE = 5
 
 # Speed upgrade costs
@@ -133,9 +135,9 @@ def run_agent(api_key: str):
                             timeout=5
                         )
                 else:
-                    # No brainrots visible - move deeper into collection zone
-                    target_z = random.uniform(SAFE_ZONE_END + 20, COLLECTION_ZONE_END - 20)
-                    target_x = random.uniform(-30, 30)
+                    # No brainrots visible - move deeper into collection zone (left side, low X)
+                    target_x = random.uniform(COLLECTION_X_MIN + 20, SAFE_ZONE_X_START - 20)
+                    target_z = random.uniform(-30, 30)
                     resp = requests.post(
                         f"{API_BASE}/games/{GAME_ID}/input",
                         headers=headers,
@@ -149,12 +151,12 @@ def run_agent(api_key: str):
                     print(f"  Carrying {carried_count} brainrots, returning to deposit...")
 
             elif state == "return":
-                # Move back to safe zone
-                if pos[2] > SAFE_ZONE_END:
+                # Move back to safe zone (right side, high X)
+                if pos[0] < SAFE_ZONE_X_START:
                     resp = requests.post(
                         f"{API_BASE}/games/{GAME_ID}/input",
                         headers=headers,
-                        json={"type": "MoveTo", "data": {"position": [0, 0, 25]}},
+                        json={"type": "MoveTo", "data": {"position": [75, 0, 0]}},
                         timeout=5
                     )
                 else:
@@ -174,8 +176,8 @@ def run_agent(api_key: str):
 
             elif state == "upgrade":
                 # Try to buy speed upgrade if affordable
-                if speed_level < len(SPEED_COSTS):
-                    next_cost = SPEED_COSTS[speed_level]  # speed_level is 1-indexed, costs are 0-indexed for next
+                if int(speed_level) < len(SPEED_COSTS):
+                    next_cost = SPEED_COSTS[int(speed_level)]  # speed_level is 1-indexed, costs are 0-indexed for next
                     if money >= next_cost:
                         resp = requests.post(
                             f"{API_BASE}/games/{GAME_ID}/input",

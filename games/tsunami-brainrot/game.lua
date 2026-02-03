@@ -77,7 +77,8 @@ local function getCharacterPosition(player)
 end
 
 local function isInSafeZone(position)
-    return position.Z <= SAFE_ZONE_END
+    -- After rotation: safe zone is at high X values (X >= 50)
+    return position.X >= (COLLECTION_ZONE_END/2 - SAFE_ZONE_END)
 end
 
 local function updatePlayerAttributes(player)
@@ -94,6 +95,155 @@ local function updatePlayerAttributes(player)
     if humanoid then
         humanoid.WalkSpeed = SPEED_UPGRADES[data.speedLevel].speed
     end
+
+    -- Update GUI
+    local playerGui = player.PlayerGui
+    if playerGui then
+        local hud = playerGui:FindFirstChild("HUD")
+        if hud then
+            local moneyLabel = hud:FindFirstChild("MoneyLabel")
+            if moneyLabel then
+                moneyLabel.Text = "$" .. data.money
+            end
+
+            local carriedLabel = hud:FindFirstChild("CarriedLabel")
+            if carriedLabel then
+                local value = #data.carriedBrainrots * BRAINROT_VALUE
+                if #data.carriedBrainrots > 0 then
+                    carriedLabel.Text = "Carrying: " .. #data.carriedBrainrots .. " ($" .. value .. ")"
+                else
+                    carriedLabel.Text = "Carrying: 0"
+                end
+            end
+
+            local speedLabel = hud:FindFirstChild("SpeedLabel")
+            if speedLabel then
+                local currentSpeed = SPEED_UPGRADES[data.speedLevel].speed
+                speedLabel.Text = "Speed: Lv" .. data.speedLevel .. " (" .. currentSpeed .. ")"
+            end
+
+            -- Update upgrade button visibility and text
+            local upgradeBtn = hud:FindFirstChild("UpgradeButton")
+            if upgradeBtn then
+                if data.speedLevel >= #SPEED_UPGRADES then
+                    upgradeBtn.Visible = false
+                else
+                    local nextUpgrade = SPEED_UPGRADES[data.speedLevel + 1]
+                    upgradeBtn.Text = "Upgrade Speed ($" .. nextUpgrade.cost .. ")"
+                    upgradeBtn.Visible = true
+                end
+            end
+        end
+    end
+end
+
+--------------------------------------------------------------------------------
+-- GUI CREATION
+--------------------------------------------------------------------------------
+
+local function createPlayerGUI(player)
+    local playerGui = player.PlayerGui
+    if not playerGui then
+        warn("[GUI] No PlayerGui for " .. player.Name)
+        return
+    end
+
+    -- Create main ScreenGui
+    local hud = Instance.new("ScreenGui")
+    hud.Name = "HUD"
+    hud.Parent = playerGui
+
+    -- Money display (top left)
+    local moneyLabel = Instance.new("TextLabel")
+    moneyLabel.Name = "MoneyLabel"
+    moneyLabel.Position = UDim2.new(0, 10, 0, 10)
+    moneyLabel.Size = UDim2.new(0, 150, 0, 40)
+    moneyLabel.Text = "$0"
+    moneyLabel.TextSize = 28
+    moneyLabel.TextColor3 = Color3.fromRGB(50, 255, 50)
+    moneyLabel.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    moneyLabel.BackgroundTransparency = 0.3
+    moneyLabel.TextXAlignment = "Left"
+    moneyLabel.Parent = hud
+
+    -- Carried brainrots (below money)
+    local carriedLabel = Instance.new("TextLabel")
+    carriedLabel.Name = "CarriedLabel"
+    carriedLabel.Position = UDim2.new(0, 10, 0, 55)
+    carriedLabel.Size = UDim2.new(0, 200, 0, 30)
+    carriedLabel.Text = "Carrying: 0"
+    carriedLabel.TextSize = 20
+    carriedLabel.TextColor3 = Color3.fromRGB(255, 100, 255)
+    carriedLabel.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    carriedLabel.BackgroundTransparency = 0.3
+    carriedLabel.TextXAlignment = "Left"
+    carriedLabel.Parent = hud
+
+    -- Speed level (below carried)
+    local speedLabel = Instance.new("TextLabel")
+    speedLabel.Name = "SpeedLabel"
+    speedLabel.Position = UDim2.new(0, 10, 0, 90)
+    speedLabel.Size = UDim2.new(0, 180, 0, 25)
+    speedLabel.Text = "Speed: Lv1 (16)"
+    speedLabel.TextSize = 18
+    speedLabel.TextColor3 = Color3.fromRGB(100, 200, 255)
+    speedLabel.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    speedLabel.BackgroundTransparency = 0.3
+    speedLabel.TextXAlignment = "Left"
+    speedLabel.Parent = hud
+
+    -- Upgrade button (bottom right)
+    local upgradeBtn = Instance.new("TextButton")
+    upgradeBtn.Name = "UpgradeButton"
+    upgradeBtn.Position = UDim2.new(1, -220, 1, -60)
+    upgradeBtn.Size = UDim2.new(0, 200, 0, 50)
+    upgradeBtn.Text = "Upgrade Speed ($100)"
+    upgradeBtn.TextSize = 18
+    upgradeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    upgradeBtn.BackgroundColor3 = Color3.fromRGB(50, 100, 200)
+    upgradeBtn.BackgroundTransparency = 0.1
+    upgradeBtn.Parent = hud
+
+    -- Connect button click
+    upgradeBtn.MouseButton1Click:Connect(function()
+        buySpeedUpgrade(player)
+    end)
+
+    -- Deposit button (bottom center)
+    local depositBtn = Instance.new("TextButton")
+    depositBtn.Name = "DepositButton"
+    depositBtn.Position = UDim2.new(0.5, -100, 1, -60)
+    depositBtn.Size = UDim2.new(0, 200, 0, 50)
+    depositBtn.Text = "Deposit Brainrots"
+    depositBtn.TextSize = 18
+    depositBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    depositBtn.BackgroundColor3 = Color3.fromRGB(200, 180, 50)
+    depositBtn.BackgroundTransparency = 0.1
+    depositBtn.Parent = hud
+
+    -- Connect deposit button
+    depositBtn.MouseButton1Click:Connect(function()
+        depositBrainrots(player)
+    end)
+
+    -- Collect button (bottom left)
+    local collectBtn = Instance.new("TextButton")
+    collectBtn.Name = "CollectButton"
+    collectBtn.Position = UDim2.new(0, 10, 1, -60)
+    collectBtn.Size = UDim2.new(0, 200, 0, 50)
+    collectBtn.Text = "Collect Brainrot"
+    collectBtn.TextSize = 18
+    collectBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    collectBtn.BackgroundColor3 = Color3.fromRGB(255, 100, 255)
+    collectBtn.BackgroundTransparency = 0.1
+    collectBtn.Parent = hud
+
+    -- Connect collect button
+    collectBtn.MouseButton1Click:Connect(function()
+        collectBrainrot(player)
+    end)
+
+    print("[GUI] Created HUD for " .. player.Name)
 end
 
 --------------------------------------------------------------------------------
@@ -101,28 +251,27 @@ end
 --------------------------------------------------------------------------------
 
 local function loadPlayerData(player)
+    -- Set defaults FIRST so player can receive inputs while DB loads
+    local data = {
+        money = 0,
+        speedLevel = 1,
+        carriedBrainrots = {},
+    }
+    setPlayerData(player, data)
+    updatePlayerAttributes(player)
+
+    -- Now load from DataStore (yields)
     local key = "player_" .. player.UserId
     local savedData = playerStore:GetAsync(key)
 
-    local data
     if savedData then
         print("[DataStore] Loaded data for " .. player.Name .. ": money=" .. savedData.money .. ", speedLevel=" .. savedData.speedLevel)
-        data = {
-            money = savedData.money or 0,
-            speedLevel = savedData.speedLevel or 1,
-            carriedBrainrots = {},  -- Carried brainrots are session-only
-        }
+        data.money = savedData.money or 0
+        data.speedLevel = savedData.speedLevel or 1
+        updatePlayerAttributes(player)
     else
         print("[DataStore] No saved data for " .. player.Name .. ", using defaults")
-        data = {
-            money = 0,
-            speedLevel = 1,
-            carriedBrainrots = {},
-        }
     end
-
-    setPlayerData(player, data)
-    updatePlayerAttributes(player)
 end
 
 local function savePlayerData(player)
@@ -147,76 +296,73 @@ end
 --------------------------------------------------------------------------------
 
 local function createMap()
+    -- ROTATED MAP: X is now the long axis, Z is the short axis
+    -- Safe zone on right (high X), collection zone on left (low X)
+    -- X: -100 to +100, Z: -40 to +40
+
+    local MAP_CENTER_X = 0
+    local SAFE_ZONE_X_START = COLLECTION_ZONE_END/2 - SAFE_ZONE_END  -- 50
+
     -- Main floor
     local floor = Instance.new("Part")
     floor.Name = "Floor"
-    floor.Size = Vector3.new(MAP_WIDTH, 2, COLLECTION_ZONE_END + 50)
-    floor.Position = Vector3.new(0, -1, COLLECTION_ZONE_END / 2)
+    floor.Size = Vector3.new(COLLECTION_ZONE_END + 4, 2, MAP_WIDTH)
+    floor.Position = Vector3.new(MAP_CENTER_X, -1, 0)
     floor.Anchored = true
     floor.Color = Color3.fromRGB(100, 150, 100)  -- Green grass
     floor.Parent = Workspace
 
-    -- Safe zone (different color)
+    -- Safe zone (different color) - right side of map
     local safeZone = Instance.new("Part")
     safeZone.Name = "SafeZone"
-    safeZone.Size = Vector3.new(MAP_WIDTH, 0.1, SAFE_ZONE_END)
-    safeZone.Position = Vector3.new(0, 0.05, SAFE_ZONE_END / 2)
+    safeZone.Size = Vector3.new(SAFE_ZONE_END, 0.1, MAP_WIDTH)
+    safeZone.Position = Vector3.new(COLLECTION_ZONE_END/2 - SAFE_ZONE_END/2, 0.05, 0)  -- X=75
     safeZone.Anchored = true
     safeZone.Color = Color3.fromRGB(100, 200, 100)  -- Brighter green
     safeZone.CanCollide = false
     safeZone:SetAttribute("IsSafeZone", true)
     safeZone.Parent = Workspace
 
-    -- Safe zone marker/sign
-    local safeMarker = Instance.new("Part")
-    safeMarker.Name = "SafeZoneMarker"
-    safeMarker.Size = Vector3.new(MAP_WIDTH, 10, 2)
-    safeMarker.Position = Vector3.new(0, 5, SAFE_ZONE_END)
-    safeMarker.Anchored = true
-    safeMarker.Color = Color3.fromRGB(50, 200, 50)
-    safeMarker.Transparency = 0.5
-    safeMarker.CanCollide = false
-    safeMarker:SetAttribute("IsSafeZoneBorder", true)
-    safeMarker.Parent = Workspace
-
-    -- Collection zone marker
+    -- Collection zone marker - left/center of map
     local collectionMarker = Instance.new("Part")
     collectionMarker.Name = "CollectionZone"
-    collectionMarker.Size = Vector3.new(MAP_WIDTH, 0.1, COLLECTION_ZONE_END - SAFE_ZONE_END)
-    collectionMarker.Position = Vector3.new(0, 0.05, (SAFE_ZONE_END + COLLECTION_ZONE_END) / 2)
+    collectionMarker.Size = Vector3.new(COLLECTION_ZONE_END - SAFE_ZONE_END, 0.1, MAP_WIDTH)
+    collectionMarker.Position = Vector3.new(-SAFE_ZONE_END/2, 0.05, 0)  -- X=-25
     collectionMarker.Anchored = true
     collectionMarker.Color = Color3.fromRGB(200, 180, 100)  -- Tan/sandy
     collectionMarker.CanCollide = false
     collectionMarker:SetAttribute("IsCollectionZone", true)
     collectionMarker.Parent = Workspace
 
-    -- Deposit area (in safe zone)
+    -- Deposit area (in safe zone, right side)
     local depositArea = Instance.new("Part")
     depositArea.Name = "DepositArea"
     depositArea.Size = Vector3.new(20, 0.2, 20)
-    depositArea.Position = Vector3.new(0, 0.1, 25)
+    depositArea.Position = Vector3.new(75, 0.1, 0)
     depositArea.Anchored = true
     depositArea.Color = Color3.fromRGB(200, 200, 50)  -- Yellow
     depositArea.CanCollide = false
     depositArea:SetAttribute("IsDepositArea", true)
     depositArea.Parent = Workspace
 
-    -- Upgrade shop (in safe zone)
+    -- Upgrade shop (in safe zone, right side)
     local shop = Instance.new("Part")
     shop.Name = "SpeedShop"
     shop.Size = Vector3.new(10, 5, 10)
-    shop.Position = Vector3.new(-25, 2.5, 15)
+    shop.Position = Vector3.new(85, 2.5, -25)
     shop.Anchored = true
     shop.Color = Color3.fromRGB(100, 100, 200)  -- Blue
     shop:SetAttribute("IsShop", true)
     shop.Parent = Workspace
 
-    -- Walls to prevent going out of bounds
+    -- Walls to prevent going out of bounds (rotated)
     local walls = {
-        {Vector3.new(MAP_WIDTH/2 + 1, 25, COLLECTION_ZONE_END/2), Vector3.new(2, 50, COLLECTION_ZONE_END + 50)},  -- Right
-        {Vector3.new(-MAP_WIDTH/2 - 1, 25, COLLECTION_ZONE_END/2), Vector3.new(2, 50, COLLECTION_ZONE_END + 50)}, -- Left
-        {Vector3.new(0, 25, -1), Vector3.new(MAP_WIDTH, 50, 2)},                                                    -- Back
-        {Vector3.new(0, 25, COLLECTION_ZONE_END + 26), Vector3.new(MAP_WIDTH, 50, 2)},                             -- Front
+        -- Front/back walls (along Z axis edges)
+        {Vector3.new(0, 25, MAP_WIDTH/2 + 1), Vector3.new(COLLECTION_ZONE_END + 4, 50, 2)},   -- Front (Z+)
+        {Vector3.new(0, 25, -MAP_WIDTH/2 - 1), Vector3.new(COLLECTION_ZONE_END + 4, 50, 2)},  -- Back (Z-)
+        -- Left/right walls (along X axis edges)
+        {Vector3.new(COLLECTION_ZONE_END/2 + 1, 25, 0), Vector3.new(2, 50, MAP_WIDTH)},       -- Right (X+)
+        {Vector3.new(-COLLECTION_ZONE_END/2 - 1, 25, 0), Vector3.new(2, 50, MAP_WIDTH)},      -- Left (X-)
     }
 
     for i, data in ipairs(walls) do
@@ -230,7 +376,7 @@ local function createMap()
         wall.Parent = Workspace
     end
 
-    print("Map created: Safe zone (Z=0-" .. SAFE_ZONE_END .. "), Collection zone (Z=" .. SAFE_ZONE_END .. "-" .. COLLECTION_ZONE_END .. ")")
+    print("Map created (rotated): Safe zone (X>=50), Collection zone (X<50)")
 end
 
 --------------------------------------------------------------------------------
@@ -242,9 +388,10 @@ local function spawnBrainrot()
         return
     end
 
-    -- Random position in collection zone
-    local x = math.random(-35, 35)
-    local z = math.random(SAFE_ZONE_END + 10, COLLECTION_ZONE_END - 10)
+    -- Random position in collection zone (rotated: X is long axis, Z is short axis)
+    -- Collection zone is X from -100 to 50
+    local x = math.random(-COLLECTION_ZONE_END/2 + 10, COLLECTION_ZONE_END/2 - SAFE_ZONE_END - 10)  -- -90 to 40
+    local z = math.random(-35, 35)
 
     local brainrot = Instance.new("Part")
     brainrot.Name = "Brainrot"
@@ -392,8 +539,8 @@ local function spawnPlayer(player)
     if character then
         local hrp = character:FindFirstChild("HumanoidRootPart")
         if hrp then
-            -- Spawn in safe zone
-            hrp.Position = Vector3.new(0, 3, 25)
+            -- Spawn in safe zone (rotated: safe zone is at high X values)
+            hrp.Position = Vector3.new(75, 3, 0)
             hrp.Velocity = Vector3.new(0, 0, 0)
         end
     end
@@ -402,10 +549,25 @@ local function spawnPlayer(player)
 end
 
 local function initializePlayer(player)
-    -- Load saved data from DataStore
+    -- Load saved data from DataStore (yields but works in coroutine)
     loadPlayerData(player)
 
-    -- Spawn player in safe zone
+    -- Create GUI
+    createPlayerGUI(player)
+
+    -- Spawn when character is added (or now if already exists)
+    player.CharacterAdded:Connect(function(character)
+        -- Wait for HumanoidRootPart
+        local hrp = character:WaitForChild("HumanoidRootPart", 5)
+        if hrp then
+            hrp.Position = Vector3.new(75, 3, 0)
+            hrp.Velocity = Vector3.new(0, 0, 0)
+            print("[Spawn] " .. player.Name .. " spawned at (75, 3, 0)")
+        end
+        updatePlayerAttributes(player)
+    end)
+
+    -- Spawn now if character already exists
     spawnPlayer(player)
 
     print("[Init] " .. player.Name .. " initialized (money: " .. getPlayerData(player).money .. ", speedLevel: " .. getPlayerData(player).speedLevel .. ")")

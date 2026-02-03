@@ -194,6 +194,11 @@ impl PhysicsWorld {
         self.lua_to_body.contains_key(&lua_id)
     }
 
+    /// Gets all Lua part IDs that have physics bodies
+    pub fn get_all_part_ids(&self) -> Vec<u64> {
+        self.lua_to_body.keys().copied().collect()
+    }
+
     /// Gets the handle for a Lua instance
     pub fn get_handle(&self, lua_id: u64) -> Option<RigidBodyHandle> {
         self.lua_to_body.get(&lua_id).copied()
