@@ -28,6 +28,7 @@ const OVERVIEW_PAN_SPEED = 55
 const OVERVIEW_ZOOM_SPEED = 0.001
 const MIN_OVERVIEW_ZOOM = 0.2
 const MAX_OVERVIEW_ZOOM = 1.8
+const TOUCH_PAN_SPEED = 0.12
 
 function CameraController({
   stateBuffer,
@@ -44,6 +45,10 @@ function CameraController({
   const pressedKeys = useRef(new Set<string>())
   const overviewPan = useRef(new THREE.Vector3(0, 0, 0))
   const overviewZoom = useRef(1)
+  const touchPoints = useRef(new Map<number, { x: number; y: number }>())
+  const lastTouchCenter = useRef<{ x: number; y: number } | null>(null)
+  const pinchStartDistance = useRef<number | null>(null)
+  const pinchStartZoom = useRef<number | null>(null)
 
   useEffect(() => {
     const shouldIgnoreKeyboardEvent = (target: EventTarget | null): boolean => {
@@ -77,16 +82,97 @@ function CameraController({
       overviewZoom.current = THREE.MathUtils.clamp(nextZoom, MIN_OVERVIEW_ZOOM, MAX_OVERVIEW_ZOOM)
     }
 
+    const distanceBetweenTouches = () => {
+      const points = Array.from(touchPoints.current.values())
+      if (points.length < 2) return null
+      const dx = points[0].x - points[1].x
+      const dy = points[0].y - points[1].y
+      return Math.hypot(dx, dy)
+    }
+
+    const centerOfTouches = () => {
+      const points = Array.from(touchPoints.current.values())
+      if (points.length === 0) return null
+      const sum = points.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 })
+      return { x: sum.x / points.length, y: sum.y / points.length }
+    }
+
+    const panByScreenDelta = (dx: number, dy: number) => {
+      const scale = TOUCH_PAN_SPEED * overviewZoom.current
+      // Finger drag should move map with the finger.
+      overviewPan.current.x -= dx * scale
+      overviewPan.current.z += dy * scale
+    }
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch' || followPlayerId) return
+      touchPoints.current.set(event.pointerId, { x: event.clientX, y: event.clientY })
+      lastTouchCenter.current = centerOfTouches()
+
+      if (touchPoints.current.size >= 2) {
+        pinchStartDistance.current = distanceBetweenTouches()
+        pinchStartZoom.current = overviewZoom.current
+      }
+    }
+
+    const onPointerMove = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch' || followPlayerId) return
+
+      const previous = touchPoints.current.get(event.pointerId)
+      if (!previous) return
+      event.preventDefault()
+
+      touchPoints.current.set(event.pointerId, { x: event.clientX, y: event.clientY })
+
+      if (touchPoints.current.size >= 2) {
+        const center = centerOfTouches()
+        const dist = distanceBetweenTouches()
+        if (center && lastTouchCenter.current) {
+          panByScreenDelta(center.x - lastTouchCenter.current.x, center.y - lastTouchCenter.current.y)
+        }
+        if (dist && pinchStartDistance.current && pinchStartZoom.current) {
+          const ratio = dist / pinchStartDistance.current
+          const nextZoom = pinchStartZoom.current / ratio
+          overviewZoom.current = THREE.MathUtils.clamp(nextZoom, MIN_OVERVIEW_ZOOM, MAX_OVERVIEW_ZOOM)
+        }
+        lastTouchCenter.current = center
+      } else {
+        panByScreenDelta(event.clientX - previous.x, event.clientY - previous.y)
+      }
+    }
+
+    const resetTouchState = () => {
+      if (touchPoints.current.size < 2) {
+        pinchStartDistance.current = null
+        pinchStartZoom.current = null
+      }
+      lastTouchCenter.current = centerOfTouches()
+    }
+
+    const onPointerEnd = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch') return
+      touchPoints.current.delete(event.pointerId)
+      resetTouchState()
+    }
+
     window.addEventListener('keydown', onKeyDown)
     window.addEventListener('keyup', onKeyUp)
     window.addEventListener('blur', onWindowBlur)
     gl.domElement.addEventListener('wheel', onWheel, { passive: false })
+    gl.domElement.addEventListener('pointerdown', onPointerDown)
+    gl.domElement.addEventListener('pointermove', onPointerMove, { passive: false })
+    gl.domElement.addEventListener('pointerup', onPointerEnd)
+    gl.domElement.addEventListener('pointercancel', onPointerEnd)
 
     return () => {
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup', onKeyUp)
       window.removeEventListener('blur', onWindowBlur)
       gl.domElement.removeEventListener('wheel', onWheel)
+      gl.domElement.removeEventListener('pointerdown', onPointerDown)
+      gl.domElement.removeEventListener('pointermove', onPointerMove)
+      gl.domElement.removeEventListener('pointerup', onPointerEnd)
+      gl.domElement.removeEventListener('pointercancel', onPointerEnd)
     }
   }, [followPlayerId, gl])
 
@@ -188,7 +274,7 @@ export default function GameScene({ stateBuffer, entityIds, followPlayerId }: Ga
       camera={{ position: [0, 140, 70], fov: 50 }}
       shadows
       gl={{ logarithmicDepthBuffer: true }}
-      style={{ background: 'linear-gradient(to bottom, #1a1a2e 0%, #0f0f1a 100%)' }}
+      style={{ background: 'linear-gradient(to bottom, #1a1a2e 0%, #0f0f1a 100%)', touchAction: 'none' }}
     >
       <hemisphereLight args={['#87ceeb', '#444444', 0.6]} />
       <ambientLight intensity={0.15} />

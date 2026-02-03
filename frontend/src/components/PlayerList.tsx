@@ -1,4 +1,4 @@
-import { Heart, Trophy, Crosshair } from 'lucide-react'
+import { Trophy, Crosshair } from 'lucide-react'
 import { SpectatorPlayerInfo } from '../api'
 import { Badge } from '@/components/ui/badge'
 
@@ -10,7 +10,7 @@ interface PlayerListProps {
 
 export default function PlayerList({ players, selectedPlayerId, onSelectPlayer }: PlayerListProps) {
   return (
-    <div className="absolute top-4 right-4 bg-card/90 backdrop-blur-sm border border-border rounded-lg p-3 w-[200px] max-h-[400px] overflow-y-auto">
+    <div className="absolute top-4 right-4 bg-card/90 backdrop-blur-sm border border-border rounded-lg p-3 w-[200px] max-h-[400px] overflow-y-auto z-20">
       <div className="text-sm font-medium text-foreground mb-3">Players</div>
 
       <div className="space-y-2">
@@ -32,10 +32,6 @@ export default function PlayerList({ players, selectedPlayerId, onSelectPlayer }
                 {player.name}
               </div>
               <div className="flex flex-wrap gap-1">
-                <Badge variant="outline" className="text-xs gap-1">
-                  <Heart className="h-3 w-3 text-red-400" />
-                  {player.health}
-                </Badge>
                 {kills !== undefined && (
                   <Badge variant="secondary" className="text-xs gap-1">
                     <Trophy className="h-3 w-3 text-yellow-400" />

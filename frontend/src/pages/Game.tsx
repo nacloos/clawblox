@@ -21,6 +21,7 @@ export default function Game() {
   const [error, setError] = useState<string | null>(null)
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting')
   const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null)
+  const [isPlayerListOpen, setIsPlayerListOpen] = useState(false)
   const [latestTick, setLatestTick] = useState<number>(0)
 
   // Use refs for high-frequency state to avoid React re-renders
@@ -157,10 +158,15 @@ export default function Game() {
 
         {hasGameData && (
           <div className="flex items-center gap-4 ml-auto text-sm">
-            <span className="text-muted-foreground flex items-center gap-1.5">
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 gap-1.5"
+              onClick={() => setIsPlayerListOpen(prev => !prev)}
+            >
               <Users className="h-4 w-4" />
               {players.length}
-            </span>
+            </Button>
             {connectionStatus === 'connected' && (
               <span className="w-2 h-2 rounded-full bg-green-500" />
             )}
@@ -208,11 +214,13 @@ export default function Game() {
                 latestTick={latestTick}
                 onGuiClick={handleGuiClick}
               />
-              <PlayerList
-                players={players}
-                selectedPlayerId={selectedPlayerId}
-                onSelectPlayer={setSelectedPlayerId}
-              />
+              {isPlayerListOpen && (
+                <PlayerList
+                  players={players}
+                  selectedPlayerId={selectedPlayerId}
+                  onSelectPlayer={setSelectedPlayerId}
+                />
+              )}
             </>
           )
         ) : (
