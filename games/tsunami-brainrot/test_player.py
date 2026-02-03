@@ -47,17 +47,32 @@ def distance_xz(a: list, b: list) -> float:
     return ((a[0] - b[0]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
 
 
-def load_cached_keys() -> list[str]:
+def load_cached_keys(api_base: str) -> list[str]:
     if KEYS_CACHE.exists():
         try:
-            return json.loads(KEYS_CACHE.read_text()).get("keys", [])
+            data = json.loads(KEYS_CACHE.read_text())
+            # New cache format: {"by_api": {"https://.../api/v1": ["key1", ...]}}
+            by_api = data.get("by_api")
+            if isinstance(by_api, dict):
+                keys = by_api.get(api_base, [])
+                if isinstance(keys, list):
+                    return keys
         except:
             pass
     return []
 
 
-def save_cached_keys(keys: list[str]):
-    KEYS_CACHE.write_text(json.dumps({"keys": keys}))
+def save_cached_keys(api_base: str, keys: list[str]):
+    data = {"by_api": {api_base: keys}}
+    if KEYS_CACHE.exists():
+        try:
+            existing = json.loads(KEYS_CACHE.read_text())
+            if isinstance(existing, dict) and isinstance(existing.get("by_api"), dict):
+                data["by_api"] = existing["by_api"]
+        except:
+            pass
+    data["by_api"][api_base] = keys
+    KEYS_CACHE.write_text(json.dumps(data))
 
 
 def register_agent(api_base: str, name: str) -> str | None:
@@ -74,16 +89,39 @@ def register_agent(api_base: str, name: str) -> str | None:
     return None
 
 
+def is_valid_api_key(api_base: str, api_key: str) -> bool:
+    try:
+        resp = requests.get(
+            f"{api_base}/agents/me",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=5,
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
 def get_api_keys(api_base: str, num_needed: int, is_prod: bool = False) -> list[str]:
     """Get or register enough API keys for num_needed agents"""
-    keys = []
+    candidate_keys = []
     env_key = os.getenv("CLAWBLOX_API_KEY_PROD" if is_prod else "CLAWBLOX_API_KEY")
     if env_key:
-        keys.append(env_key)
+        candidate_keys.append(env_key)
 
-    for k in load_cached_keys():
-        if k not in keys:
+    for k in load_cached_keys(api_base):
+        if k not in candidate_keys:
+            candidate_keys.append(k)
+
+    # Filter out stale/invalid keys so local/prod keys do not get mixed.
+    keys: list[str] = []
+    invalid_count = 0
+    for k in candidate_keys:
+        if is_valid_api_key(api_base, k):
             keys.append(k)
+        else:
+            invalid_count += 1
+    if invalid_count > 0:
+        print(f"Discarded {invalid_count} invalid cached key(s)", flush=True)
 
     while len(keys) < num_needed:
         name = f"tsunami_agent_{random.randint(1000, 9999)}"
@@ -93,7 +131,7 @@ def get_api_keys(api_base: str, num_needed: int, is_prod: bool = False) -> list[
             keys.append(key)
             print(f"  OK: {key[:20]}...", flush=True)
 
-    save_cached_keys(keys)
+    save_cached_keys(api_base, keys)
     return keys[:num_needed]
 
 
