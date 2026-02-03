@@ -101,7 +101,7 @@ function CameraController({
       const scale = TOUCH_PAN_SPEED * overviewZoom.current
       // Finger drag should move map with the finger.
       overviewPan.current.x -= dx * scale
-      overviewPan.current.z += dy * scale
+      overviewPan.current.z -= dy * scale
     }
 
     const onPointerDown = (event: PointerEvent) => {
