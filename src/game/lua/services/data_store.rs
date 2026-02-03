@@ -46,6 +46,15 @@ impl UserData for DataStoreService {
             };
             lua.create_userdata(store)
         });
+
+        methods.add_method("GetOrderedDataStore", |lua, this, name: String| {
+            let store = OrderedDataStore {
+                game_id: this.game_id,
+                store_name: name,
+                async_bridge: this.async_bridge.clone(),
+            };
+            lua.create_userdata(store)
+        });
     }
 }
 
@@ -264,5 +273,162 @@ impl UserData for DataStore {
                 }
             },
         );
+    }
+}
+
+/// An OrderedDataStore for leaderboards - stores entries with a 'score' field that can be sorted
+///
+/// Unlike regular DataStore, OrderedDataStore:
+/// - Expects values to have a 'score' field for sorting
+/// - Provides GetSortedAsync to retrieve entries in sorted order
+#[derive(Clone)]
+pub struct OrderedDataStore {
+    game_id: Uuid,
+    store_name: String,
+    async_bridge: Option<Arc<AsyncBridge>>,
+}
+
+impl UserData for OrderedDataStore {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        // SetAsync(key, value) - stores a value with a score field
+        //
+        // The value should be a table with at least a 'score' field for sorting.
+        // Example: leaderboardStore:SetAsync("player_123", {score = 500, name = "Agent1"})
+        methods.add_async_method("SetAsync", |lua, this, (key, value): (String, Value)| {
+            let game_id = this.game_id;
+            let store_name = this.store_name.clone();
+            let bridge = this.async_bridge.clone();
+
+            // Serialize the value to JSON before entering async block
+            let json_result: Result<serde_json::Value, mlua::Error> = lua.from_value(value);
+
+            async move {
+                let json_value = json_result.map_err(|e| {
+                    mlua::Error::RuntimeError(format!("Failed to serialize value to JSON: {}", e))
+                })?;
+
+                // Validate that the value has a 'score' field
+                if !json_value.get("score").is_some() {
+                    return Err(mlua::Error::RuntimeError(
+                        "OrderedDataStore value must have a 'score' field".into(),
+                    ));
+                }
+
+                let bridge = bridge.ok_or_else(|| {
+                    mlua::Error::RuntimeError(
+                        "DataStoreService not available (no database connection)".into(),
+                    )
+                })?;
+
+                let (tx, rx) = tokio::sync::oneshot::channel();
+
+                bridge
+                    .send(AsyncRequest::DataStoreSet {
+                        game_id,
+                        store_name,
+                        key,
+                        value: json_value,
+                        response_tx: tx,
+                    })
+                    .map_err(mlua::Error::RuntimeError)?;
+
+                let result = rx.await.map_err(|_| {
+                    mlua::Error::RuntimeError("DataStore operation cancelled".into())
+                })?;
+
+                match result {
+                    Ok(()) => Ok(Value::Nil),
+                    Err(e) => Err(mlua::Error::RuntimeError(e)),
+                }
+            }
+        });
+
+        // GetSortedAsync(ascending, limit) - retrieves sorted entries
+        //
+        // Returns a table of entries sorted by score.
+        // Each entry has: {key = "player_123", value = {score = 500, name = "Agent1"}}
+        methods.add_async_method(
+            "GetSortedAsync",
+            |lua, this, (ascending, limit): (bool, i32)| {
+                let game_id = this.game_id;
+                let store_name = this.store_name.clone();
+                let bridge = this.async_bridge.clone();
+
+                async move {
+                    let bridge = bridge.ok_or_else(|| {
+                        mlua::Error::RuntimeError(
+                            "DataStoreService not available (no database connection)".into(),
+                        )
+                    })?;
+
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+
+                    bridge
+                        .send(AsyncRequest::DataStoreGetSorted {
+                            game_id,
+                            store_name,
+                            ascending,
+                            limit,
+                            response_tx: tx,
+                        })
+                        .map_err(mlua::Error::RuntimeError)?;
+
+                    let result = rx.await.map_err(|_| {
+                        mlua::Error::RuntimeError("DataStore operation cancelled".into())
+                    })?;
+
+                    match result {
+                        Ok(entries) => {
+                            // Convert to Lua table of {key, value} entries
+                            let table = lua.create_table()?;
+                            for (i, (key, value)) in entries.into_iter().enumerate() {
+                                let entry = lua.create_table()?;
+                                entry.set("key", key)?;
+                                entry.set("value", lua.to_value(&value)?)?;
+                                table.set(i + 1, entry)?;
+                            }
+                            Ok(Value::Table(table))
+                        }
+                        Err(e) => Err(mlua::Error::RuntimeError(e)),
+                    }
+                }
+            },
+        );
+
+        // GetAsync(key) - retrieves a single value by key (same as regular DataStore)
+        methods.add_async_method("GetAsync", |lua, this, key: String| {
+            let game_id = this.game_id;
+            let store_name = this.store_name.clone();
+            let bridge = this.async_bridge.clone();
+
+            async move {
+                let bridge = bridge.ok_or_else(|| {
+                    mlua::Error::RuntimeError(
+                        "DataStoreService not available (no database connection)".into(),
+                    )
+                })?;
+
+                let (tx, rx) = tokio::sync::oneshot::channel();
+
+                bridge
+                    .send(AsyncRequest::DataStoreGet {
+                        game_id,
+                        store_name,
+                        key,
+                        response_tx: tx,
+                    })
+                    .map_err(mlua::Error::RuntimeError)?;
+
+                let result = rx.await.map_err(|_| {
+                    mlua::Error::RuntimeError("DataStore operation cancelled".into())
+                })?;
+
+                match result {
+                    Ok(Some(json_value)) => lua.to_value(&json_value),
+                    Ok(None) => Ok(Value::Nil),
+                    Err(e) => Err(mlua::Error::RuntimeError(e)),
+                }
+            }
+        });
     }
 }

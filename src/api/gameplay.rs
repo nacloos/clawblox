@@ -1,7 +1,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
+        Path, Query, State,
     },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
@@ -67,6 +67,7 @@ pub fn routes(pool: PgPool, game_manager: GameManagerHandle, api_key_cache: ApiK
         .route("/games/{id}/action", post(action))
         .route("/games/{id}/skill", get(get_skill))
         .route("/games/{id}/input", post(send_input))
+        .route("/games/{id}/leaderboard", get(get_leaderboard))
         .with_state(state)
 }
 
@@ -203,6 +204,93 @@ async fn spectate_ws(
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_spectate_ws(socket, state, game_id))
+}
+
+/// Query parameters for leaderboard endpoint
+#[derive(Deserialize)]
+struct LeaderboardQuery {
+    /// The OrderedDataStore name (default: "Leaderboard")
+    #[serde(default = "default_store_name")]
+    store: String,
+    /// Maximum number of entries to return (default: 10, max: 100)
+    #[serde(default = "default_limit")]
+    limit: i32,
+}
+
+fn default_store_name() -> String {
+    "Leaderboard".to_string()
+}
+
+fn default_limit() -> i32 {
+    10
+}
+
+/// A single leaderboard entry
+#[derive(Serialize)]
+struct LeaderboardEntry {
+    rank: i32,
+    key: String,
+    score: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+}
+
+/// Leaderboard response
+#[derive(Serialize)]
+struct LeaderboardResponse {
+    entries: Vec<LeaderboardEntry>,
+}
+
+/// GET /games/{id}/leaderboard - Get sorted leaderboard entries
+async fn get_leaderboard(
+    State(state): State<GameplayState>,
+    Path(game_id): Path<Uuid>,
+    Query(query): Query<LeaderboardQuery>,
+) -> Result<Json<LeaderboardResponse>, (StatusCode, String)> {
+    // Clamp limit to reasonable bounds
+    let limit = query.limit.clamp(1, 100);
+
+    // Query the data_stores table directly for sorted entries
+    let results: Vec<(String, serde_json::Value)> = sqlx::query_as(
+        r#"
+        SELECT key, value
+        FROM data_stores
+        WHERE game_id = $1 AND store_name = $2 AND value ? 'score'
+        ORDER BY (value->>'score')::numeric DESC NULLS LAST
+        LIMIT $3
+        "#,
+    )
+    .bind(game_id)
+    .bind(&query.store)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Convert to LeaderboardEntry structs
+    let entries: Vec<LeaderboardEntry> = results
+        .into_iter()
+        .enumerate()
+        .map(|(i, (key, value))| {
+            let score = value
+                .get("score")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let name = value
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            LeaderboardEntry {
+                rank: (i + 1) as i32,
+                key,
+                score,
+                name,
+            }
+        })
+        .collect();
+
+    Ok(Json(LeaderboardResponse { entries }))
 }
 
 /// Handle the WebSocket connection for spectating

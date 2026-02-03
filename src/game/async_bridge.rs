@@ -33,6 +33,14 @@ pub enum AsyncRequest {
         value: serde_json::Value,
         response_tx: oneshot::Sender<Result<(), String>>,
     },
+    /// Get sorted entries from an OrderedDataStore (for leaderboards)
+    DataStoreGetSorted {
+        game_id: Uuid,
+        store_name: String,
+        ascending: bool,
+        limit: i32,
+        response_tx: oneshot::Sender<Result<Vec<(String, serde_json::Value)>, String>>,
+    },
 }
 
 /// Bridges sync game thread with tokio runtime
@@ -104,6 +112,19 @@ impl AsyncBridge {
                         // Ignore send error - receiver may have been dropped (coroutine cancelled)
                         let _ = response_tx.send(result);
                     }
+                    AsyncRequest::DataStoreGetSorted {
+                        game_id,
+                        store_name,
+                        ascending,
+                        limit,
+                        response_tx,
+                    } => {
+                        let result =
+                            Self::db_get_sorted(&pool, game_id, &store_name, ascending, limit)
+                                .await;
+                        // Ignore send error - receiver may have been dropped (coroutine cancelled)
+                        let _ = response_tx.send(result);
+                    }
                 }
             });
         }
@@ -158,6 +179,53 @@ impl AsyncBridge {
         .map_err(|e| format!("Database error in SetAsync: {}", e))?;
 
         Ok(())
+    }
+
+    /// Performs the actual database GET SORTED operation (for OrderedDataStore leaderboards)
+    async fn db_get_sorted(
+        pool: &PgPool,
+        game_id: Uuid,
+        store_name: &str,
+        ascending: bool,
+        limit: i32,
+    ) -> Result<Vec<(String, serde_json::Value)>, String> {
+        // Use different queries based on sort order
+        // The index idx_data_stores_score optimizes these queries
+        let results: Vec<(String, serde_json::Value)> = if ascending {
+            sqlx::query_as(
+                r#"
+                SELECT key, value
+                FROM data_stores
+                WHERE game_id = $1 AND store_name = $2 AND value ? 'score'
+                ORDER BY (value->>'score')::numeric ASC NULLS LAST
+                LIMIT $3
+                "#,
+            )
+            .bind(game_id)
+            .bind(store_name)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("Database error in GetSortedAsync: {}", e))?
+        } else {
+            sqlx::query_as(
+                r#"
+                SELECT key, value
+                FROM data_stores
+                WHERE game_id = $1 AND store_name = $2 AND value ? 'score'
+                ORDER BY (value->>'score')::numeric DESC NULLS LAST
+                LIMIT $3
+                "#,
+            )
+            .bind(game_id)
+            .bind(store_name)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("Database error in GetSortedAsync: {}", e))?
+        };
+
+        Ok(results)
     }
 }
 

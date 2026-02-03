@@ -140,3 +140,52 @@ Z axis (short): -40 to +40
 2. **Mid Game**: Reach sandy/snowy zones, build passive income base
 3. **Late Game**: Access lava/void zones, optimize base layout
 4. **End Game**: Farm secret zone, multiple rebirths, maximize multipliers
+
+## Leaderboard System
+
+### Tracked Metric
+
+**PassiveIncome ($/second)** - The sum of income rates from all placed brainrots.
+
+This metric represents true progression because:
+- Higher rarity brainrots = higher income rate
+- More brainrots placed = higher total income
+- Encourages both collection speed and strategic zone farming
+
+### Update Frequency
+
+| Operation | Interval |
+|-----------|----------|
+| Update player's score | Every 10 seconds |
+| Fetch leaderboard | Every 5 seconds |
+| GUI refresh | After each fetch |
+
+### Implementation
+
+- Uses `OrderedDataStore` named "Leaderboard"
+- Each entry: `{score: passiveIncome, name: playerName}`
+- Key format: `player_{userId}`
+- GUI shows top 5 players (top-right corner)
+
+### API Endpoint
+
+```
+GET /games/{game_id}/leaderboard?store=Leaderboard&limit=10
+```
+
+Response:
+```json
+{
+  "entries": [
+    {"rank": 1, "key": "player_123", "score": 150.0, "name": "TopPlayer"},
+    {"rank": 2, "key": "player_456", "score": 80.0, "name": "Runner Up"},
+    ...
+  ]
+}
+```
+
+### Future Enhancements
+
+- Secondary leaderboard for TotalMoney
+- Weekly/monthly reset leaderboards
+- Rebirth multiplier leaderboard
