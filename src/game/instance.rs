@@ -5,7 +5,7 @@ use std::time::Instant;
 use uuid::Uuid;
 
 use super::async_bridge::AsyncBridge;
-use super::lua::instance::attributes_to_json;
+use super::lua::instance::{attributes_to_json, ClassName, Instance, TextXAlignment, TextYAlignment};
 use super::lua::services::AgentInput;
 use super::lua::LuaRuntime;
 use super::physics::PhysicsWorld;
@@ -250,6 +250,7 @@ impl GameInstance {
     /// Syncs Lua parts to the physics world
     /// - Creates physics bodies for new parts (skips character-controlled parts)
     /// - Updates positions for anchored parts that moved in Lua
+    /// - Removes physics bodies for parts that were destroyed in Lua
     fn sync_lua_to_physics(&mut self) {
         let Some(runtime) = &self.lua_runtime else {
             return;
@@ -257,11 +258,15 @@ impl GameInstance {
 
         let descendants = runtime.workspace().get_descendants();
 
+        // Collect all active Lua part IDs
+        let mut active_lua_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+
         for part in descendants {
             let data = part.data.lock().unwrap();
 
             if let Some(part_data) = &data.part_data {
                 let lua_id = data.id.0;
+                active_lua_ids.insert(lua_id);
 
                 // Skip parts managed by character controllers
                 if self.physics.has_character(lua_id) {
@@ -298,6 +303,16 @@ impl GameInstance {
                     }
                 }
             }
+        }
+
+        // Remove physics parts that no longer exist in Lua (destroyed parts)
+        let orphaned_ids: Vec<u64> = self.physics.get_all_part_ids()
+            .into_iter()
+            .filter(|id| !active_lua_ids.contains(id))
+            .collect();
+
+        for lua_id in orphaned_ids {
+            self.physics.remove_part(lua_id);
         }
     }
 
@@ -648,6 +663,84 @@ impl GameInstance {
         others
     }
 
+    /// Serializes a GUI instance tree to GuiElement for frontend rendering
+    fn serialize_gui_tree(instance: &Instance) -> Option<GuiElement> {
+        let data = instance.data.lock().unwrap();
+
+        // Only serialize GUI classes
+        let element_type = match data.class_name {
+            ClassName::ScreenGui => "ScreenGui",
+            ClassName::Frame => "Frame",
+            ClassName::TextLabel => "TextLabel",
+            ClassName::TextButton => "TextButton",
+            ClassName::ImageLabel => "ImageLabel",
+            ClassName::ImageButton => "ImageButton",
+            _ => return None,
+        };
+
+        let gui_data = data.gui_data.as_ref();
+
+        // Build element with optional GUI properties
+        let mut element = GuiElement {
+            id: data.id.0,
+            element_type: element_type.to_string(),
+            name: data.name.clone(),
+            position: gui_data.map(|g| UDim2Json {
+                x_scale: g.position.x.scale,
+                x_offset: g.position.x.offset,
+                y_scale: g.position.y.scale,
+                y_offset: g.position.y.offset,
+            }),
+            size: gui_data.map(|g| UDim2Json {
+                x_scale: g.size.x.scale,
+                x_offset: g.size.x.offset,
+                y_scale: g.size.y.scale,
+                y_offset: g.size.y.offset,
+            }),
+            anchor_point: gui_data.map(|g| [g.anchor_point.0, g.anchor_point.1]),
+            rotation: gui_data.map(|g| g.rotation),
+            z_index: gui_data.map(|g| g.z_index),
+            visible: gui_data.map(|g| g.visible),
+            background_color: gui_data.map(|g| [g.background_color.r, g.background_color.g, g.background_color.b]),
+            background_transparency: gui_data.map(|g| g.background_transparency),
+            border_color: gui_data.map(|g| [g.border_color.r, g.border_color.g, g.border_color.b]),
+            border_size_pixel: gui_data.map(|g| g.border_size_pixel),
+            text: gui_data.and_then(|g| g.text.clone()),
+            text_color: gui_data.and_then(|g| g.text_color.map(|c| [c.r, c.g, c.b])),
+            text_size: gui_data.and_then(|g| g.text_size),
+            text_transparency: gui_data.and_then(|g| g.text_transparency),
+            text_x_alignment: gui_data.map(|g| match g.text_x_alignment {
+                TextXAlignment::Left => "Left".to_string(),
+                TextXAlignment::Center => "Center".to_string(),
+                TextXAlignment::Right => "Right".to_string(),
+            }),
+            text_y_alignment: gui_data.map(|g| match g.text_y_alignment {
+                TextYAlignment::Top => "Top".to_string(),
+                TextYAlignment::Center => "Center".to_string(),
+                TextYAlignment::Bottom => "Bottom".to_string(),
+            }),
+            image: gui_data.and_then(|g| g.image.clone()),
+            image_color: gui_data.and_then(|g| g.image_color.map(|c| [c.r, c.g, c.b])),
+            image_transparency: gui_data.and_then(|g| g.image_transparency),
+            display_order: gui_data.map(|g| g.display_order),
+            enabled: gui_data.map(|g| g.enabled),
+            children: Vec::new(),
+        };
+
+        // Recursively serialize children (release lock first to avoid deadlock)
+        let children_refs: Vec<_> = data.children.iter().cloned().collect();
+        drop(data);
+
+        for child_ref in children_refs {
+            let child = Instance::from_ref(child_ref);
+            if let Some(child_element) = Self::serialize_gui_tree(&child) {
+                element.children.push(child_element);
+            }
+        }
+
+        Some(element)
+    }
+
     /// Gets the spectator observation (full world state from Lua Workspace)
     pub fn get_spectator_observation(&self) -> SpectatorObservation {
         let mut entities = Vec::new();
@@ -741,12 +834,27 @@ impl GameInstance {
                         Some(serde_json::to_value(&attrs).unwrap_or(serde_json::Value::Null))
                     };
 
+                    // Serialize PlayerGui tree
+                    let gui = player_data.player_data.as_ref()
+                        .and_then(|pd| pd.player_gui.as_ref())
+                        .and_then(|weak| weak.upgrade())
+                        .map(|player_gui_ref| {
+                            let player_gui = Instance::from_ref(player_gui_ref);
+                            // Get all ScreenGui children
+                            player_gui.get_children()
+                                .iter()
+                                .filter_map(|child| Self::serialize_gui_tree(child))
+                                .collect::<Vec<_>>()
+                        })
+                        .filter(|v: &Vec<GuiElement>| !v.is_empty());
+
                     players.push(SpectatorPlayerInfo {
                         id: agent_id,
                         name,
                         position,
                         health,
                         attributes,
+                        gui,
                     });
                     drop(player_data);
                 }
@@ -862,6 +970,69 @@ pub struct SpectatorPlayerInfo {
     pub health: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attributes: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gui: Option<Vec<GuiElement>>,
+}
+
+/// Serialized GUI element for frontend rendering
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GuiElement {
+    pub id: u64,
+    #[serde(rename = "type")]
+    pub element_type: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<UDim2Json>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<UDim2Json>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_point: Option<[f32; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub z_index: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_color: Option<[f32; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_transparency: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_color: Option<[f32; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_size_pixel: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_color: Option<[f32; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_size: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_transparency: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_x_alignment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_y_alignment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_color: Option<[f32; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_transparency: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_order: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    pub children: Vec<GuiElement>,
+}
+
+/// UDim2 serialization format
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UDim2Json {
+    pub x_scale: f32,
+    pub x_offset: i32,
+    pub y_scale: f32,
+    pub y_offset: i32,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

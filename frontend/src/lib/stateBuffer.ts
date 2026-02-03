@@ -1,4 +1,4 @@
-import { SpectatorObservation } from '../api'
+import { SpectatorObservation, GuiElement } from '../api'
 
 // Configuration
 const INITIAL_RENDER_DELAY_MS = 200 // Increased for debugging
@@ -26,6 +26,7 @@ export interface PlayerSnapshot {
   position: [number, number, number]
   health: number
   attributes?: Record<string, unknown>
+  gui?: GuiElement[]
 }
 
 export interface StateSnapshot {
@@ -93,7 +94,14 @@ export class StateBuffer {
 
     const players = new Map<string, PlayerSnapshot>()
     for (const player of observation.players) {
-      players.set(player.id, { ...player })
+      players.set(player.id, {
+        id: player.id,
+        name: player.name,
+        position: player.position,
+        health: player.health,
+        attributes: player.attributes,
+        gui: player.gui,
+      })
     }
 
     const snapshot: StateSnapshot = {

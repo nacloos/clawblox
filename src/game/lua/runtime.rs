@@ -363,6 +363,18 @@ impl LuaRuntime {
         // Parent character to workspace
         self.game.workspace().add_child(character);
 
+        // Create PlayerGui container
+        let player_gui = Instance::from_data(InstanceData::new_player_gui("PlayerGui"));
+        player_gui.set_parent(Some(&player));
+
+        // Link PlayerGui to player
+        {
+            let mut player_data = player.data.lock().unwrap();
+            if let Some(pdata) = &mut player_data.player_data {
+                pdata.player_gui = Some(std::sync::Arc::downgrade(&player_gui.data));
+            }
+        }
+
         self.game.players().add_player(player.clone());
         (player, hrp_id)
     }
@@ -443,10 +455,13 @@ impl LuaRuntime {
 
     pub fn fire_player_added(&self, player: &Instance) -> Result<()> {
         let signal = self.game.players().data.lock().unwrap().player_added.clone();
-        signal.fire(
+        // Use fire_as_coroutines to allow callbacks to yield (e.g., for DataStore:GetAsync)
+        let yielded_threads = signal.fire_as_coroutines(
             &self.lua,
             MultiValue::from_iter([Value::UserData(self.lua.create_userdata(player.clone())?)]),
         )?;
+        // Track yielded threads for resumption
+        self.track_yielded_threads(yielded_threads)?;
         Ok(())
     }
 
@@ -459,10 +474,12 @@ impl LuaRuntime {
             .unwrap()
             .player_removing
             .clone();
-        signal.fire(
+        // Use fire_as_coroutines to allow callbacks to yield (e.g., for DataStore:SetAsync)
+        let yielded_threads = signal.fire_as_coroutines(
             &self.lua,
             MultiValue::from_iter([Value::UserData(self.lua.create_userdata(player.clone())?)]),
         )?;
+        self.track_yielded_threads(yielded_threads)?;
         Ok(())
     }
 }

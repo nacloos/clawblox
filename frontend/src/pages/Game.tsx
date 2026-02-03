@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { ArrowLeft, Users } from 'lucide-react'
-import { createGameWebSocket, fetchGameState, SpectatorObservation, SpectatorPlayerInfo } from '../api'
+import { createGameWebSocket, fetchGameState, SpectatorObservation, SpectatorPlayerInfo, sendGuiClick } from '../api'
 import GameScene from '../components/GameScene'
 import PlayerList from '../components/PlayerList'
+import GuiOverlay from '../components/GuiOverlay'
 import { Button } from '@/components/ui/button'
 import { StateBuffer } from '../lib/stateBuffer'
 
@@ -133,6 +134,12 @@ export default function Game() {
     }
   }, [players, selectedPlayerId])
 
+  // Handle GUI click events
+  const handleGuiClick = useCallback((elementId: number) => {
+    if (!id || !selectedPlayerId) return
+    sendGuiClick(id, selectedPlayerId, elementId)
+  }, [id, selectedPlayerId])
+
   const hasGameData = stateBufferRef.current.hasData()
 
   return (
@@ -191,6 +198,11 @@ export default function Game() {
                 stateBuffer={stateBufferRef.current}
                 entityIds={entityIds}
                 followPlayerId={selectedPlayerId}
+              />
+              <GuiOverlay
+                stateBuffer={stateBufferRef.current}
+                followPlayerId={selectedPlayerId}
+                onGuiClick={handleGuiClick}
               />
               <PlayerList
                 players={players}

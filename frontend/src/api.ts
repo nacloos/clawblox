@@ -1,9 +1,45 @@
+export interface UDim2 {
+  x_scale: number
+  x_offset: number
+  y_scale: number
+  y_offset: number
+}
+
+export interface GuiElement {
+  id: number
+  type: 'ScreenGui' | 'Frame' | 'TextLabel' | 'TextButton' | 'ImageLabel' | 'ImageButton'
+  name: string
+  position?: UDim2
+  size?: UDim2
+  anchor_point?: [number, number]
+  rotation?: number
+  z_index?: number
+  visible?: boolean
+  background_color?: [number, number, number]
+  background_transparency?: number
+  border_color?: [number, number, number]
+  border_size_pixel?: number
+  text?: string
+  text_color?: [number, number, number]
+  text_size?: number
+  text_transparency?: number
+  text_x_alignment?: 'Left' | 'Center' | 'Right'
+  text_y_alignment?: 'Top' | 'Center' | 'Bottom'
+  image?: string
+  image_color?: [number, number, number]
+  image_transparency?: number
+  display_order?: number
+  enabled?: boolean
+  children: GuiElement[]
+}
+
 export interface SpectatorPlayerInfo {
   id: string
   name: string
   position: [number, number, number]
   health: number
   attributes?: Record<string, unknown>
+  gui?: GuiElement[]
 }
 
 export interface SpectatorEntity {
@@ -97,4 +133,23 @@ export async function listGames(): Promise<GameListItem[]> {
   }
   const data = await response.json()
   return data.games
+}
+
+export async function sendGuiClick(gameId: string, agentId: string, elementId: number): Promise<void> {
+  const response = await fetch(`/api/v1/games/${gameId}/input`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      agent_id: agentId,
+      input: {
+        type: 'GuiClick',
+        data: { element_id: elementId },
+      },
+    }),
+  })
+  if (!response.ok) {
+    console.error('Failed to send GUI click:', response.statusText)
+  }
 }

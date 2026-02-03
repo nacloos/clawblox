@@ -68,6 +68,7 @@ impl AgentInputService {
         // Convert serde_json::Value to Lua table
         let lua_data = json_to_lua_value(lua, input_data)?;
 
+        // Fire the generic InputReceived event
         signal.fire(
             lua,
             MultiValue::from_iter([
@@ -77,7 +78,65 @@ impl AgentInputService {
             ]),
         )?;
 
+        // Handle GUI click events specially
+        if input_type == "GuiClick" {
+            if let Some(element_id) = input_data.get("element_id").and_then(|v| v.as_u64()) {
+                self.handle_gui_click(lua, player, element_id)?;
+            }
+        }
+
         Ok(())
+    }
+
+    /// Handle a GUI click by finding the element and firing its MouseButton1Click signal
+    fn handle_gui_click(&self, lua: &Lua, player: &Instance, element_id: u64) -> mlua::Result<()> {
+        // Get PlayerGui from player
+        let player_gui = {
+            let data = player.data.lock().unwrap();
+            data.player_data
+                .as_ref()
+                .and_then(|pd| pd.player_gui.as_ref())
+                .and_then(|weak| weak.upgrade())
+                .map(Instance::from_ref)
+        };
+
+        let Some(player_gui) = player_gui else {
+            return Ok(());
+        };
+
+        // Find the GUI element with the matching ID
+        if let Some(element) = Self::find_gui_element_by_id(&player_gui, element_id) {
+            // Fire MouseButton1Click signal if this element has one
+            let signal = {
+                let data = element.data.lock().unwrap();
+                data.gui_data
+                    .as_ref()
+                    .and_then(|g| g.mouse_button1_click.clone())
+            };
+
+            if let Some(signal) = signal {
+                signal.fire(lua, MultiValue::new())?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Recursively find a GUI element by its instance ID
+    fn find_gui_element_by_id(instance: &Instance, target_id: u64) -> Option<Instance> {
+        // Check if this instance matches
+        if instance.id().0 == target_id {
+            return Some(instance.clone());
+        }
+
+        // Search children recursively
+        for child in instance.get_children() {
+            if let Some(found) = Self::find_gui_element_by_id(&child, target_id) {
+                return Some(found);
+            }
+        }
+
+        None
     }
 
     /// Get and clear pending inputs for a user (called from Lua via GetInputs)

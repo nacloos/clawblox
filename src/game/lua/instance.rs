@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use super::events::{create_signal, RBXScriptSignal};
 use super::services::WorkspaceService;
-use super::types::{CFrame, Color3, Material, PartType, Vector3};
+use super::types::{CFrame, Color3, Material, PartType, UDim2, Vector3};
 
 static INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -40,6 +40,14 @@ pub enum ClassName {
     Players,
     RunService,
     Camera,
+    // GUI classes
+    PlayerGui,
+    ScreenGui,
+    Frame,
+    TextLabel,
+    TextButton,
+    ImageLabel,
+    ImageButton,
 }
 
 impl ClassName {
@@ -56,6 +64,13 @@ impl ClassName {
             ClassName::Players => "Players",
             ClassName::RunService => "RunService",
             ClassName::Camera => "Camera",
+            ClassName::PlayerGui => "PlayerGui",
+            ClassName::ScreenGui => "ScreenGui",
+            ClassName::Frame => "Frame",
+            ClassName::TextLabel => "TextLabel",
+            ClassName::TextButton => "TextButton",
+            ClassName::ImageLabel => "ImageLabel",
+            ClassName::ImageButton => "ImageButton",
         }
     }
 
@@ -72,8 +87,65 @@ impl ClassName {
             "Players" => matches!(self, ClassName::Players),
             "RunService" => matches!(self, ClassName::RunService),
             "Camera" => matches!(self, ClassName::Camera),
+            // GUI hierarchy: GuiBase2d is base for all 2D GUI elements
+            "GuiBase2d" => matches!(
+                self,
+                ClassName::ScreenGui
+                    | ClassName::Frame
+                    | ClassName::TextLabel
+                    | ClassName::TextButton
+                    | ClassName::ImageLabel
+                    | ClassName::ImageButton
+            ),
+            // LayerCollector: ScreenGui inherits from this
+            "LayerCollector" => matches!(self, ClassName::ScreenGui),
+            // GuiObject: Frame, TextLabel, TextButton, ImageLabel, ImageButton
+            "GuiObject" => matches!(
+                self,
+                ClassName::Frame
+                    | ClassName::TextLabel
+                    | ClassName::TextButton
+                    | ClassName::ImageLabel
+                    | ClassName::ImageButton
+            ),
+            // GuiButton: TextButton, ImageButton
+            "GuiButton" => matches!(self, ClassName::TextButton | ClassName::ImageButton),
+            "PlayerGui" => matches!(self, ClassName::PlayerGui),
+            "ScreenGui" => matches!(self, ClassName::ScreenGui),
+            "Frame" => matches!(self, ClassName::Frame),
+            "TextLabel" => matches!(self, ClassName::TextLabel),
+            "TextButton" => matches!(self, ClassName::TextButton),
+            "ImageLabel" => matches!(self, ClassName::ImageLabel),
+            "ImageButton" => matches!(self, ClassName::ImageButton),
             _ => self.as_str() == class_name,
         }
+    }
+
+    /// Check if this class can be a valid parent for GUI elements
+    pub fn can_contain_gui(&self) -> bool {
+        matches!(
+            self,
+            ClassName::PlayerGui
+                | ClassName::ScreenGui
+                | ClassName::Frame
+                | ClassName::TextLabel
+                | ClassName::TextButton
+                | ClassName::ImageLabel
+                | ClassName::ImageButton
+        )
+    }
+
+    /// Check if this is a GUI class that requires a GUI parent
+    pub fn is_gui_object(&self) -> bool {
+        matches!(
+            self,
+            ClassName::ScreenGui
+                | ClassName::Frame
+                | ClassName::TextLabel
+                | ClassName::TextButton
+                | ClassName::ImageLabel
+                | ClassName::ImageButton
+        )
     }
 }
 
@@ -94,6 +166,7 @@ pub struct InstanceData {
     pub humanoid_data: Option<HumanoidData>,
     pub player_data: Option<PlayerData>,
     pub model_data: Option<ModelData>,
+    pub gui_data: Option<GuiObjectData>,
 
     destroyed: bool,
 }
@@ -207,6 +280,7 @@ pub struct PlayerData {
     pub user_id: u64,
     pub display_name: String,
     pub character: Option<WeakInstanceRef>,
+    pub player_gui: Option<WeakInstanceRef>,
 
     pub character_added: RBXScriptSignal,
     pub character_removing: RBXScriptSignal,
@@ -218,6 +292,7 @@ impl PlayerData {
             user_id,
             display_name: name.to_string(),
             character: None,
+            player_gui: None,
             character_added: create_signal("CharacterAdded"),
             character_removing: create_signal("CharacterRemoving"),
         }
@@ -232,6 +307,173 @@ pub struct ModelData {
 impl Default for ModelData {
     fn default() -> Self {
         Self { primary_part: None }
+    }
+}
+
+/// Data for GUI objects (Frame, TextLabel, TextButton, etc.)
+#[derive(Debug, Clone)]
+pub struct GuiObjectData {
+    // Layout properties
+    pub position: UDim2,
+    pub size: UDim2,
+    pub anchor_point: (f32, f32), // Vector2 equivalent: 0-1 for X and Y
+    pub rotation: f32,
+    pub z_index: i32,
+    pub layout_order: i32,
+    pub visible: bool,
+
+    // Appearance
+    pub background_color: Color3,
+    pub background_transparency: f32,
+    pub border_color: Color3,
+    pub border_size_pixel: i32,
+
+    // Text properties (for TextLabel, TextButton)
+    pub text: Option<String>,
+    pub text_color: Option<Color3>,
+    pub text_size: Option<f32>,
+    pub text_transparency: Option<f32>,
+    pub text_x_alignment: TextXAlignment,
+    pub text_y_alignment: TextYAlignment,
+
+    // Image properties (for ImageLabel, ImageButton)
+    pub image: Option<String>,
+    pub image_color: Option<Color3>,
+    pub image_transparency: Option<f32>,
+
+    // ScreenGui-specific
+    pub display_order: i32,
+    pub ignore_gui_inset: bool,
+    pub enabled: bool,
+
+    // Events (for GuiButton types)
+    pub mouse_button1_click: Option<RBXScriptSignal>,
+    pub mouse_button1_down: Option<RBXScriptSignal>,
+    pub mouse_button1_up: Option<RBXScriptSignal>,
+    pub mouse_enter: Option<RBXScriptSignal>,
+    pub mouse_leave: Option<RBXScriptSignal>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextXAlignment {
+    Left,
+    #[default]
+    Center,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextYAlignment {
+    Top,
+    #[default]
+    Center,
+    Bottom,
+}
+
+impl Default for GuiObjectData {
+    fn default() -> Self {
+        Self {
+            position: UDim2::new(0.0, 0, 0.0, 0),
+            size: UDim2::new(0.0, 100, 0.0, 100),
+            anchor_point: (0.0, 0.0),
+            rotation: 0.0,
+            z_index: 1,
+            layout_order: 0,
+            visible: true,
+            background_color: Color3::new(1.0, 1.0, 1.0),
+            background_transparency: 0.0,
+            border_color: Color3::new(0.1, 0.1, 0.1),
+            border_size_pixel: 1,
+            text: None,
+            text_color: None,
+            text_size: None,
+            text_transparency: None,
+            text_x_alignment: TextXAlignment::default(),
+            text_y_alignment: TextYAlignment::default(),
+            image: None,
+            image_color: None,
+            image_transparency: None,
+            display_order: 0,
+            ignore_gui_inset: false,
+            enabled: true,
+            mouse_button1_click: None,
+            mouse_button1_down: None,
+            mouse_button1_up: None,
+            mouse_enter: None,
+            mouse_leave: None,
+        }
+    }
+}
+
+impl GuiObjectData {
+    /// Create data for a Frame
+    pub fn new_frame() -> Self {
+        Self::default()
+    }
+
+    /// Create data for a TextLabel
+    pub fn new_text_label() -> Self {
+        Self {
+            text: Some(String::new()),
+            text_color: Some(Color3::new(0.0, 0.0, 0.0)),
+            text_size: Some(14.0),
+            text_transparency: Some(0.0),
+            background_transparency: 1.0, // TextLabels default to transparent background
+            ..Self::default()
+        }
+    }
+
+    /// Create data for a TextButton
+    pub fn new_text_button() -> Self {
+        Self {
+            text: Some(String::new()),
+            text_color: Some(Color3::new(0.0, 0.0, 0.0)),
+            text_size: Some(14.0),
+            text_transparency: Some(0.0),
+            mouse_button1_click: Some(create_signal("MouseButton1Click")),
+            mouse_button1_down: Some(create_signal("MouseButton1Down")),
+            mouse_button1_up: Some(create_signal("MouseButton1Up")),
+            mouse_enter: Some(create_signal("MouseEnter")),
+            mouse_leave: Some(create_signal("MouseLeave")),
+            ..Self::default()
+        }
+    }
+
+    /// Create data for an ImageLabel
+    pub fn new_image_label() -> Self {
+        Self {
+            image: Some(String::new()),
+            image_color: Some(Color3::new(1.0, 1.0, 1.0)),
+            image_transparency: Some(0.0),
+            background_transparency: 1.0,
+            ..Self::default()
+        }
+    }
+
+    /// Create data for an ImageButton
+    pub fn new_image_button() -> Self {
+        Self {
+            image: Some(String::new()),
+            image_color: Some(Color3::new(1.0, 1.0, 1.0)),
+            image_transparency: Some(0.0),
+            mouse_button1_click: Some(create_signal("MouseButton1Click")),
+            mouse_button1_down: Some(create_signal("MouseButton1Down")),
+            mouse_button1_up: Some(create_signal("MouseButton1Up")),
+            mouse_enter: Some(create_signal("MouseEnter")),
+            mouse_leave: Some(create_signal("MouseLeave")),
+            ..Self::default()
+        }
+    }
+
+    /// Create data for a ScreenGui
+    pub fn new_screen_gui() -> Self {
+        Self {
+            enabled: true,
+            display_order: 0,
+            ignore_gui_inset: false,
+            background_transparency: 1.0, // ScreenGui is fully transparent
+            ..Self::default()
+        }
     }
 }
 
@@ -252,6 +494,7 @@ impl InstanceData {
             humanoid_data: None,
             player_data: None,
             model_data: None,
+            gui_data: None,
             destroyed: false,
         }
     }
@@ -277,6 +520,46 @@ impl InstanceData {
     pub fn new_player(user_id: u64, name: &str) -> Self {
         let mut inst = Self::new(ClassName::Player, name);
         inst.player_data = Some(PlayerData::new(user_id, name));
+        inst
+    }
+
+    pub fn new_player_gui(name: &str) -> Self {
+        Self::new(ClassName::PlayerGui, name)
+    }
+
+    pub fn new_screen_gui(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::ScreenGui, name);
+        inst.gui_data = Some(GuiObjectData::new_screen_gui());
+        inst
+    }
+
+    pub fn new_frame(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::Frame, name);
+        inst.gui_data = Some(GuiObjectData::new_frame());
+        inst
+    }
+
+    pub fn new_text_label(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::TextLabel, name);
+        inst.gui_data = Some(GuiObjectData::new_text_label());
+        inst
+    }
+
+    pub fn new_text_button(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::TextButton, name);
+        inst.gui_data = Some(GuiObjectData::new_text_button());
+        inst
+    }
+
+    pub fn new_image_label(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::ImageLabel, name);
+        inst.gui_data = Some(GuiObjectData::new_image_label());
+        inst
+    }
+
+    pub fn new_image_button(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::ImageButton, name);
+        inst.gui_data = Some(GuiObjectData::new_image_button());
         inst
     }
 
@@ -441,6 +724,21 @@ impl Instance {
         new_data.part_data = data.part_data.clone();
         new_data.humanoid_data = data.humanoid_data.clone();
         new_data.model_data = data.model_data.clone();
+
+        // Clone GUI data but create fresh signals to avoid sharing handlers
+        if let Some(gui) = &data.gui_data {
+            let mut cloned_gui = gui.clone();
+            // Create new signals for the cloned instance
+            if cloned_gui.mouse_button1_click.is_some() {
+                cloned_gui.mouse_button1_click = Some(create_signal("MouseButton1Click"));
+                cloned_gui.mouse_button1_down = Some(create_signal("MouseButton1Down"));
+                cloned_gui.mouse_button1_up = Some(create_signal("MouseButton1Up"));
+                cloned_gui.mouse_enter = Some(create_signal("MouseEnter"));
+                cloned_gui.mouse_leave = Some(create_signal("MouseLeave"));
+            }
+            new_data.gui_data = Some(cloned_gui);
+        }
+
         drop(data);
 
         let new_instance = Instance::from_data(new_data);
@@ -532,15 +830,33 @@ impl UserData for Instance {
             Ok(this.data.lock().unwrap().attribute_changed.clone())
         });
 
-        fields.add_field_method_get("Position", |_, this| {
+        // Position: Vector3 for Parts, UDim2 for GUI objects
+        fields.add_field_method_get("Position", |lua, this| {
             let data = this.data.lock().unwrap();
-            Ok(data.part_data.as_ref().map(|p| p.position))
+            if let Some(part) = &data.part_data {
+                Ok(Value::UserData(lua.create_userdata(part.position)?))
+            } else if let Some(gui) = &data.gui_data {
+                Ok(Value::UserData(lua.create_userdata(gui.position)?))
+            } else {
+                Ok(Value::Nil)
+            }
         });
-        fields.add_field_method_set("Position", |_, this, pos: Vector3| {
+        fields.add_field_method_set("Position", |_, this, value: Value| {
             let mut data = this.data.lock().unwrap();
-            if let Some(part) = &mut data.part_data {
-                part.position = pos;
-                part.cframe.position = pos;
+            match value {
+                Value::UserData(ud) => {
+                    if let Ok(pos) = ud.borrow::<Vector3>() {
+                        if let Some(part) = &mut data.part_data {
+                            part.position = *pos;
+                            part.cframe.position = *pos;
+                        }
+                    } else if let Ok(pos) = ud.borrow::<UDim2>() {
+                        if let Some(gui) = &mut data.gui_data {
+                            gui.position = *pos;
+                        }
+                    }
+                }
+                _ => {}
             }
             Ok(())
         });
@@ -558,14 +874,32 @@ impl UserData for Instance {
             Ok(())
         });
 
-        fields.add_field_method_get("Size", |_, this| {
+        // Size: Vector3 for Parts, UDim2 for GUI objects
+        fields.add_field_method_get("Size", |lua, this| {
             let data = this.data.lock().unwrap();
-            Ok(data.part_data.as_ref().map(|p| p.size))
+            if let Some(part) = &data.part_data {
+                Ok(Value::UserData(lua.create_userdata(part.size)?))
+            } else if let Some(gui) = &data.gui_data {
+                Ok(Value::UserData(lua.create_userdata(gui.size)?))
+            } else {
+                Ok(Value::Nil)
+            }
         });
-        fields.add_field_method_set("Size", |_, this, size: Vector3| {
+        fields.add_field_method_set("Size", |_, this, value: Value| {
             let mut data = this.data.lock().unwrap();
-            if let Some(part) = &mut data.part_data {
-                part.size = size;
+            match value {
+                Value::UserData(ud) => {
+                    if let Ok(size) = ud.borrow::<Vector3>() {
+                        if let Some(part) = &mut data.part_data {
+                            part.size = *size;
+                        }
+                    } else if let Ok(size) = ud.borrow::<UDim2>() {
+                        if let Some(gui) = &mut data.gui_data {
+                            gui.size = *size;
+                        }
+                    }
+                }
+                _ => {}
             }
             Ok(())
         });
@@ -820,6 +1154,16 @@ impl UserData for Instance {
                 .map(|p| p.character_removing.clone()))
         });
 
+        fields.add_field_method_get("PlayerGui", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data
+                .player_data
+                .as_ref()
+                .and_then(|p| p.player_gui.as_ref())
+                .and_then(|w| w.upgrade())
+                .map(Instance::from_ref))
+        });
+
         fields.add_field_method_get("PrimaryPart", |_, this| {
             let data = this.data.lock().unwrap();
             Ok(data
@@ -835,6 +1179,365 @@ impl UserData for Instance {
                 model.primary_part = part.map(|p| Arc::downgrade(&p.data));
             }
             Ok(())
+        });
+
+        // ========== GUI Properties ==========
+
+        // AnchorPoint (GuiObject)
+        fields.add_field_method_get("AnchorPoint", |lua, this| {
+            let data = this.data.lock().unwrap();
+            if let Some(gui) = &data.gui_data {
+                let table = lua.create_table()?;
+                table.set("X", gui.anchor_point.0)?;
+                table.set("Y", gui.anchor_point.1)?;
+                Ok(Value::Table(table))
+            } else {
+                Ok(Value::Nil)
+            }
+        });
+        fields.add_field_method_set("AnchorPoint", |_, this, value: Value| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                if let Value::Table(t) = value {
+                    let x: f32 = t.get("X").unwrap_or(0.0);
+                    let y: f32 = t.get("Y").unwrap_or(0.0);
+                    gui.anchor_point = (x, y);
+                }
+            }
+            Ok(())
+        });
+
+        // Rotation (GuiObject) - in degrees
+        fields.add_field_method_get("Rotation", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().map(|g| g.rotation))
+        });
+        fields.add_field_method_set("Rotation", |_, this, rotation: f32| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                gui.rotation = rotation;
+            }
+            Ok(())
+        });
+
+        // ZIndex (GuiObject)
+        fields.add_field_method_get("ZIndex", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().map(|g| g.z_index))
+        });
+        fields.add_field_method_set("ZIndex", |_, this, z_index: i32| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                gui.z_index = z_index;
+            }
+            Ok(())
+        });
+
+        // LayoutOrder (GuiObject)
+        fields.add_field_method_get("LayoutOrder", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().map(|g| g.layout_order))
+        });
+        fields.add_field_method_set("LayoutOrder", |_, this, layout_order: i32| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                gui.layout_order = layout_order;
+            }
+            Ok(())
+        });
+
+        // Visible (GuiObject)
+        fields.add_field_method_get("Visible", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().map(|g| g.visible))
+        });
+        fields.add_field_method_set("Visible", |_, this, visible: bool| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                gui.visible = visible;
+            }
+            Ok(())
+        });
+
+        // BackgroundColor3 (GuiObject)
+        fields.add_field_method_get("BackgroundColor3", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().map(|g| g.background_color))
+        });
+        fields.add_field_method_set("BackgroundColor3", |_, this, color: Color3| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                gui.background_color = color;
+            }
+            Ok(())
+        });
+
+        // BackgroundTransparency (GuiObject)
+        fields.add_field_method_get("BackgroundTransparency", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().map(|g| g.background_transparency))
+        });
+        fields.add_field_method_set("BackgroundTransparency", |_, this, transparency: f32| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                gui.background_transparency = transparency.clamp(0.0, 1.0);
+            }
+            Ok(())
+        });
+
+        // BorderColor3 (GuiObject)
+        fields.add_field_method_get("BorderColor3", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().map(|g| g.border_color))
+        });
+        fields.add_field_method_set("BorderColor3", |_, this, color: Color3| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                gui.border_color = color;
+            }
+            Ok(())
+        });
+
+        // BorderSizePixel (GuiObject)
+        fields.add_field_method_get("BorderSizePixel", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().map(|g| g.border_size_pixel))
+        });
+        fields.add_field_method_set("BorderSizePixel", |_, this, size: i32| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                gui.border_size_pixel = size.max(0);
+            }
+            Ok(())
+        });
+
+        // Text (TextLabel, TextButton)
+        fields.add_field_method_get("Text", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().and_then(|g| g.text.clone()))
+        });
+        fields.add_field_method_set("Text", |_, this, text: String| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                gui.text = Some(text);
+            }
+            Ok(())
+        });
+
+        // TextColor3 (TextLabel, TextButton)
+        fields.add_field_method_get("TextColor3", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().and_then(|g| g.text_color))
+        });
+        fields.add_field_method_set("TextColor3", |_, this, color: Color3| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                gui.text_color = Some(color);
+            }
+            Ok(())
+        });
+
+        // TextSize (TextLabel, TextButton)
+        fields.add_field_method_get("TextSize", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().and_then(|g| g.text_size))
+        });
+        fields.add_field_method_set("TextSize", |_, this, size: f32| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                gui.text_size = Some(size.max(1.0));
+            }
+            Ok(())
+        });
+
+        // TextTransparency (TextLabel, TextButton)
+        fields.add_field_method_get("TextTransparency", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().and_then(|g| g.text_transparency))
+        });
+        fields.add_field_method_set("TextTransparency", |_, this, transparency: f32| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                gui.text_transparency = Some(transparency.clamp(0.0, 1.0));
+            }
+            Ok(())
+        });
+
+        // TextXAlignment (TextLabel, TextButton)
+        fields.add_field_method_get("TextXAlignment", |lua, this| {
+            let data = this.data.lock().unwrap();
+            if let Some(gui) = &data.gui_data {
+                let alignment = match gui.text_x_alignment {
+                    TextXAlignment::Left => "Left",
+                    TextXAlignment::Center => "Center",
+                    TextXAlignment::Right => "Right",
+                };
+                Ok(Value::String(lua.create_string(alignment)?))
+            } else {
+                Ok(Value::Nil)
+            }
+        });
+        fields.add_field_method_set("TextXAlignment", |_, this, alignment: Value| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                if let Value::String(s) = alignment {
+                    if let Ok(str_val) = s.to_str() {
+                        gui.text_x_alignment = match str_val.as_ref() {
+                            "Left" => TextXAlignment::Left,
+                            "Right" => TextXAlignment::Right,
+                            _ => TextXAlignment::Center,
+                        };
+                    }
+                }
+            }
+            Ok(())
+        });
+
+        // TextYAlignment (TextLabel, TextButton)
+        fields.add_field_method_get("TextYAlignment", |lua, this| {
+            let data = this.data.lock().unwrap();
+            if let Some(gui) = &data.gui_data {
+                let alignment = match gui.text_y_alignment {
+                    TextYAlignment::Top => "Top",
+                    TextYAlignment::Center => "Center",
+                    TextYAlignment::Bottom => "Bottom",
+                };
+                Ok(Value::String(lua.create_string(alignment)?))
+            } else {
+                Ok(Value::Nil)
+            }
+        });
+        fields.add_field_method_set("TextYAlignment", |_, this, alignment: Value| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                if let Value::String(s) = alignment {
+                    if let Ok(str_val) = s.to_str() {
+                        gui.text_y_alignment = match str_val.as_ref() {
+                            "Top" => TextYAlignment::Top,
+                            "Bottom" => TextYAlignment::Bottom,
+                            _ => TextYAlignment::Center,
+                        };
+                    }
+                }
+            }
+            Ok(())
+        });
+
+        // Image (ImageLabel, ImageButton)
+        fields.add_field_method_get("Image", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().and_then(|g| g.image.clone()))
+        });
+        fields.add_field_method_set("Image", |_, this, image: String| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                gui.image = Some(image);
+            }
+            Ok(())
+        });
+
+        // ImageColor3 (ImageLabel, ImageButton)
+        fields.add_field_method_get("ImageColor3", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().and_then(|g| g.image_color))
+        });
+        fields.add_field_method_set("ImageColor3", |_, this, color: Color3| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                gui.image_color = Some(color);
+            }
+            Ok(())
+        });
+
+        // ImageTransparency (ImageLabel, ImageButton)
+        fields.add_field_method_get("ImageTransparency", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().and_then(|g| g.image_transparency))
+        });
+        fields.add_field_method_set("ImageTransparency", |_, this, transparency: f32| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                gui.image_transparency = Some(transparency.clamp(0.0, 1.0));
+            }
+            Ok(())
+        });
+
+        // DisplayOrder (ScreenGui)
+        fields.add_field_method_get("DisplayOrder", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().map(|g| g.display_order))
+        });
+        fields.add_field_method_set("DisplayOrder", |_, this, order: i32| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                gui.display_order = order;
+            }
+            Ok(())
+        });
+
+        // IgnoreGuiInset (ScreenGui)
+        fields.add_field_method_get("IgnoreGuiInset", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().map(|g| g.ignore_gui_inset))
+        });
+        fields.add_field_method_set("IgnoreGuiInset", |_, this, ignore: bool| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                gui.ignore_gui_inset = ignore;
+            }
+            Ok(())
+        });
+
+        // Enabled (ScreenGui)
+        fields.add_field_method_get("Enabled", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().map(|g| g.enabled))
+        });
+        fields.add_field_method_set("Enabled", |_, this, enabled: bool| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                gui.enabled = enabled;
+            }
+            Ok(())
+        });
+
+        // MouseButton1Click (GuiButton)
+        fields.add_field_method_get("MouseButton1Click", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data
+                .gui_data
+                .as_ref()
+                .and_then(|g| g.mouse_button1_click.clone()))
+        });
+
+        // MouseButton1Down (GuiButton)
+        fields.add_field_method_get("MouseButton1Down", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data
+                .gui_data
+                .as_ref()
+                .and_then(|g| g.mouse_button1_down.clone()))
+        });
+
+        // MouseButton1Up (GuiButton)
+        fields.add_field_method_get("MouseButton1Up", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data
+                .gui_data
+                .as_ref()
+                .and_then(|g| g.mouse_button1_up.clone()))
+        });
+
+        // MouseEnter (GuiButton)
+        fields.add_field_method_get("MouseEnter", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().and_then(|g| g.mouse_enter.clone()))
+        });
+
+        // MouseLeave (GuiButton)
+        fields.add_field_method_get("MouseLeave", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().and_then(|g| g.mouse_leave.clone()))
         });
     }
 
@@ -1037,6 +1740,19 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
                     "Model" => Instance::from_data(InstanceData::new_model("Model")),
                     "Humanoid" => Instance::from_data(InstanceData::new_humanoid("Humanoid")),
                     "Folder" => Instance::new(ClassName::Folder, "Folder"),
+                    // GUI classes
+                    "ScreenGui" => Instance::from_data(InstanceData::new_screen_gui("ScreenGui")),
+                    "Frame" => Instance::from_data(InstanceData::new_frame("Frame")),
+                    "TextLabel" => Instance::from_data(InstanceData::new_text_label("TextLabel")),
+                    "TextButton" => {
+                        Instance::from_data(InstanceData::new_text_button("TextButton"))
+                    }
+                    "ImageLabel" => {
+                        Instance::from_data(InstanceData::new_image_label("ImageLabel"))
+                    }
+                    "ImageButton" => {
+                        Instance::from_data(InstanceData::new_image_button("ImageButton"))
+                    }
                     _ => Instance::new(ClassName::Instance, &class_name),
                 };
 
