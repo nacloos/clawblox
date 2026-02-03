@@ -1,4 +1,4 @@
-import { useRef, useMemo } from 'react'
+import { useRef, useMemo, useEffect } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import Entity from './Entity'
 import * as THREE from 'three'
@@ -23,6 +23,12 @@ const FOLLOW_DISTANCE = 20
 const FOLLOW_HEIGHT = 15
 const MIN_CAMERA_DISTANCE = 5
 
+// Overview controls
+const OVERVIEW_PAN_SPEED = 55
+const OVERVIEW_ZOOM_SPEED = 0.001
+const MIN_OVERVIEW_ZOOM = 0.2
+const MAX_OVERVIEW_ZOOM = 1.8
+
 function CameraController({
   stateBuffer,
   followPlayerId
@@ -30,13 +36,63 @@ function CameraController({
   stateBuffer: StateBuffer
   followPlayerId?: string | null
 }) {
-  const { scene } = useThree()
+  const { scene, gl } = useThree()
   const targetPosition = useRef(new THREE.Vector3())
   const targetLookAt = useRef(new THREE.Vector3())
   const raycaster = useMemo(() => new THREE.Raycaster(), [])
   const rayDirection = useRef(new THREE.Vector3())
+  const pressedKeys = useRef(new Set<string>())
+  const overviewPan = useRef(new THREE.Vector3(0, 0, 0))
+  const overviewZoom = useRef(1)
+
+  useEffect(() => {
+    const shouldIgnoreKeyboardEvent = (target: EventTarget | null): boolean => {
+      if (!(target instanceof HTMLElement)) return false
+      const tagName = target.tagName.toLowerCase()
+      return target.isContentEditable || tagName === 'input' || tagName === 'textarea' || tagName === 'select'
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (shouldIgnoreKeyboardEvent(event.target)) return
+      const key = event.key.toLowerCase()
+      if (key === 'w' || key === 'a' || key === 's' || key === 'd') {
+        pressedKeys.current.add(key)
+      }
+    }
+
+    const onKeyUp = (event: KeyboardEvent) => {
+      pressedKeys.current.delete(event.key.toLowerCase())
+    }
+
+    const onWindowBlur = () => {
+      pressedKeys.current.clear()
+    }
+
+    const onWheel = (event: WheelEvent) => {
+      if (followPlayerId) return
+
+      event.preventDefault()
+      // Keep camera angle fixed by zooming via distance scaling only.
+      const nextZoom = overviewZoom.current * Math.exp(event.deltaY * OVERVIEW_ZOOM_SPEED)
+      overviewZoom.current = THREE.MathUtils.clamp(nextZoom, MIN_OVERVIEW_ZOOM, MAX_OVERVIEW_ZOOM)
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    window.addEventListener('blur', onWindowBlur)
+    gl.domElement.addEventListener('wheel', onWheel, { passive: false })
+
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+      window.removeEventListener('blur', onWindowBlur)
+      gl.domElement.removeEventListener('wheel', onWheel)
+    }
+  }, [followPlayerId, gl])
 
   useFrame(({ camera }, delta) => {
+    camera.up.set(0, 1, 0)
+
     if (followPlayerId) {
       // Get interpolated player position from buffer
       const result = stateBuffer.getInterpolatedState()
@@ -92,13 +148,34 @@ function CameraController({
         }
       }
     } else {
-      targetPosition.current.copy(OVERVIEW_POSITION)
-      targetLookAt.current.copy(OVERVIEW_TARGET)
+      const direction = new THREE.Vector3()
+      if (pressedKeys.current.has('w')) direction.z -= 1
+      if (pressedKeys.current.has('s')) direction.z += 1
+      if (pressedKeys.current.has('a')) direction.x -= 1
+      if (pressedKeys.current.has('d')) direction.x += 1
+
+      if (direction.lengthSq() > 0) {
+        direction.normalize()
+        const step = (OVERVIEW_PAN_SPEED * overviewZoom.current) * delta
+        overviewPan.current.x += direction.x * step
+        overviewPan.current.z += direction.z * step
+      }
+
+      targetLookAt.current.set(overviewPan.current.x, OVERVIEW_TARGET.y, overviewPan.current.z)
+      targetPosition.current.set(
+        overviewPan.current.x + OVERVIEW_POSITION.x * overviewZoom.current,
+        OVERVIEW_POSITION.y * overviewZoom.current,
+        overviewPan.current.z + OVERVIEW_POSITION.z * overviewZoom.current
+      )
     }
 
-    // Frame-rate independent smooth camera movement
-    const factor = 1 - Math.exp(-CAMERA_SMOOTHING * delta)
+    // Only smooth while following a player; keep overview movement immediate.
+    const factor = followPlayerId ? (1 - Math.exp(-CAMERA_SMOOTHING * delta)) : 1
     camera.position.lerp(targetPosition.current, factor)
+    if (camera.zoom !== 1) {
+      camera.zoom = 1
+      camera.updateProjectionMatrix()
+    }
     camera.lookAt(targetLookAt.current)
   })
 
