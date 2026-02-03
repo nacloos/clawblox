@@ -342,44 +342,22 @@ def clean_weights(mesh_obj, weight_threshold=0.05, max_influences=4):
 def assign_island_weights(mesh_obj, armature_obj, islands, mesh_bounds):
     """
     Assign weights to mesh islands based on their classification.
-    Small/isolated islands get assigned to a single bone to prevent jitter.
+    Only reassign very small isolated islands (< 2% of total vertices).
     """
     bone_positions = get_bone_positions(armature_obj)
     mesh = mesh_obj.data
+    total_verts = len(mesh.vertices)
 
-    # Bone mapping for island types
-    bone_mapping = {
-        'head': 'head',
-        'arm_l': 'hand.L',
-        'arm_r': 'hand.R',
-        'leg_l': 'foot.L',
-        'leg_r': 'foot.R',
-        'appendage': None,  # Will find nearest
-    }
-
-    # Get main body volume for comparison
-    if islands:
-        main_body_volume = islands[0][1]['volume']
-    else:
-        return
+    # Only reassign islands smaller than 2% of total mesh
+    small_island_threshold = total_verts * 0.02
 
     for island_verts, island_bounds in islands:
-        # Skip the main body (handled by automatic weights)
-        if island_bounds['volume'] > main_body_volume * 0.5:
+        # Only reassign very small islands
+        if len(island_verts) > small_island_threshold:
             continue
 
-        # Classify this island
-        classification = classify_island(island_bounds, mesh_bounds)
-
-        # Skip body classification
-        if classification == 'body':
-            continue
-
-        # Determine target bone
-        target_bone = bone_mapping.get(classification)
-        if target_bone is None:
-            # Find nearest bone
-            target_bone = find_nearest_bone(island_bounds['center'], bone_positions)
+        # Find nearest bone for this island
+        target_bone = find_nearest_bone(island_bounds['center'], bone_positions)
 
         if target_bone is None:
             continue
@@ -388,19 +366,30 @@ def assign_island_weights(mesh_obj, armature_obj, islands, mesh_bounds):
         if target_bone not in mesh_obj.vertex_groups:
             continue
 
-        group_idx = mesh_obj.vertex_groups[target_bone].index
-
         # Assign full weight to all vertices in this island
         for vert_idx in island_verts:
-            vert = mesh.vertices[vert_idx]
-
-            # Clear existing weights
-            for group in vert.groups:
-                group.weight = 0.0
-
-            # Assign to target bone
-            # Need to use vertex_groups API for assignment
             mesh_obj.vertex_groups[target_bone].add([vert_idx], 1.0, 'REPLACE')
+
+
+def ensure_all_vertices_weighted(mesh_obj, armature_obj):
+    """
+    Ensure every vertex has at least some weight.
+    Unweighted vertices get assigned to the nearest bone.
+    """
+    bone_positions = get_bone_positions(armature_obj)
+    mesh = mesh_obj.data
+
+    for vert in mesh.vertices:
+        # Check if vertex has any weight
+        total_weight = sum(g.weight for g in vert.groups)
+
+        if total_weight < 0.01:
+            # Find nearest bone
+            vert_pos = mesh_obj.matrix_world @ vert.co
+            nearest_bone = find_nearest_bone(vert_pos, bone_positions)
+
+            if nearest_bone and nearest_bone in mesh_obj.vertex_groups:
+                mesh_obj.vertex_groups[nearest_bone].add([vert.index], 1.0, 'REPLACE')
 
 
 def smooth_weights(mesh_obj, iterations=2):
