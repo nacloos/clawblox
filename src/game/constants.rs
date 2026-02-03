@@ -24,8 +24,8 @@ pub mod physics {
     /// Character controller autostep max height
     pub const AUTOSTEP_MAX_HEIGHT: f32 = 1.0;  // Generous autostep for platforms
 
-    /// Character controller autostep min width
-    pub const AUTOSTEP_MIN_WIDTH: f32 = 0.3;
+    /// Character controller autostep min width (very small for platform edges)
+    pub const AUTOSTEP_MIN_WIDTH: f32 = 0.01;
 
     /// Character controller snap to ground distance
     pub const SNAP_TO_GROUND: f32 = 0.2;

@@ -528,7 +528,7 @@ local function createMap()
     local floor = Instance.new("Part")
     floor.Name = "Floor"
     floor.Size = Vector3.new(MAP_LENGTH + 4, 2, MAP_WIDTH)
-    floor.Position = Vector3.new(0, -1, 0)
+    floor.Position = Vector3.new(0, -1, 0)  -- Top at Y=0
     floor.Anchored = true
     floor.Color = Color3.fromRGB(100, 150, 100)  -- Green grass
     floor.Parent = Workspace
@@ -567,13 +567,15 @@ local function createMap()
     for i = 1, BASE_COUNT do
         local baseZ = getBaseCenterZForIndex(i)
 
+        -- Base platform is visual only - floor provides collision
+        -- This avoids autostep issues at platform edges
         local basePlatform = Instance.new("Part")
         basePlatform.Name = "BasePlatform_" .. i
         basePlatform.Size = Vector3.new(BASE_SIZE_X, BASE_PLATFORM_HEIGHT, BASE_SIZE_Z)
         basePlatform.Position = Vector3.new(baseCenterX, BASE_PLATFORM_HEIGHT / 2, baseZ)
         basePlatform.Anchored = true
         basePlatform.Color = Color3.fromRGB(90, 170, 90)
-        basePlatform.CanCollide = true
+        basePlatform.CanCollide = false
         basePlatform:SetAttribute("IsBase", true)
         basePlatform:SetAttribute("BaseIndex", i)
         basePlatform.Parent = Workspace
@@ -933,7 +935,12 @@ local function initializePlayer(player)
     dirtyPlayers[player.UserId] = false
     saveAccumulator[player.UserId] = 0
 
-    print("[Init] " .. player.Name .. " initialized (money: " .. getPlayerData(player).money .. ", speedLevel: " .. getPlayerData(player).speedLevel .. ")")
+    local data = getPlayerData(player)
+    if data then
+        print("[Init] " .. player.Name .. " initialized (money: " .. data.money .. ", speedLevel: " .. data.speedLevel .. ")")
+    else
+        warn("[Init] " .. player.Name .. " initialized but no player data found")
+    end
 end
 
 --------------------------------------------------------------------------------
@@ -973,6 +980,15 @@ if AgentInputService then
             local humanoid = getHumanoid(player)
             if humanoid and data and data.position then
                 local pos = data.position
+                if type(pos) ~= "table" or #pos < 3 then
+                    warn("[MoveTo] Invalid position payload for " .. player.Name)
+                    return
+                end
+                if type(pos[1]) ~= "number" or type(pos[2]) ~= "number" or type(pos[3]) ~= "number" then
+                    warn("[MoveTo] Non-numeric position for " .. player.Name)
+                    return
+                end
+                print("[Input] MoveTo " .. player.Name .. " -> (" .. pos[1] .. ", " .. pos[2] .. ", " .. pos[3] .. ")")
                 humanoid:MoveTo(Vector3.new(pos[1], pos[2], pos[3]))
             else
                 warn("[MoveTo] Missing humanoid or position for " .. player.Name)
