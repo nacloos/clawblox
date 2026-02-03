@@ -28,8 +28,6 @@ pub struct GameInstance {
     pub action_receiver: Receiver<QueuedAction>,
     pub action_sender: Sender<QueuedAction>,
     pub status: GameStatus,
-    /// Counter for generating unique user IDs that fit in Lua's safe integer range (< 2^53)
-    next_user_id: u64,
     /// Time when the game instance was created (for server_time_ms calculation)
     start_time: Instant,
     /// Async bridge for database operations (DataStoreService)
@@ -61,6 +59,16 @@ pub enum GameAction {
 }
 
 impl GameInstance {
+    /// Derive a stable numeric user_id from an agent UUID (fits Lua safe integer range < 2^53).
+    fn user_id_from_agent_id(agent_id: Uuid) -> u64 {
+        let mask = (1u128 << 53) - 1;
+        let mut id = (agent_id.as_u128() & mask) as u64;
+        if id == 0 {
+            id = 1;
+        }
+        id
+    }
+
     /// Creates a new game instance without a script
     ///
     /// # Arguments
@@ -80,7 +88,6 @@ impl GameInstance {
             action_receiver,
             action_sender,
             status: GameStatus::Playing,
-            next_user_id: 1, // Start at 1, stays well within Lua's safe integer range
             start_time: Instant::now(),
             async_bridge,
         }
@@ -129,9 +136,8 @@ impl GameInstance {
             return false;
         }
 
-        // Use counter-based user_id to ensure it fits in Lua's safe integer range (< 2^53)
-        let user_id = self.next_user_id;
-        self.next_user_id += 1;
+        // Use a stable user_id derived from agent_id so DataStore keys persist across restarts.
+        let user_id = Self::user_id_from_agent_id(agent_id);
         self.players.insert(agent_id, user_id);
         self.player_names.insert(agent_id, name.to_string());
 

@@ -48,6 +48,9 @@ def find_nearest_brainrot(pos: list, entities: list) -> dict | None:
 
     for entity in entities:
         if entity.get("name") == "Brainrot":
+            # Ignore placed brainrots in the safe zone (base area)
+            if entity["position"][0] >= SAFE_ZONE_X_START:
+                continue
             dist = distance_xz(pos, entity["position"])
             if dist < nearest_dist:
                 nearest_dist = dist
@@ -81,6 +84,8 @@ def run_agent(api_key: str):
     state = "collect"  # collect, return, deposit, upgrade
     target_brainrot = None
     last_status_time = 0
+    last_move_time = time.time()
+    last_pos = None
 
     try:
         while True:
@@ -108,6 +113,14 @@ def run_agent(api_key: str):
             if now - last_status_time >= 3.0:
                 print(f"[{state.upper()}] pos=({pos[0]:.0f}, {pos[2]:.0f}) money={money:.2f} speed={speed_level} carrying={carried_count} income=${passive_income}/s")
                 last_status_time = now
+
+            # Track movement (simple stuck detection)
+            if last_pos is None:
+                last_pos = pos
+            else:
+                if distance_xz(pos, last_pos) > 0.5:
+                    last_move_time = now
+                    last_pos = pos
 
             # State machine
             if state == "collect":
@@ -142,7 +155,7 @@ def run_agent(api_key: str):
                     resp = requests.post(
                         f"{API_BASE}/games/{GAME_ID}/input",
                         headers=headers,
-                        json={"type": "MoveTo", "data": {"position": [target_x, 0, target_z]}},
+                        json={"type": "MoveTo", "data": {"position": [target_x, pos[1], target_z]}},
                         timeout=5
                     )
 
@@ -158,11 +171,20 @@ def run_agent(api_key: str):
                     resp = requests.post(
                         f"{API_BASE}/games/{GAME_ID}/input",
                         headers=headers,
-                        json={"type": "MoveTo", "data": {"position": [75, 0, 0]}},
+                        json={"type": "MoveTo", "data": {"position": [75, pos[1], 0]}},
                         timeout=5
                     )
                 else:
                     state = "deposit"
+                # If stuck for >5s, nudge toward base
+                if now - last_move_time > 5.0:
+                    resp = requests.post(
+                        f"{API_BASE}/games/{GAME_ID}/input",
+                        headers=headers,
+                        json={"type": "MoveTo", "data": {"position": [pos[0] + 5, pos[1], pos[2]]}},
+                        timeout=5
+                    )
+                    last_move_time = now
 
             elif state == "deposit":
                 # Deposit brainrots (places them on base for passive income)

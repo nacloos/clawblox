@@ -19,6 +19,7 @@ local BRAINROT_VALUE = 10     -- Fixed value for Phase 1
 local MAX_BRAINROTS = 20      -- Max active brainrots
 local SPAWN_INTERVAL = 2      -- Seconds between spawns
 local CARRY_CAPACITY = 1      -- Starting carry capacity
+local SAVE_INTERVAL = 15      -- Seconds between autosaves (if dirty)
 
 -- Speed upgrades
 local SPEED_UPGRADES = {
@@ -43,6 +44,8 @@ local playerData = {}       -- keyed by UserId: {money, speedLevel, carryCapacit
 local brainrots = {}        -- Active brainrot parts
 local lastSpawnTime = 0
 local incomeAccumulator = {} -- Per-player income accumulator for passive income
+local saveAccumulator = {}   -- Per-player autosave timer
+local dirtyPlayers = {}      -- Per-player dirty flag for autosave
 
 -- DataStore
 local playerStore = DataStoreService:GetDataStore("PlayerData")
@@ -57,6 +60,10 @@ end
 
 local function setPlayerData(player, data)
     playerData[player.UserId] = data
+end
+
+local function markDirty(player)
+    dirtyPlayers[player.UserId] = true
 end
 
 local function getHumanoid(player)
@@ -112,10 +119,12 @@ local function placeBrainrotOnBase(brainrot, slotIndex, incomeRate)
 
     -- Position on base floor (deposit area at X=75)
     local spacing = 3
-    local col = (slotIndex - 1) % 5
-    local row = math.floor((slotIndex - 1) / 5)
-    local x = 65 + col * spacing
-    local z = -6 + row * spacing
+    local cols = 5
+    local col = (slotIndex - 1) % cols
+    local row = math.floor((slotIndex - 1) / cols)
+    local safeZoneCenterX = COLLECTION_ZONE_END / 2 - SAFE_ZONE_END / 2  -- X=75
+    local x = safeZoneCenterX + (col - (cols - 1) / 2) * spacing
+    local z = (row - 2) * spacing
 
     brainrot.Position = Vector3.new(x, 1, z)
     brainrot.Anchored = true
@@ -286,6 +295,8 @@ local function savePlayerData(player)
 
     playerStore:SetAsync(key, saveData)
     print("[DataStore] Saved data for " .. player.Name .. ": money=" .. data.money .. ", speedLevel=" .. data.speedLevel)
+    dirtyPlayers[player.UserId] = false
+    saveAccumulator[player.UserId] = 0
 end
 
 --------------------------------------------------------------------------------
@@ -426,7 +437,7 @@ local function spawnBrainrot()
     incomeLabel.Name = "IncomeLabel"
     incomeLabel.Size = UDim2.new(1, 0, 0.4, 0)
     incomeLabel.Position = UDim2.new(0, 0, 0.5, 0)
-    incomeLabel.Text = "$0/s"
+    incomeLabel.Text = "$" .. (BRAINROT_VALUE / 10) .. "/s"
     incomeLabel.TextColor3 = Color3.fromRGB(50, 255, 50)
     incomeLabel.TextScaled = true
     incomeLabel.BackgroundTransparency = 1
@@ -567,6 +578,7 @@ local function buySpeedUpgrade(player)
     data.speedLevel = currentLevel + 1
 
     updatePlayerAttributes(player)
+    markDirty(player)
     savePlayerData(player)
 
     print("[BuySpeed] " .. player.Name .. " upgraded to speed level " .. data.speedLevel .. " (speed: " .. nextUpgrade.speed .. ")")
@@ -629,6 +641,9 @@ local function initializePlayer(player)
 
     -- Spawn now if character already exists
     spawnPlayer(player)
+
+    dirtyPlayers[player.UserId] = false
+    saveAccumulator[player.UserId] = 0
 
     print("[Init] " .. player.Name .. " initialized (money: " .. getPlayerData(player).money .. ", speedLevel: " .. getPlayerData(player).speedLevel .. ")")
 end
@@ -725,6 +740,8 @@ Players.PlayerRemoving:Connect(function(player)
 
     playerData[player.UserId] = nil
     incomeAccumulator[player.UserId] = nil
+    saveAccumulator[player.UserId] = nil
+    dirtyPlayers[player.UserId] = nil
 end)
 
 -- Main game loop
@@ -744,7 +761,13 @@ RunService.Heartbeat:Connect(function(dt)
                 local totalIncome = getTotalPassiveIncome(data)
                 data.money = data.money + totalIncome
                 updatePlayerAttributes(player)
+                markDirty(player)
             end
+        end
+
+        saveAccumulator[player.UserId] = (saveAccumulator[player.UserId] or 0) + dt
+        if saveAccumulator[player.UserId] >= SAVE_INTERVAL and dirtyPlayers[player.UserId] then
+            savePlayerData(player)
         end
     end
 end)
