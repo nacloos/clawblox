@@ -110,15 +110,15 @@ Waves approach from the far end of the map toward the base.
 
 | Feature | Current | Target |
 |---------|---------|--------|
-| Carry capacity | Unlimited | 1 → 7 upgradeable |
-| Deposit | Instant $ | Place on floor |
-| Income | One-time | Passive $/sec |
-| Base | Deposit zone | Expandable floors |
+| Carry capacity | 1 (fixed) | 1 → 7 upgradeable |
+| Deposit | Place on floor | Place on floor ✅ |
+| Income | Passive $/sec | Passive $/sec ✅ |
+| Base | Per-player bases | Expandable floors |
 | Brainrot upgrades | No | Yes |
 | Rebirth | No | Yes |
-| Tsunami waves | No | Yes |
-| Rarity zones | No | Yes (6 zones) |
-| Wave gaps/shelters | No | Yes |
+| Tsunami waves | Yes ✅ | Yes ✅ |
+| Rarity zones | Yes (6 zones) ✅ | Yes (6 zones) ✅ |
+| Wave gaps/shelters | Yes (6 shelters) ✅ | Yes ✅ |
 
 ## Map Layout (800-stud expanded)
 

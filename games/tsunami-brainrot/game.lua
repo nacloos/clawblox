@@ -1,5 +1,5 @@
--- Escape Tsunami For Brainrots - Phase 1 (Minimal with DataStore)
--- Collection game with DataStore persistence for money and speed upgrades
+-- Escape Tsunami For Brainrots - Phase 2 (WITH TSUNAMI!)
+-- Collection game with tsunami waves, shelters, and DataStore persistence
 
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
@@ -370,6 +370,57 @@ local function getTotalPassiveIncome(data)
     return total
 end
 
+local function isInShelter(position)
+    for _, shelter in ipairs(SHELTERS) do
+        local halfWidth = shelter.width / 2
+        local halfDepth = shelter.depth / 2
+        if position.X >= shelter.x - halfWidth and position.X <= shelter.x + halfWidth and
+           position.Z >= shelter.z - halfDepth and position.Z <= shelter.z + halfDepth then
+            return true
+        end
+    end
+    return false
+end
+
+local function selectRandomWaveType()
+    local totalWeight = 0
+    for _, waveType in ipairs(WAVE_TYPES) do
+        totalWeight = totalWeight + waveType.weight
+    end
+
+    local roll = math.random() * totalWeight
+    local cumulative = 0
+    for _, waveType in ipairs(WAVE_TYPES) do
+        cumulative = cumulative + waveType.weight
+        if roll <= cumulative then
+            return waveType
+        end
+    end
+
+    return WAVE_TYPES[1]  -- Fallback to slow wave
+end
+
+local function getNextWaveInterval()
+    return math.random(WAVE_INTERVAL_MIN, WAVE_INTERVAL_MAX)
+end
+
+local function updateWaveAttributes()
+    -- Update global wave attributes for all players (so agents can see wave state)
+    for _, player in ipairs(Players:GetPlayers()) do
+        player:SetAttribute("WaveActive", waveState.active)
+        player:SetAttribute("WaveWarning", waveState.warning)
+        player:SetAttribute("WaveX", waveState.xPosition)
+        player:SetAttribute("WaveSpeed", waveState.speed)
+        if waveState.waveType then
+            player:SetAttribute("WaveType", waveState.waveType.name)
+        else
+            player:SetAttribute("WaveType", "")
+        end
+        player:SetAttribute("WaveWarningTimeLeft", waveState.warningTimeLeft)
+        player:SetAttribute("NextWaveIn", waveState.nextWaveTimer)
+    end
+end
+
 local function updatePlayerAttributes(player)
     local data = getPlayerData(player)
     if not data then return end
@@ -536,7 +587,58 @@ local function createPlayerGUI(player)
         entryLabel.Parent = leaderboardFrame
     end
 
+    -- Wave warning display (top center)
+    local waveWarning = Instance.new("TextLabel")
+    waveWarning.Name = "WaveWarning"
+    waveWarning.Position = UDim2.new(0.5, -150, 0, 10)
+    waveWarning.Size = UDim2.new(0, 300, 0, 50)
+    waveWarning.Text = ""
+    waveWarning.TextSize = 32
+    waveWarning.TextColor3 = Color3.fromRGB(255, 200, 0)
+    waveWarning.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+    waveWarning.BackgroundTransparency = 0.5
+    waveWarning.Visible = false
+    waveWarning.Parent = hud
+
     print("[GUI] Created HUD for " .. player.Name)
+end
+
+local function updateWaveGUI(player)
+    local playerGui = player.PlayerGui
+    if not playerGui then return end
+
+    local hud = playerGui:FindFirstChild("HUD")
+    if not hud then return end
+
+    local waveWarning = hud:FindFirstChild("WaveWarning")
+    if not waveWarning then return end
+
+    if waveState.active then
+        waveWarning.Visible = true
+        if waveState.warning then
+            local timeLeft = math.ceil(waveState.warningTimeLeft)
+            waveWarning.Text = waveState.waveType.name .. " WAVE: " .. timeLeft .. "s"
+            waveWarning.TextColor3 = Color3.fromRGB(255, 200, 0)  -- Yellow warning
+        else
+            waveWarning.Text = "TSUNAMI INCOMING!"
+            waveWarning.TextColor3 = Color3.fromRGB(255, 50, 50)  -- Red danger
+        end
+    else
+        -- Show countdown to next wave if close
+        if waveState.nextWaveTimer <= 10 then
+            waveWarning.Visible = true
+            waveWarning.Text = "Next wave: " .. math.ceil(waveState.nextWaveTimer) .. "s"
+            waveWarning.TextColor3 = Color3.fromRGB(150, 150, 150)  -- Gray
+        else
+            waveWarning.Visible = false
+        end
+    end
+end
+
+local function updateAllWaveGUIs()
+    for _, player in ipairs(Players:GetPlayers()) do
+        updateWaveGUI(player)
+    end
 end
 
 --------------------------------------------------------------------------------
@@ -1211,6 +1313,255 @@ local function buySpeedUpgrade(player)
 end
 
 --------------------------------------------------------------------------------
+-- TSUNAMI WAVE SYSTEM
+--------------------------------------------------------------------------------
+
+local function createWavePart()
+    local wave = Instance.new("Part")
+    wave.Name = "TsunamiWave"
+    wave.Size = Vector3.new(15, WAVE_HEIGHT, MAP_WIDTH + 10)
+    wave.Position = Vector3.new(WAVE_SPAWN_X, WAVE_HEIGHT / 2, 0)
+    wave.Anchored = true
+    wave.CanCollide = false
+    wave.Color = WAVE_COLOR
+    wave.Transparency = 0.4
+    wave.Material = Enum.Material.Neon
+    wave:SetAttribute("IsWave", true)
+    wave.Parent = Workspace
+
+    -- Add warning label on wave
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "WaveLabel"
+    billboard.Size = UDim2.new(0, 200, 0, 80)
+    billboard.StudsOffset = Vector3.new(0, WAVE_HEIGHT / 2 + 5, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Parent = wave
+
+    local label = Instance.new("TextLabel")
+    label.Name = "TypeLabel"
+    label.Size = UDim2.new(1, 0, 1, 0)
+    label.Text = "TSUNAMI!"
+    label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    label.TextScaled = true
+    label.BackgroundTransparency = 1
+    label.Parent = billboard
+
+    return wave
+end
+
+local function startWaveWarning()
+    local waveType = selectRandomWaveType()
+    waveState.active = true
+    waveState.warning = true
+    waveState.waveType = waveType
+    waveState.speed = waveType.speed
+    waveState.warningTimeLeft = waveType.warning
+    waveState.xPosition = WAVE_SPAWN_X
+
+    -- Create the wave part (visible during warning)
+    waveState.part = createWavePart()
+    waveState.part.Transparency = 0.7  -- More transparent during warning
+
+    -- Update label to show warning
+    local billboard = waveState.part:FindFirstChild("WaveLabel")
+    if billboard then
+        local label = billboard:FindFirstChild("TypeLabel")
+        if label then
+            label.Text = waveType.name .. " WAVE\n" .. waveType.warning .. "s"
+            label.TextColor3 = Color3.fromRGB(255, 200, 0)  -- Yellow warning
+        end
+    end
+
+    print("[Wave] WARNING: " .. waveType.name .. " wave incoming! " .. waveType.warning .. "s warning, speed " .. waveType.speed)
+    updateWaveAttributes()
+end
+
+local function startWaveMovement()
+    waveState.warning = false
+    waveState.part.Transparency = 0.4  -- Less transparent when moving
+
+    -- Update label
+    local billboard = waveState.part:FindFirstChild("WaveLabel")
+    if billboard then
+        local label = billboard:FindFirstChild("TypeLabel")
+        if label then
+            label.Text = "TSUNAMI!"
+            label.TextColor3 = Color3.fromRGB(255, 255, 255)
+        end
+    end
+
+    print("[Wave] " .. waveState.waveType.name .. " wave is now moving at speed " .. waveState.speed)
+    updateWaveAttributes()
+end
+
+local function endWave()
+    if waveState.part then
+        waveState.part:Destroy()
+        waveState.part = nil
+    end
+
+    waveState.active = false
+    waveState.warning = false
+    waveState.xPosition = WAVE_SPAWN_X
+    waveState.speed = 0
+    waveState.waveType = nil
+    waveState.nextWaveTimer = getNextWaveInterval()
+
+    print("[Wave] Wave ended. Next wave in " .. waveState.nextWaveTimer .. "s")
+    updateWaveAttributes()
+end
+
+local function killPlayerByWave(player)
+    local character = player.Character
+    if not character then return end
+
+    local humanoid = character:FindFirstChild("Humanoid")
+    if humanoid and humanoid.Health > 0 then
+        print("[Wave] " .. player.Name .. " was hit by the tsunami!")
+        humanoid.Health = 0  -- This will trigger respawn and clear carried brainrots
+    end
+end
+
+local function updateWave(dt)
+    if not waveState.active then
+        -- Count down to next wave
+        waveState.nextWaveTimer = waveState.nextWaveTimer - dt
+        if waveState.nextWaveTimer <= 0 then
+            startWaveWarning()
+        end
+        return
+    end
+
+    if waveState.warning then
+        -- Count down warning phase
+        waveState.warningTimeLeft = waveState.warningTimeLeft - dt
+
+        -- Update warning label countdown
+        if waveState.part then
+            local billboard = waveState.part:FindFirstChild("WaveLabel")
+            if billboard then
+                local label = billboard:FindFirstChild("TypeLabel")
+                if label then
+                    local timeLeft = math.ceil(waveState.warningTimeLeft)
+                    label.Text = waveState.waveType.name .. " WAVE\n" .. timeLeft .. "s"
+                end
+            end
+        end
+
+        if waveState.warningTimeLeft <= 0 then
+            startWaveMovement()
+        end
+
+        updateWaveAttributes()
+        return
+    end
+
+    -- Move wave forward
+    local movement = waveState.speed * dt
+    waveState.xPosition = waveState.xPosition + movement
+
+    -- Update wave part position
+    if waveState.part then
+        waveState.part.Position = Vector3.new(waveState.xPosition, WAVE_HEIGHT / 2, 0)
+    end
+
+    -- Check for player collisions
+    for _, player in ipairs(Players:GetPlayers()) do
+        local pos = getCharacterPosition(player)
+        if pos then
+            -- Player is hit if they're behind the wave (X < wave X) and not in safe zone or shelter
+            if pos.X < waveState.xPosition then
+                if not isInSafeZone(pos) and not isInShelter(pos) then
+                    killPlayerByWave(player)
+                end
+            end
+        end
+    end
+
+    -- Wave reaches safe zone - end it
+    if waveState.xPosition >= BASE_ZONE_X_START then
+        endWave()
+        return
+    end
+
+    updateWaveAttributes()
+end
+
+local function createShelters()
+    for i, shelter in ipairs(SHELTERS) do
+        -- Shelter floor (raised platform)
+        local floor = Instance.new("Part")
+        floor.Name = "Shelter_" .. i
+        floor.Size = Vector3.new(shelter.width, 0.5, shelter.depth)
+        floor.Position = Vector3.new(shelter.x, 0.25, shelter.z)
+        floor.Anchored = true
+        floor.CanCollide = true
+        floor.Color = Color3.fromRGB(80, 80, 80)  -- Gray platform
+        floor:SetAttribute("IsShelter", true)
+        floor.Parent = Workspace
+
+        -- Shelter walls (visual indicator, no collision to allow easy entry)
+        local wallHeight = 4
+        local wallThickness = 0.5
+
+        -- Back wall
+        local backWall = Instance.new("Part")
+        backWall.Name = "ShelterWall_" .. i .. "_Back"
+        backWall.Size = Vector3.new(shelter.width, wallHeight, wallThickness)
+        backWall.Position = Vector3.new(shelter.x, wallHeight / 2, shelter.z - shelter.depth / 2)
+        backWall.Anchored = true
+        backWall.CanCollide = false
+        backWall.Color = Color3.fromRGB(60, 60, 60)
+        backWall.Transparency = 0.3
+        backWall.Parent = Workspace
+
+        -- Front wall (with gap for entry)
+        local frontWall = Instance.new("Part")
+        frontWall.Name = "ShelterWall_" .. i .. "_Front"
+        frontWall.Size = Vector3.new(shelter.width, wallHeight, wallThickness)
+        frontWall.Position = Vector3.new(shelter.x, wallHeight / 2, shelter.z + shelter.depth / 2)
+        frontWall.Anchored = true
+        frontWall.CanCollide = false
+        frontWall.Color = Color3.fromRGB(60, 60, 60)
+        frontWall.Transparency = 0.3
+        frontWall.Parent = Workspace
+
+        -- Roof (indicates shelter from above)
+        local roof = Instance.new("Part")
+        roof.Name = "ShelterRoof_" .. i
+        roof.Size = Vector3.new(shelter.width, 0.3, shelter.depth)
+        roof.Position = Vector3.new(shelter.x, wallHeight + 0.15, shelter.z)
+        roof.Anchored = true
+        roof.CanCollide = false
+        roof.Color = Color3.fromRGB(100, 100, 100)
+        roof.Transparency = 0.5
+        roof:SetAttribute("IsShelterRoof", true)
+        roof.Parent = Workspace
+
+        -- Shelter label
+        local billboard = Instance.new("BillboardGui")
+        billboard.Name = "ShelterLabel"
+        billboard.Size = UDim2.new(0, 80, 0, 30)
+        billboard.StudsOffset = Vector3.new(0, wallHeight + 2, 0)
+        billboard.AlwaysOnTop = true
+        billboard.Parent = roof
+
+        local label = Instance.new("TextLabel")
+        label.Name = "Label"
+        label.Size = UDim2.new(1, 0, 1, 0)
+        label.Text = "SHELTER"
+        label.TextColor3 = Color3.fromRGB(50, 255, 50)
+        label.TextScaled = true
+        label.BackgroundTransparency = 1
+        label.Parent = billboard
+
+        table.insert(shelterParts, {floor = floor, roof = roof})
+    end
+
+    print("[Map] Created " .. #SHELTERS .. " shelters")
+end
+
+--------------------------------------------------------------------------------
 -- PLAYER MANAGEMENT
 --------------------------------------------------------------------------------
 
@@ -1496,6 +1847,8 @@ end)
 RunService.Heartbeat:Connect(function(dt)
     updateBrainrotSpawning(dt)
     cleanupBrainrots()
+    updateWave(dt)
+    updateAllWaveGUIs()
 
     -- Wave system update
     waveTimer = waveTimer + dt
@@ -1562,7 +1915,12 @@ end
 -- Initial leaderboard fetch
 fetchLeaderboard()
 
-print("=== Escape Tsunami For Brainrots (Phase 1) ===")
+-- Initialize first wave timer
+waveState.nextWaveTimer = getNextWaveInterval()
+print("[Wave] First wave in " .. waveState.nextWaveTimer .. "s")
+
+print("=== Escape Tsunami For Brainrots (Phase 2 - WITH TSUNAMI!) ===")
 print("Collect brainrots, deposit for money, buy speed upgrades!")
+print("BEWARE: Tsunami waves approach from the left - return to base or find a shelter!")
 print("Data is persisted via DataStore.")
 print("Leaderboard tracks top passive income earners.")
