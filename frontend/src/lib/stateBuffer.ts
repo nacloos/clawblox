@@ -300,6 +300,33 @@ export class StateBuffer {
   getRenderDelay(): number {
     return this.renderDelay
   }
+
+  /**
+   * Compute axis-aligned bounding box from entity positions.
+   * Returns bounds with optional padding, or null if no entities.
+   */
+  getAABB(padding: number = 50): { minX: number; maxX: number; minZ: number; maxZ: number } | null {
+    const latest = this.getLatest()
+    if (!latest || latest.entities.size === 0) return null
+
+    let minX = Infinity, maxX = -Infinity
+    let minZ = Infinity, maxZ = -Infinity
+
+    for (const entity of latest.entities.values()) {
+      const [x, , z] = entity.position
+      minX = Math.min(minX, x)
+      maxX = Math.max(maxX, x)
+      minZ = Math.min(minZ, z)
+      maxZ = Math.max(maxZ, z)
+    }
+
+    return {
+      minX: minX - padding,
+      maxX: maxX + padding,
+      minZ: minZ - padding,
+      maxZ: maxZ + padding,
+    }
+  }
 }
 
 /**

@@ -29,6 +29,7 @@ const OVERVIEW_ZOOM_SPEED = 0.001
 const MIN_OVERVIEW_ZOOM = 0.2
 const MAX_OVERVIEW_ZOOM = 1.8
 const TOUCH_PAN_SPEED = 0.12
+const CAMERA_BOUNDS_PADDING = -5 // Studs of padding around entity bounds
 
 function CameraController({
   stateBuffer,
@@ -97,11 +98,23 @@ function CameraController({
       return { x: sum.x / points.length, y: sum.y / points.length }
     }
 
+    const clampPanToBounds = () => {
+      const bounds = stateBuffer.getAABB(CAMERA_BOUNDS_PADDING)
+      if (!bounds) return
+      overviewPan.current.x = THREE.MathUtils.clamp(
+        overviewPan.current.x, bounds.minX, bounds.maxX
+      )
+      overviewPan.current.z = THREE.MathUtils.clamp(
+        overviewPan.current.z, bounds.minZ, bounds.maxZ
+      )
+    }
+
     const panByScreenDelta = (dx: number, dy: number) => {
       const scale = TOUCH_PAN_SPEED * overviewZoom.current
       // Finger drag should move map with the finger.
       overviewPan.current.x -= dx * scale
       overviewPan.current.z -= dy * scale
+      clampPanToBounds()
     }
 
     const onPointerDown = (event: PointerEvent) => {
@@ -245,6 +258,12 @@ function CameraController({
         const step = (OVERVIEW_PAN_SPEED * overviewZoom.current) * delta
         overviewPan.current.x += direction.x * step
         overviewPan.current.z += direction.z * step
+        // Clamp pan to entity bounds
+        const bounds = stateBuffer.getAABB(CAMERA_BOUNDS_PADDING)
+        if (bounds) {
+          overviewPan.current.x = THREE.MathUtils.clamp(overviewPan.current.x, bounds.minX, bounds.maxX)
+          overviewPan.current.z = THREE.MathUtils.clamp(overviewPan.current.z, bounds.minZ, bounds.maxZ)
+        }
       }
 
       targetLookAt.current.set(overviewPan.current.x, OVERVIEW_TARGET.y, overviewPan.current.z)
@@ -272,7 +291,6 @@ export default function GameScene({ stateBuffer, entityIds, followPlayerId }: Ga
   return (
     <Canvas
       camera={{ position: [0, 140, 70], fov: 50 }}
-      shadows
       gl={{ logarithmicDepthBuffer: true }}
       style={{ background: 'linear-gradient(to bottom, #1a1a2e 0%, #0f0f1a 100%)', touchAction: 'none' }}
     >
@@ -281,15 +299,6 @@ export default function GameScene({ stateBuffer, entityIds, followPlayerId }: Ga
       <directionalLight
         position={[100, 200, 100]}
         intensity={1.2}
-        castShadow
-        shadow-mapSize={[2048, 2048]}
-        shadow-camera-near={1}
-        shadow-camera-far={400}
-        shadow-camera-left={-120}
-        shadow-camera-right={120}
-        shadow-camera-top={120}
-        shadow-camera-bottom={-120}
-        shadow-bias={-0.0001}
       />
       <pointLight position={[-50, 50, -50]} intensity={0.3} color="#4a9eff" />
 

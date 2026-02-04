@@ -54,6 +54,21 @@ local ZONES = {
     {name = "Secret",    xMin = -500, xMax = -300, value = 1500, color = Color3.fromRGB(255, 255, 255), weight = 3},
 }
 
+-- Wave configuration
+local WAVE_SEGMENT_COUNT = 16  -- Number of wave segments
+local WAVE_MODEL_SCALE = 1.12  -- Scale factor for wave model
+local WAVE_MODEL_WIDTH = 12 * WAVE_MODEL_SCALE  -- 14.4 studs per segment (scaled)
+local WAVE_CONFIG = {
+    spawnInterval = 30,    -- seconds between waves
+    speed = 35,            -- studs per second
+    startX = -500,         -- spawn position (far left)
+    endX = 350,            -- stop at end of Common zone (before safe area)
+    modelUrl = "/static/models/wave.glb",
+    modelWidth = WAVE_MODEL_WIDTH,  -- 17 × 12 = 204 studs total (fits in 228 width)
+    modelHeight = 15,      -- height of wave model
+    thickness = 10,        -- collision thickness in X
+}
+
 -- Characters with GLB models (from characters.json)
 local CHARACTERS = {
     {name = "Samuel de Prompto", rarity = "legendary", yield = 100, model = "altman.glb"},
@@ -192,6 +207,10 @@ local leaderboardUpdateTimer = 0
 local leaderboardFetchTimer = 0
 local LEADERBOARD_UPDATE_INTERVAL = 10  -- Seconds between updating player's score
 local LEADERBOARD_FETCH_INTERVAL = 5    -- Seconds between fetching leaderboard
+
+-- Wave state
+local waves = {}           -- list of active wave objects {parts = {}, x = number}
+local waveTimer = 0        -- time since last wave spawn
 
 --------------------------------------------------------------------------------
 -- HELPER FUNCTIONS
@@ -1068,6 +1087,90 @@ local function spawnPlayer(player)
     updatePlayerAttributes(player)
 end
 
+--------------------------------------------------------------------------------
+-- WAVE SYSTEM
+--------------------------------------------------------------------------------
+
+local function spawnWave()
+    local waveParts = {}
+    local startZ = -MAP_WIDTH / 2 + WAVE_CONFIG.modelWidth / 2
+
+    for i = 0, WAVE_SEGMENT_COUNT - 1 do
+        local wave = Instance.new("Part")
+        wave.Name = "TsunamiWave_" .. i
+        wave.Size = Vector3.new(WAVE_CONFIG.thickness, WAVE_CONFIG.modelHeight, WAVE_CONFIG.modelWidth)
+        wave.Position = Vector3.new(WAVE_CONFIG.startX, WAVE_CONFIG.modelHeight / 2, startZ + i * WAVE_CONFIG.modelWidth)
+        wave.Anchored = true
+        wave.CanCollide = false
+        wave.Transparency = 1  -- Hide the box, only show the model
+        wave:SetAttribute("ModelUrl", WAVE_CONFIG.modelUrl)
+        wave:SetAttribute("ModelScale", WAVE_MODEL_SCALE)
+        wave.Parent = Workspace
+        table.insert(waveParts, wave)
+    end
+
+    table.insert(waves, {parts = waveParts, x = WAVE_CONFIG.startX})
+    print("Tsunami wave spawned with " .. WAVE_SEGMENT_COUNT .. " segments!")
+end
+
+local function dropBrainrot(position, brainrotData)
+    -- Remove weld if attached to player
+    if brainrotData.part then
+        local weld = brainrotData.part:FindFirstChild("BrainrotWeld")
+        if weld then weld:Destroy() end
+
+        -- Move the carried brainrot part back to world position
+        brainrotData.part.Anchored = true
+        brainrotData.part.Position = Vector3.new(position.X, 1, position.Z)
+        -- Re-add to global brainrots list so it can be picked up again
+        table.insert(brainrots, brainrotData.part)
+    end
+end
+
+local function updateWaves(dt)
+    for i = #waves, 1, -1 do
+        local wave = waves[i]
+
+        -- Move wave toward base
+        wave.x = wave.x + WAVE_CONFIG.speed * dt
+        for _, part in ipairs(wave.parts) do
+            local currentZ = part.Position.Z
+            part.Position = Vector3.new(wave.x, WAVE_CONFIG.modelHeight / 2, currentZ)
+        end
+
+        -- Check collision with players
+        for _, player in ipairs(Players:GetPlayers()) do
+            local pos = getCharacterPosition(player)
+            if pos and not isInSafeZone(pos) then
+                local halfThickness = WAVE_CONFIG.thickness / 2
+                if pos.X >= wave.x - halfThickness and pos.X <= wave.x + halfThickness then
+                    -- Player hit by wave
+                    local data = getPlayerData(player)
+                    if data and #data.carriedBrainrots > 0 then
+                        -- Drop carried brainrots at player position
+                        for _, brainrot in ipairs(data.carriedBrainrots) do
+                            dropBrainrot(pos, brainrot)
+                        end
+                        print(player.Name .. " dropped " .. #data.carriedBrainrots .. " brainrots!")
+                        data.carriedBrainrots = {}
+                    end
+                    -- Respawn player in safe area
+                    spawnPlayer(player)
+                    print(player.Name .. " was hit by tsunami!")
+                end
+            end
+        end
+
+        -- Remove wave if past end point
+        if wave.x >= WAVE_CONFIG.endX then
+            for _, part in ipairs(wave.parts) do
+                part:Destroy()
+            end
+            table.remove(waves, i)
+        end
+    end
+end
+
 local function initializePlayer(player)
     -- Load saved data from DataStore (yields but works in coroutine)
     if not loadPlayerData(player) then
@@ -1245,6 +1348,14 @@ end)
 RunService.Heartbeat:Connect(function(dt)
     updateBrainrotSpawning(dt)
     cleanupBrainrots()
+
+    -- Wave system update
+    waveTimer = waveTimer + dt
+    if waveTimer >= WAVE_CONFIG.spawnInterval then
+        spawnWave()
+        waveTimer = 0
+    end
+    updateWaves(dt)
 
     -- Passive income from placed brainrots
     for _, player in ipairs(Players:GetPlayers()) do
