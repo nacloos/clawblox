@@ -54,6 +54,11 @@ local ZONES = {
     {name = "Secret",    xMin = -500, xMax = -300, value = 1500, color = Color3.fromRGB(255, 255, 255), weight = 3},
 }
 
+-- Base capacity
+local BASE_MAX_BRAINROTS = 10
+local BASE_GRID_COLS = 5
+local BASE_GRID_ROWS = 2
+
 -- Wave configuration
 local WAVE_SEGMENT_COUNT = 16  -- Number of wave segments
 local WAVE_MODEL_SCALE = 1.12  -- Scale factor for wave model
@@ -313,15 +318,24 @@ local function placeBrainrotOnBase(player, brainrot, slotIndex, incomeRate)
     local weld = brainrot:FindFirstChild("BrainrotWeld")
     if weld then weld:Destroy() end
 
-    -- Position on player's base floor (deposit area at X=375, Z offset by player index)
-    local spacing = 3
-    local maxCols = math.max(1, math.floor((BASE_SIZE_X - 2) / spacing))
-    local maxRows = math.max(1, math.floor((BASE_SIZE_Z - 2) / spacing))
-    local col = (slotIndex - 1) % maxCols
-    local row = math.floor((slotIndex - 1) / maxCols)
+    -- Fixed 5×2 grid layout on front and back edges of base
+    -- Slots 1-5: front edge (low Z), Slots 6-10: back edge (high Z)
     local baseCenter = getPlayerBaseCenter(player)
-    local x = baseCenter.X - ((maxCols - 1) * spacing) / 2 + col * spacing
-    local z = baseCenter.Z - ((maxRows - 1) * spacing) / 2 + row * spacing
+    local col = (slotIndex - 1) % BASE_GRID_COLS  -- 0-4
+    local row = math.floor((slotIndex - 1) / BASE_GRID_COLS)  -- 0 or 1
+
+    -- X position: 5 columns evenly distributed along X-axis
+    local colSpacing = (BASE_SIZE_X - 4) / (BASE_GRID_COLS - 1)  -- spacing between columns
+    local x = baseCenter.X - (BASE_SIZE_X - 4) / 2 + col * colSpacing
+
+    -- Z position: front edge (row 0) or back edge (row 1)
+    local edgeOffset = 3  -- distance from edge of base
+    local z
+    if row == 0 then
+        z = baseCenter.Z - BASE_SIZE_Z / 2 + edgeOffset  -- front edge
+    else
+        z = baseCenter.Z + BASE_SIZE_Z / 2 - edgeOffset  -- back edge
+    end
 
     -- Character models are taller (5 studs), spheres are 2 studs
     local hasModel = brainrot:GetAttribute("ModelUrl") ~= nil
@@ -1005,8 +1019,19 @@ local function depositBrainrots(player)
         return false
     end
 
-    -- Place brainrots on base floor instead of destroying
-    for _, carried in ipairs(data.carriedBrainrots) do
+    -- Check if base is full
+    if #data.placedBrainrots >= BASE_MAX_BRAINROTS then
+        print("[Deposit] " .. player.Name .. " base is full! (" .. #data.placedBrainrots .. "/" .. BASE_MAX_BRAINROTS .. ")")
+        return false
+    end
+
+    -- Calculate how many slots are available
+    local availableSlots = BASE_MAX_BRAINROTS - #data.placedBrainrots
+    local depositCount = math.min(#data.carriedBrainrots, availableSlots)
+
+    -- Place brainrots on base floor (only up to available slots)
+    for i = 1, depositCount do
+        local carried = data.carriedBrainrots[i]
         local incomeRate = carried.value / 10  -- e.g., value 10 = 1$/sec
         local slotIndex = #data.placedBrainrots + 1
         placeBrainrotOnBase(player, carried.part, slotIndex, incomeRate)
@@ -1019,14 +1044,23 @@ local function depositBrainrots(player)
         })
     end
 
-    local depositedCount = #data.carriedBrainrots
-    data.carriedBrainrots = {}
+    -- Keep brainrots that couldn't be deposited, remove the deposited ones
+    local remaining = {}
+    for i = depositCount + 1, #data.carriedBrainrots do
+        table.insert(remaining, data.carriedBrainrots[i])
+    end
+
+    if #remaining > 0 then
+        print("[Deposit] " .. player.Name .. " base full - kept " .. #remaining .. " brainrots")
+    end
+
+    data.carriedBrainrots = remaining
 
     updatePlayerAttributes(player)
     savePlayerData(player)
 
     local totalIncome = getTotalPassiveIncome(data)
-    print("[Deposit] " .. player.Name .. " placed " .. depositedCount .. " brainrots (total income: $" .. totalIncome .. "/sec)")
+    print("[Deposit] " .. player.Name .. " placed " .. depositCount .. " brainrots (total income: $" .. totalIncome .. "/sec, base: " .. #data.placedBrainrots .. "/" .. BASE_MAX_BRAINROTS .. ")")
 
     return true
 end
