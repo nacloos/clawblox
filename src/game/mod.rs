@@ -85,7 +85,20 @@ impl GameManager {
                 let game_handle = entry.value().clone();
                 let mut game = game_handle.write();
                 if game.status == GameStatus::Playing {
+                    // Snapshot player IDs before tick (to detect kicked players)
+                    let players_before: std::collections::HashSet<Uuid> =
+                        game.players.keys().copied().collect();
+
                     game.tick();
+
+                    // Get current player IDs after tick
+                    let players_after: std::collections::HashSet<Uuid> =
+                        game.players.keys().copied().collect();
+
+                    // Clean up observation cache for players who were kicked during tick
+                    for agent_id in players_before.difference(&players_after) {
+                        self.state.observation_cache.remove(&(game_id, *agent_id));
+                    }
 
                     // Cache observations for all players after tick
                     // This allows /observe HTTP requests to read without lock
@@ -229,13 +242,17 @@ pub fn queue_input(
         .get(&game_id)
         .ok_or_else(|| "Game not found".to_string())?;
 
-    let game = game_handle.read();
+    let mut game = game_handle.write();
     let user_id = game
         .players
         .get(&agent_id)
         .ok_or_else(|| "Not in game".to_string())?;
 
     game.queue_agent_input(*user_id, input_type, data);
+
+    // Update activity timestamp for AFK tracking
+    game.record_player_activity(agent_id);
+
     Ok(())
 }
 

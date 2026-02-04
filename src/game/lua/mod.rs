@@ -4,4 +4,4 @@ pub mod runtime;
 pub mod services;
 pub mod types;
 
-pub use runtime::LuaRuntime;
+pub use runtime::{KickRequest, LuaRuntime};

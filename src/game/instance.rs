@@ -1,7 +1,7 @@
 use crossbeam_channel::{Receiver, Sender};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use super::async_bridge::AsyncBridge;
@@ -15,6 +15,12 @@ use super::physics::PhysicsWorld;
 
 /// Walk speed for player characters (studs per second)
 const WALK_SPEED: f32 = consts::WALK_SPEED;
+
+/// Default AFK timeout in seconds (5 minutes)
+const DEFAULT_AFK_TIMEOUT_SECS: u64 = 300;
+
+/// How often to check for AFK players (in ticks, 60 = 1 second)
+const AFK_CHECK_INTERVAL_TICKS: u64 = 60;
 
 /// A game instance that runs Lua scripts with Rapier physics.
 /// This is the Roblox-like architecture where:
@@ -37,6 +43,10 @@ pub struct GameInstance {
     start_time: Instant,
     /// Async bridge for database operations (DataStoreService)
     async_bridge: Option<Arc<AsyncBridge>>,
+    /// Last activity timestamp for each player (agent_id -> Instant)
+    player_last_activity: HashMap<Uuid, Instant>,
+    /// AFK timeout duration (players idle longer than this are kicked)
+    afk_timeout: Duration,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -97,6 +107,8 @@ impl GameInstance {
             status: GameStatus::Playing,
             start_time: Instant::now(),
             async_bridge,
+            player_last_activity: HashMap::new(),
+            afk_timeout: Duration::from_secs(DEFAULT_AFK_TIMEOUT_SECS),
         }
     }
 
@@ -147,6 +159,8 @@ impl GameInstance {
         let user_id = Self::user_id_from_agent_id(agent_id);
         self.players.insert(agent_id, user_id);
         self.player_names.insert(agent_id, name.to_string());
+        // Initialize activity timestamp for AFK tracking
+        self.player_last_activity.insert(agent_id, Instant::now());
 
         if let Some(runtime) = &self.lua_runtime {
             let (player, hrp_id) = runtime.add_player(user_id, name);
@@ -177,6 +191,8 @@ impl GameInstance {
             }
             // Remove player name
             self.player_names.remove(&agent_id);
+            // Remove activity timestamp
+            self.player_last_activity.remove(&agent_id);
             if let Ok(mut counts) = self.observation_log_counts.lock() {
                 counts.remove(&agent_id);
             }
@@ -214,6 +230,14 @@ impl GameInstance {
     /// Main game loop tick - called at 60 Hz
     pub fn tick(&mut self) {
         let dt = 1.0 / 60.0;
+
+        // Process kick requests from Lua scripts (e.g., Player:Kick())
+        self.process_kick_requests();
+
+        // Check for AFK players periodically (every second)
+        if self.tick % AFK_CHECK_INTERVAL_TICKS == 0 {
+            self.check_afk_players();
+        }
 
         // Process queued actions
         while let Ok(queued) = self.action_receiver.try_recv() {
@@ -262,6 +286,106 @@ impl GameInstance {
         }
 
         self.tick += 1;
+    }
+
+    /// Process kick requests queued by Lua scripts (e.g., Player:Kick())
+    fn process_kick_requests(&mut self) {
+        let Some(runtime) = &self.lua_runtime else {
+            return;
+        };
+
+        // Drain kick requests from the game's kick queue
+        let kick_requests = runtime.game().drain_kick_requests();
+
+        for request in kick_requests {
+            // Find the agent_id for this user_id
+            let agent_id = self
+                .players
+                .iter()
+                .find(|(_, &uid)| uid == request.user_id)
+                .map(|(&aid, _)| aid);
+
+            if let Some(agent_id) = agent_id {
+                let name = self.player_names.get(&agent_id).cloned().unwrap_or_default();
+                if let Some(msg) = &request.message {
+                    eprintln!(
+                        "[Kick] Removing player {} (user_id={}) - Reason: {}",
+                        name, request.user_id, msg
+                    );
+                } else {
+                    eprintln!(
+                        "[Kick] Removing player {} (user_id={})",
+                        name, request.user_id
+                    );
+                }
+                self.remove_player(agent_id);
+            } else {
+                eprintln!(
+                    "[Kick] Warning: No agent found for user_id={}",
+                    request.user_id
+                );
+            }
+        }
+    }
+
+    /// Check for AFK players and kick them if they've exceeded the timeout
+    fn check_afk_players(&mut self) {
+        let now = Instant::now();
+        let timeout = self.afk_timeout;
+
+        // First, check which players have pending inputs (they're active)
+        let mut active_from_inputs: Vec<Uuid> = Vec::new();
+        if let Some(runtime) = &self.lua_runtime {
+            for (&agent_id, &user_id) in &self.players {
+                if runtime.agent_input_service().has_pending_inputs(user_id) {
+                    active_from_inputs.push(agent_id);
+                }
+            }
+        }
+
+        // Update activity for players with pending inputs
+        for agent_id in active_from_inputs {
+            self.player_last_activity.insert(agent_id, now);
+        }
+
+        // Collect players to kick (can't modify while iterating)
+        let mut to_kick: Vec<(Uuid, String)> = Vec::new();
+
+        for (&agent_id, last_active) in &self.player_last_activity {
+            let idle_duration = now.duration_since(*last_active);
+            if idle_duration > timeout {
+                let name = self
+                    .player_names
+                    .get(&agent_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("{}", agent_id));
+                to_kick.push((agent_id, name));
+            }
+        }
+
+        // Kick AFK players
+        for (agent_id, name) in to_kick {
+            eprintln!(
+                "[AFK] Kicking player {} (idle for {:?})",
+                name, self.afk_timeout
+            );
+            self.remove_player(agent_id);
+        }
+    }
+
+    /// Set the AFK timeout duration
+    pub fn set_afk_timeout(&mut self, timeout: Duration) {
+        self.afk_timeout = timeout;
+    }
+
+    /// Get the current AFK timeout duration
+    pub fn afk_timeout(&self) -> Duration {
+        self.afk_timeout
+    }
+
+    /// Record player activity (resets AFK timer)
+    pub fn record_player_activity(&mut self, agent_id: Uuid) {
+        self.player_last_activity.insert(agent_id, Instant::now());
     }
 
     /// Syncs Workspace.Gravity to physics world
@@ -553,6 +677,9 @@ impl GameInstance {
         let Some(&_user_id) = self.players.get(&queued.agent_id) else {
             return;
         };
+
+        // Update activity timestamp for AFK tracking
+        self.player_last_activity.insert(queued.agent_id, Instant::now());
 
         match queued.action {
             GameAction::Goto { position } => {
@@ -1711,5 +1838,143 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_player_kick_from_lua() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        // Load a script that kicks a player after they join
+        instance.load_script(r#"
+            local Players = game:GetService("Players")
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(100, 1, 100)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            _G.kickCalled = false
+
+            Players.PlayerAdded:Connect(function(player)
+                -- Schedule kick after a few ticks
+                _G.playerToKick = player
+            end)
+        "#);
+
+        // Add a player
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "TestPlayer"));
+        assert_eq!(instance.players.len(), 1);
+
+        // Run a few ticks to process PlayerAdded
+        for _ in 0..5 {
+            instance.tick();
+        }
+
+        // Player should still be there
+        assert_eq!(instance.players.len(), 1);
+
+        // Now trigger the kick via Lua
+        if let Some(runtime) = &instance.lua_runtime {
+            let lua = runtime.lua();
+            lua.load(r#"
+                if _G.playerToKick then
+                    _G.playerToKick:Kick("Test kick")
+                    _G.kickCalled = true
+                end
+            "#).exec().expect("Failed to run kick script");
+        }
+
+        // Run tick to process kick request
+        instance.tick();
+
+        // Player should be removed
+        assert_eq!(instance.players.len(), 0, "Player should have been kicked");
+    }
+
+    #[test]
+    fn test_afk_timeout() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        // Set a very short AFK timeout for testing (100ms)
+        instance.set_afk_timeout(Duration::from_millis(100));
+
+        instance.load_script(r#"
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(100, 1, 100)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+        "#);
+
+        // Add a player
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "AFKPlayer"));
+        assert_eq!(instance.players.len(), 1);
+
+        // Run some ticks without activity - but not enough to trigger AFK check
+        for _ in 0..30 {
+            instance.tick();
+        }
+
+        // Player should still be there (AFK check happens every 60 ticks)
+        assert_eq!(instance.players.len(), 1);
+
+        // Sleep to exceed AFK timeout
+        std::thread::sleep(Duration::from_millis(150));
+
+        // Run 60 ticks to trigger AFK check
+        for _ in 0..60 {
+            instance.tick();
+        }
+
+        // Player should be kicked for being AFK
+        assert_eq!(instance.players.len(), 0, "Player should have been kicked for AFK");
+    }
+
+    #[test]
+    fn test_activity_resets_afk_timer() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        // Set a longer AFK timeout for this test to avoid race conditions (200ms)
+        instance.set_afk_timeout(Duration::from_millis(200));
+
+        instance.load_script(r#"
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(100, 1, 100)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+        "#);
+
+        // Add a player
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "ActivePlayer"));
+        assert_eq!(instance.players.len(), 1);
+
+        // Sleep almost to timeout
+        std::thread::sleep(Duration::from_millis(150));
+
+        // Queue an action to reset activity timer (before timeout)
+        instance.queue_action(agent_id, GameAction::Goto { position: [5.0, 0.0, 5.0] });
+
+        // Process the action immediately (this resets the AFK timer)
+        instance.tick();
+
+        // Sleep less than the full timeout again
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Run AFK check (60 ticks)
+        for _ in 0..60 {
+            instance.tick();
+        }
+
+        // Player should still be there (activity reset the timer)
+        // Total time since reset: ~100ms, which is less than 200ms timeout
+        assert_eq!(instance.players.len(), 1, "Player should NOT be kicked - activity reset timer");
     }
 }

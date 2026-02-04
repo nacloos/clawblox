@@ -11,12 +11,21 @@ use super::services::{
 use super::types::register_all_types;
 use crate::game::async_bridge::AsyncBridge;
 
+/// A request to kick a player from the game
+#[derive(Debug, Clone)]
+pub struct KickRequest {
+    pub user_id: u64,
+    pub message: Option<String>,
+}
+
 pub struct GameDataModel {
     pub workspace: WorkspaceService,
     pub players: PlayersService,
     pub run_service: RunService,
     pub agent_input_service: AgentInputService,
     pub data_store_service: DataStoreService,
+    /// Queue of pending kick requests from Lua scripts
+    pub kick_requests: Vec<KickRequest>,
 }
 
 const DEFAULT_PLAYER_MODEL_URL: &str = "/static/models/player.glb";
@@ -29,6 +38,7 @@ impl GameDataModel {
             run_service: RunService::new(true),
             agent_input_service: AgentInputService::new(),
             data_store_service: DataStoreService::new(game_id, async_bridge),
+            kick_requests: Vec::new(),
         }
     }
 }
@@ -63,6 +73,20 @@ impl Game {
 
     pub fn data_store_service(&self) -> DataStoreService {
         self.data_model.lock().unwrap().data_store_service.clone()
+    }
+
+    /// Queue a kick request for a player (called from Lua Player:Kick())
+    pub fn queue_kick(&self, user_id: u64, message: Option<String>) {
+        self.data_model
+            .lock()
+            .unwrap()
+            .kick_requests
+            .push(KickRequest { user_id, message });
+    }
+
+    /// Drain all pending kick requests (called from GameInstance tick)
+    pub fn drain_kick_requests(&self) -> Vec<KickRequest> {
+        std::mem::take(&mut self.data_model.lock().unwrap().kick_requests)
     }
 }
 
@@ -122,6 +146,8 @@ impl LuaRuntime {
 
         let game = Game::new(game_id, async_bridge);
         lua.globals().set("game", game.clone())?;
+        // Store game reference for internal use (e.g., Player:Kick())
+        lua.globals().set("__clawblox_game", game.clone())?;
 
         lua.globals().set("Workspace", game.workspace())?;
         lua.globals().set("Players", game.players())?;

@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use crate::game::constants::humanoid as humanoid_consts;
 use super::events::{create_signal, RBXScriptSignal};
+use super::runtime::Game;
 use super::services::WorkspaceService;
 use super::types::{CFrame, Color3, Material, PartType, UDim2, Vector3};
 
@@ -1947,7 +1948,33 @@ impl UserData for Instance {
 
         methods.add_method("LoadCharacter", |_, _this, ()| Ok(()));
 
-        methods.add_method("Kick", |_, _this, _message: Option<String>| Ok(()));
+        methods.add_method("Kick", |lua, this, message: Option<String>| {
+            // Get user_id from this player instance
+            let user_id = {
+                let data = this.data.lock().unwrap();
+                data.player_data.as_ref().map(|p| p.user_id)
+            };
+
+            if let Some(user_id) = user_id {
+                // Get game reference from Lua globals and queue kick request
+                let game_ud: mlua::Result<mlua::AnyUserData> = lua.globals().get("__clawblox_game");
+                if let Ok(ud) = game_ud {
+                    if let Ok(game) = ud.borrow::<Game>() {
+                        game.queue_kick(user_id, message.clone());
+                        if let Some(msg) = &message {
+                            eprintln!("[Player] Kick requested for user_id={}: {}", user_id, msg);
+                        } else {
+                            eprintln!("[Player] Kick requested for user_id={}", user_id);
+                        }
+                    } else {
+                        eprintln!("[Player] Kick failed: could not borrow Game from UserData");
+                    }
+                } else {
+                    eprintln!("[Player] Kick failed: game reference not found in Lua globals");
+                }
+            }
+            Ok(())
+        });
 
         methods.add_meta_method(mlua::MetaMethod::Index, |_, this, key: String| {
             Ok(this.find_first_child(&key, false))
