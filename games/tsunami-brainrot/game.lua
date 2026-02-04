@@ -69,6 +69,16 @@ local ZONE_RARITY_MAP = {
     ["Epic"] = "epic",
 }
 
+-- Helper to look up zone config by name
+local function getZoneByName(zoneName)
+    for _, zone in ipairs(ZONES) do
+        if zone.name == zoneName then
+            return zone
+        end
+    end
+    return nil
+end
+
 -- Helper to get random character for a zone
 local function getCharacterForZone(zoneName)
     local rarity = ZONE_RARITY_MAP[zoneName]
@@ -86,6 +96,74 @@ local function getCharacterForZone(zoneName)
 
     -- Random selection
     return matching[math.random(1, #matching)]
+end
+
+-- Helper to recreate a brainrot Part from saved data
+local function createBrainrotFromData(brainrotData, zone)
+    local hasModel = brainrotData.modelUrl ~= nil
+    local partSize = hasModel and Vector3.new(2, 5, 2) or Vector3.new(2, 2, 2)
+
+    local brainrot = Instance.new("Part")
+    brainrot.Name = "Brainrot"
+    brainrot.Size = partSize
+    brainrot.Position = Vector3.new(0, -200, 0)  -- Temporary position, will be set by placeBrainrotOnBase
+    brainrot.Anchored = true
+    brainrot.CanCollide = false
+    brainrot.Shape = Enum.PartType.Ball
+    brainrot.Color = zone.color
+    brainrot.Material = Enum.Material.Neon
+    brainrot:SetAttribute("IsBrainrot", true)
+    brainrot:SetAttribute("Value", brainrotData.value)
+    brainrot:SetAttribute("Zone", brainrotData.zone)
+
+    if brainrotData.modelUrl then
+        brainrot:SetAttribute("ModelUrl", brainrotData.modelUrl)
+    end
+
+    -- Add floating label (BillboardGui)
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "BrainrotLabel"
+    billboard.Size = UDim2.new(0, 120, 0, 60)
+    billboard.StudsOffset = Vector3.new(0, 3, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Parent = brainrot
+
+    -- Name label
+    local nameLabel = Instance.new("TextLabel")
+    nameLabel.Name = "NameLabel"
+    nameLabel.Size = UDim2.new(1, 0, 0.35, 0)
+    nameLabel.Position = UDim2.new(0, 0, 0, 0)
+    nameLabel.Text = brainrotData.displayName or zone.name
+    nameLabel.TextColor3 = zone.color
+    nameLabel.TextScaled = true
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Parent = billboard
+
+    -- Value label
+    local valueLabel = Instance.new("TextLabel")
+    valueLabel.Name = "ValueLabel"
+    valueLabel.Size = UDim2.new(1, 0, 0.3, 0)
+    valueLabel.Position = UDim2.new(0, 0, 0.35, 0)
+    valueLabel.Text = "$" .. brainrotData.value
+    valueLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    valueLabel.TextScaled = true
+    valueLabel.BackgroundTransparency = 1
+    valueLabel.Parent = billboard
+
+    -- Income label (green)
+    local incomeLabel = Instance.new("TextLabel")
+    incomeLabel.Name = "IncomeLabel"
+    incomeLabel.Size = UDim2.new(1, 0, 0.3, 0)
+    incomeLabel.Position = UDim2.new(0, 0, 0.65, 0)
+    incomeLabel.Text = "$" .. brainrotData.incomeRate .. "/s"
+    incomeLabel.TextColor3 = Color3.fromRGB(50, 255, 50)
+    incomeLabel.TextScaled = true
+    incomeLabel.BackgroundTransparency = 1
+    incomeLabel.Parent = billboard
+
+    brainrot.Parent = Workspace
+
+    return brainrot
 end
 
 
@@ -509,6 +587,7 @@ local function loadPlayerData(player)
     player:SetAttribute("BaseSizeX", BASE_SIZE_X)
     player:SetAttribute("BaseSizeZ", BASE_SIZE_Z)
 
+    -- Restore in-memory brainrots first (for temporary disconnects within same server session)
     if #data.placedBrainrots > 0 then
         for i, placed in ipairs(data.placedBrainrots) do
             if placed.part and placed.part.Parent then
@@ -527,6 +606,27 @@ local function loadPlayerData(player)
         print("[DataStore] Loaded data for " .. player.Name .. ": money=" .. savedData.money .. ", speedLevel=" .. savedData.speedLevel)
         data.money = savedData.money or 0
         data.speedLevel = savedData.speedLevel or 1
+
+        -- Restore placedBrainrots from DataStore if not already restored from memory
+        if #data.placedBrainrots == 0 and savedData.placedBrainrots and #savedData.placedBrainrots > 0 then
+            print("[DataStore] Restoring " .. #savedData.placedBrainrots .. " brainrots for " .. player.Name)
+            for i, brainrotData in ipairs(savedData.placedBrainrots) do
+                local zone = getZoneByName(brainrotData.zone)
+                if zone then
+                    local part = createBrainrotFromData(brainrotData, zone)
+                    placeBrainrotOnBase(player, part, i, brainrotData.incomeRate)
+                    table.insert(data.placedBrainrots, {
+                        part = part,
+                        value = brainrotData.value,
+                        incomeRate = brainrotData.incomeRate,
+                        displayName = brainrotData.displayName
+                    })
+                else
+                    warn("[DataStore] Unknown zone '" .. tostring(brainrotData.zone) .. "' for brainrot, skipping")
+                end
+            end
+        end
+
         updatePlayerAttributes(player)
     else
         print("[DataStore] No saved data for " .. player.Name .. ", using defaults")
@@ -541,14 +641,27 @@ local function savePlayerData(player)
         return
     end
 
+    -- Serialize placedBrainrots (strip Part references, keep only data needed for recreation)
+    local serializedBrainrots = {}
+    for _, placed in ipairs(data.placedBrainrots) do
+        table.insert(serializedBrainrots, {
+            value = placed.value,
+            incomeRate = placed.incomeRate,
+            zone = placed.part:GetAttribute("Zone"),
+            modelUrl = placed.part:GetAttribute("ModelUrl"),
+            displayName = placed.displayName
+        })
+    end
+
     local key = "player_" .. player.UserId
     local saveData = {
         money = data.money,
         speedLevel = data.speedLevel,
+        placedBrainrots = serializedBrainrots,
     }
 
     playerStore:SetAsync(key, saveData)
-    print("[DataStore] Saved data for " .. player.Name .. ": money=" .. data.money .. ", speedLevel=" .. data.speedLevel)
+    print("[DataStore] Saved data for " .. player.Name .. ": money=" .. data.money .. ", speedLevel=" .. data.speedLevel .. ", brainrots=" .. #serializedBrainrots)
     dirtyPlayers[player.UserId] = false
     saveAccumulator[player.UserId] = 0
 end
@@ -825,8 +938,18 @@ local function collectBrainrot(player)
     local brainrot = brainrots[nearestIdx]
     local value = brainrot:GetAttribute("Value") or BRAINROT_VALUE
 
+    -- Get displayName from billboard for persistence
+    local displayName = brainrot:GetAttribute("Zone")  -- Default to zone name
+    local billboard = brainrot:FindFirstChild("BrainrotLabel")
+    if billboard then
+        local nameLabel = billboard:FindFirstChild("NameLabel")
+        if nameLabel then
+            displayName = nameLabel.Text
+        end
+    end
+
     if attachBrainrotToPlayer(player, brainrot) then
-        table.insert(data.carriedBrainrots, {part = brainrot, value = value})
+        table.insert(data.carriedBrainrots, {part = brainrot, value = value, displayName = displayName})
         table.remove(brainrots, nearestIdx)
         updatePlayerAttributes(player)
         print("[Collect] " .. player.Name .. " collected brainrot worth " .. value .. " (carrying " .. #data.carriedBrainrots .. "/" .. capacity .. ")")
@@ -869,7 +992,8 @@ local function depositBrainrots(player)
         table.insert(data.placedBrainrots, {
             part = carried.part,
             value = carried.value,
-            incomeRate = incomeRate
+            incomeRate = incomeRate,
+            displayName = carried.displayName
         })
     end
 
