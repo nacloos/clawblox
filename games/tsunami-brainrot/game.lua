@@ -54,6 +54,40 @@ local ZONES = {
     {name = "Secret",    xMin = -400, xMax = -300, value = 1500, color = Color3.fromRGB(255, 255, 255), weight = 3},
 }
 
+-- Characters with GLB models (from characters.json)
+local CHARACTERS = {
+    {name = "Samuel de Prompto", rarity = "legendary", yield = 100, model = "altman.glb"},
+    {name = "Elonio Muskarelli", rarity = "legendary", yield = 150, model = "musk.glb"},
+    {name = "Zucc, Il Conte di Meta", rarity = "legendary", yield = 120, model = "zuck.glb"},
+    {name = "Jensen al Silicio", rarity = "epic", yield = 85, model = "huang.glb"},
+}
+
+-- Map zone names to character rarities
+local ZONE_RARITY_MAP = {
+    ["Secret"] = "legendary",
+    ["Legendary"] = "legendary",
+    ["Epic"] = "epic",
+}
+
+-- Helper to get random character for a zone
+local function getCharacterForZone(zoneName)
+    local rarity = ZONE_RARITY_MAP[zoneName]
+    if not rarity then return nil end
+
+    -- Filter characters by rarity
+    local matching = {}
+    for _, char in ipairs(CHARACTERS) do
+        if char.rarity == rarity then
+            table.insert(matching, char)
+        end
+    end
+
+    if #matching == 0 then return nil end
+
+    -- Random selection
+    return matching[math.random(1, #matching)]
+end
+
 
 --------------------------------------------------------------------------------
 -- GAME STATE
@@ -665,20 +699,40 @@ local function spawnBrainrot()
     local zMax = math.floor(MAP_WIDTH / 2 - 5)
     local z = math.random(zMin, zMax)
 
+    -- Check if this zone has character models
+    local character = getCharacterForZone(zone.name)
+    local displayName = zone.name
+    local value = zone.value
     local incomeRate = zone.value / 10  -- e.g., value 10 = 1$/sec
+
+    -- If character model available, use character's yield for value
+    if character then
+        displayName = character.name
+        value = character.yield * 10  -- Scale yield to match zone value scale
+        incomeRate = character.yield
+    end
+
+    -- Character models are taller (player-sized), spheres are small
+    local partSize = character and Vector3.new(2, 5, 2) or Vector3.new(2, 2, 2)
+    local yPos = character and 2.5 or 1  -- Raise character models so feet touch ground
 
     local brainrot = Instance.new("Part")
     brainrot.Name = "Brainrot"
-    brainrot.Size = Vector3.new(2, 2, 2)
-    brainrot.Position = Vector3.new(x, 1, z)
+    brainrot.Size = partSize
+    brainrot.Position = Vector3.new(x, yPos, z)
     brainrot.Anchored = true
     brainrot.CanCollide = false
     brainrot.Shape = Enum.PartType.Ball
     brainrot.Color = zone.color
     brainrot.Material = Enum.Material.Neon
     brainrot:SetAttribute("IsBrainrot", true)
-    brainrot:SetAttribute("Value", zone.value)
+    brainrot:SetAttribute("Value", value)
     brainrot:SetAttribute("Zone", zone.name)
+
+    -- Set ModelUrl for character models
+    if character then
+        brainrot:SetAttribute("ModelUrl", "/static/models/clawrots/" .. character.model)
+    end
 
     -- Add floating label (BillboardGui) so it is always attached
     local billboard = Instance.new("BillboardGui")
@@ -688,12 +742,12 @@ local function spawnBrainrot()
     billboard.AlwaysOnTop = true
     billboard.Parent = brainrot
 
-    -- Name label (shows zone name)
+    -- Name label (shows character name or zone name)
     local nameLabel = Instance.new("TextLabel")
     nameLabel.Name = "NameLabel"
     nameLabel.Size = UDim2.new(1, 0, 0.35, 0)
     nameLabel.Position = UDim2.new(0, 0, 0, 0)
-    nameLabel.Text = zone.name
+    nameLabel.Text = displayName
     nameLabel.TextColor3 = zone.color
     nameLabel.TextScaled = true
     nameLabel.BackgroundTransparency = 1
@@ -704,7 +758,7 @@ local function spawnBrainrot()
     valueLabel.Name = "ValueLabel"
     valueLabel.Size = UDim2.new(1, 0, 0.3, 0)
     valueLabel.Position = UDim2.new(0, 0, 0.35, 0)
-    valueLabel.Text = "$" .. zone.value
+    valueLabel.Text = "$" .. value
     valueLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
     valueLabel.TextScaled = true
     valueLabel.BackgroundTransparency = 1
