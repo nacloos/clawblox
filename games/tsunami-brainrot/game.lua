@@ -10,12 +10,12 @@ local AgentInputService = game:GetService("AgentInputService")
 -- CONFIGURATION
 --------------------------------------------------------------------------------
 
-local MAP_LENGTH = 800            -- X: -400 to +400
-local BASE_ZONE_X_START = 350     -- Safe base zone starts at X=350
+local MAP_LENGTH = 1000           -- X: -500 to +500
+local BASE_ZONE_X_START = 450     -- Safe base zone starts at X=450
 local BASE_COUNT = 8              -- Max 8 players/bases per place
 local BASE_SIZE_X = 30            -- Base platform size (X)
-local BASE_SIZE_Z = 30            -- Base platform size (Z)
-local BASE_GAP = 6                -- Z gap between base platforms
+local BASE_SIZE_Z = 20            -- Base platform size (Z)
+local BASE_GAP = 4                -- Z gap between base platforms
 local BASE_ZONE_PADDING_X = 10    -- Padding inside the safe zone along X
 local BASE_ROW_MARGIN_Z = 20      -- Extra Z margin outside base row
 local BASE_PLATFORM_HEIGHT = 0.2  -- Base platform thickness (keep <= autostep)
@@ -51,7 +51,7 @@ local ZONES = {
     {name = "Rare",      xMin = 0,   xMax = 150,  value = 80,   color = Color3.fromRGB(180, 100, 255), weight = 15},
     {name = "Epic",      xMin = -150, xMax = 0,   value = 200,  color = Color3.fromRGB(255, 150, 50),  weight = 10},
     {name = "Legendary", xMin = -300, xMax = -150, value = 500, color = Color3.fromRGB(255, 255, 50),  weight = 7},
-    {name = "Secret",    xMin = -400, xMax = -300, value = 1500, color = Color3.fromRGB(255, 255, 255), weight = 3},
+    {name = "Secret",    xMin = -500, xMax = -300, value = 1500, color = Color3.fromRGB(255, 255, 255), weight = 3},
 }
 
 -- Characters with GLB models (from characters.json)
@@ -128,33 +128,33 @@ local function createBrainrotFromData(brainrotData, zone)
     billboard.AlwaysOnTop = true
     billboard.Parent = brainrot
 
-    -- Name label
+    -- Name label (white)
     local nameLabel = Instance.new("TextLabel")
     nameLabel.Name = "NameLabel"
-    nameLabel.Size = UDim2.new(1, 0, 0.35, 0)
+    nameLabel.Size = UDim2.new(1, 0, 0.33, 0)
     nameLabel.Position = UDim2.new(0, 0, 0, 0)
     nameLabel.Text = brainrotData.displayName or zone.name
-    nameLabel.TextColor3 = zone.color
+    nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
     nameLabel.TextScaled = true
     nameLabel.BackgroundTransparency = 1
     nameLabel.Parent = billboard
 
-    -- Value label
-    local valueLabel = Instance.new("TextLabel")
-    valueLabel.Name = "ValueLabel"
-    valueLabel.Size = UDim2.new(1, 0, 0.3, 0)
-    valueLabel.Position = UDim2.new(0, 0, 0.35, 0)
-    valueLabel.Text = "$" .. brainrotData.value
-    valueLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-    valueLabel.TextScaled = true
-    valueLabel.BackgroundTransparency = 1
-    valueLabel.Parent = billboard
+    -- Rarity label (zone color)
+    local rarityLabel = Instance.new("TextLabel")
+    rarityLabel.Name = "RarityLabel"
+    rarityLabel.Size = UDim2.new(1, 0, 0.33, 0)
+    rarityLabel.Position = UDim2.new(0, 0, 0.33, 0)
+    rarityLabel.Text = brainrotData.zone
+    rarityLabel.TextColor3 = zone.color
+    rarityLabel.TextScaled = true
+    rarityLabel.BackgroundTransparency = 1
+    rarityLabel.Parent = billboard
 
     -- Income label (green)
     local incomeLabel = Instance.new("TextLabel")
     incomeLabel.Name = "IncomeLabel"
-    incomeLabel.Size = UDim2.new(1, 0, 0.3, 0)
-    incomeLabel.Position = UDim2.new(0, 0, 0.65, 0)
+    incomeLabel.Size = UDim2.new(1, 0, 0.33, 0)
+    incomeLabel.Position = UDim2.new(0, 0, 0.66, 0)
     incomeLabel.Text = "$" .. brainrotData.incomeRate .. "/s"
     incomeLabel.TextColor3 = Color3.fromRGB(50, 255, 50)
     incomeLabel.TextScaled = true
@@ -701,16 +701,19 @@ local function createMap()
         zoneOverlay.Parent = Workspace
     end
 
-    -- Base zone overlay (brighter green, X: 300-400)
-    local baseZone = Instance.new("Part")
-    baseZone.Name = "BaseZone"
-    baseZone.Size = Vector3.new(BASE_ZONE_SIZE, 0.1, MAP_WIDTH)
-    baseZone.Position = Vector3.new(BASE_ZONE_X_START + BASE_ZONE_SIZE / 2, 0.06, 0)  -- X=350
-    baseZone.Anchored = true
-    baseZone.Color = Color3.fromRGB(100, 200, 100)  -- Brighter green
-    baseZone.CanCollide = false
-    baseZone:SetAttribute("IsSafeZone", true)
-    baseZone.Parent = Workspace
+    -- Safe area ground (slightly lighter green) - covers from end of zones (X=350) to right edge
+    local safeAreaStartX = 350  -- Where colored zones end
+    local safeAreaEndX = MAP_LENGTH / 2 + 2
+    local safeAreaSizeX = safeAreaEndX - safeAreaStartX
+    local safeAreaGround = Instance.new("Part")
+    safeAreaGround.Name = "SafeAreaGround"
+    safeAreaGround.Size = Vector3.new(safeAreaSizeX, 0.1, MAP_WIDTH)
+    safeAreaGround.Position = Vector3.new(safeAreaStartX + safeAreaSizeX / 2, 0.05, 0)
+    safeAreaGround.Anchored = true
+    safeAreaGround.Color = Color3.fromRGB(120, 180, 120)  -- Lighter green
+    safeAreaGround.CanCollide = false
+    safeAreaGround:SetAttribute("IsSafeZone", true)
+    safeAreaGround.Parent = Workspace
 
     -- Player base platforms + deposit areas
     local baseCenterX = getBaseCenterX()
@@ -724,7 +727,7 @@ local function createMap()
         basePlatform.Size = Vector3.new(BASE_SIZE_X, BASE_PLATFORM_HEIGHT, BASE_SIZE_Z)
         basePlatform.Position = Vector3.new(baseCenterX, BASE_PLATFORM_HEIGHT / 2, baseZ)
         basePlatform.Anchored = true
-        basePlatform.Color = Color3.fromRGB(90, 170, 90)
+        basePlatform.Color = Color3.fromRGB(120, 180, 120)  -- Slightly lighter green
         basePlatform.CanCollide = false
         basePlatform:SetAttribute("IsBase", true)
         basePlatform:SetAttribute("BaseIndex", i)
@@ -858,33 +861,33 @@ local function spawnBrainrot()
     billboard.AlwaysOnTop = true
     billboard.Parent = brainrot
 
-    -- Name label (shows character name or zone name)
+    -- Name label (white)
     local nameLabel = Instance.new("TextLabel")
     nameLabel.Name = "NameLabel"
-    nameLabel.Size = UDim2.new(1, 0, 0.35, 0)
+    nameLabel.Size = UDim2.new(1, 0, 0.33, 0)
     nameLabel.Position = UDim2.new(0, 0, 0, 0)
     nameLabel.Text = displayName
-    nameLabel.TextColor3 = zone.color
+    nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
     nameLabel.TextScaled = true
     nameLabel.BackgroundTransparency = 1
     nameLabel.Parent = billboard
 
-    -- Value label
-    local valueLabel = Instance.new("TextLabel")
-    valueLabel.Name = "ValueLabel"
-    valueLabel.Size = UDim2.new(1, 0, 0.3, 0)
-    valueLabel.Position = UDim2.new(0, 0, 0.35, 0)
-    valueLabel.Text = "$" .. value
-    valueLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-    valueLabel.TextScaled = true
-    valueLabel.BackgroundTransparency = 1
-    valueLabel.Parent = billboard
+    -- Rarity label (zone color)
+    local rarityLabel = Instance.new("TextLabel")
+    rarityLabel.Name = "RarityLabel"
+    rarityLabel.Size = UDim2.new(1, 0, 0.33, 0)
+    rarityLabel.Position = UDim2.new(0, 0, 0.33, 0)
+    rarityLabel.Text = zone.name
+    rarityLabel.TextColor3 = zone.color
+    rarityLabel.TextScaled = true
+    rarityLabel.BackgroundTransparency = 1
+    rarityLabel.Parent = billboard
 
     -- Income label (green)
     local incomeLabel = Instance.new("TextLabel")
     incomeLabel.Name = "IncomeLabel"
-    incomeLabel.Size = UDim2.new(1, 0, 0.3, 0)
-    incomeLabel.Position = UDim2.new(0, 0, 0.65, 0)
+    incomeLabel.Size = UDim2.new(1, 0, 0.33, 0)
+    incomeLabel.Position = UDim2.new(0, 0, 0.66, 0)
     incomeLabel.Text = "$" .. incomeRate .. "/s"
     incomeLabel.TextColor3 = Color3.fromRGB(50, 255, 50)
     incomeLabel.TextScaled = true
