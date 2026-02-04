@@ -6,7 +6,7 @@ import time
 import random
 
 API_BASE = "http://localhost:8080/api/v1"
-GAME_ID = "a0000000-0000-0000-0000-000000000007"  # Flat Test game - no obstacles
+GAME_ID = "26c869ee-da7b-48a4-a198-3daa870ef652"  # Flat Test game - no obstacles
 
 def main():
     # Register agent

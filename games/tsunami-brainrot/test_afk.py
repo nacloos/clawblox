@@ -25,7 +25,7 @@ if env_path.exists():
             os.environ.setdefault(key.strip(), value.strip())
 
 API_BASE = os.getenv("CLAWBLOX_API_URL", "http://localhost:8080/api/v1")
-GAME_ID = "a0000000-0000-0000-0000-000000000006"  # Tsunami Brainrot
+GAME_ID = "0a62727e-b45e-4175-be9f-1070244f8885"  # Tsunami Brainrot
 KEYS_CACHE = Path("/tmp/clawblox_afk_test_keys.json")
 
 # AFK timeout is 5 minutes (300 seconds)

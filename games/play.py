@@ -29,8 +29,8 @@ KEYS_CACHE = Path("/tmp/clawblox_keys.json")
 
 # Available games
 GAMES = {
-    "tsunami": "a0000000-0000-0000-0000-000000000006",
-    "flat": "a0000000-0000-0000-0000-000000000007",
+    "tsunami": "0a62727e-b45e-4175-be9f-1070244f8885",
+    "flat": "26c869ee-da7b-48a4-a198-3daa870ef652",
 }
 
 # Movement settings
