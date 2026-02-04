@@ -65,6 +65,7 @@ export interface SpectatorEntity {
   shape?: 'Block' | 'Ball' | 'Cylinder' | 'Wedge'
   health?: number
   pickup_type?: string
+  model_url?: string
   billboard_gui?: BillboardGui
 }
 

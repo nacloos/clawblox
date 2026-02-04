@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use uuid::Uuid;
 
-use super::instance::{Instance, InstanceData};
+use super::instance::{AttributeValue, Instance, InstanceData};
 use super::services::{
     register_raycast_params, AgentInput, AgentInputService, DataStoreService, PlayersService,
     RunService, WorkspaceService,
@@ -18,6 +18,8 @@ pub struct GameDataModel {
     pub agent_input_service: AgentInputService,
     pub data_store_service: DataStoreService,
 }
+
+const DEFAULT_PLAYER_MODEL_URL: &str = "/static/models/player.glb";
 
 impl GameDataModel {
     pub fn new(game_id: Uuid, async_bridge: Option<Arc<AsyncBridge>>) -> Self {
@@ -345,6 +347,10 @@ impl LuaRuntime {
             part.shape = super::types::PartType::Cylinder;
             part.color = super::types::Color3::new(0.9, 0.45, 0.3); // Orange-reddish player color
         }
+        hrp_data.attributes.insert(
+            "ModelUrl".to_string(),
+            AttributeValue::String(DEFAULT_PLAYER_MODEL_URL.to_string()),
+        );
         let hrp = Instance::from_data(hrp_data);
         let hrp_id = hrp.data.lock().unwrap().id.0;
         hrp.set_parent(Some(&character));

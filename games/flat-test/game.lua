@@ -143,16 +143,32 @@ end
 -- INPUT HANDLING
 --------------------------------------------------------------------------------
 
+print("AgentInputService available: " .. tostring(AgentInputService ~= nil))
 if AgentInputService then
+    print("Connecting InputReceived handler...")
     AgentInputService.InputReceived:Connect(function(player, inputType, inputData)
+        print("[Input] Received: " .. tostring(inputType))
         local data = getPlayerData(player)
-        if not data then return end
+        if not data then
+            print("[Input] No player data!")
+            return
+        end
 
+        print("[Input] " .. player.Name .. " -> " .. inputType)
         if inputType == "MoveTo" and inputData and inputData.position then
             local humanoid = getHumanoid(player)
             if humanoid then
                 local pos = inputData.position
                 humanoid:MoveTo(Vector3.new(pos[1], pos[2], pos[3]))
+            end
+        elseif inputType == "Stop" then
+            print("[Stop] Cancelling movement for " .. player.Name)
+            local humanoid = getHumanoid(player)
+            if humanoid then
+                humanoid:CancelMoveTo()
+                print("[Stop] CancelMoveTo called")
+            else
+                print("[Stop] No humanoid found!")
             end
         end
     end)

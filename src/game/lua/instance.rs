@@ -266,6 +266,8 @@ pub struct HumanoidData {
     pub hip_height: f32,
     /// Movement target set by MoveTo()
     pub move_to_target: Option<Vector3>,
+    /// Flag to cancel movement (set by CancelMoveTo)
+    pub cancel_move_to: bool,
 
     pub died: RBXScriptSignal,
     pub health_changed: RBXScriptSignal,
@@ -283,6 +285,7 @@ impl Default for HumanoidData {
             auto_rotate: true,
             hip_height: humanoid_consts::DEFAULT_HIP_HEIGHT,
             move_to_target: None,
+            cancel_move_to: false,
             died: create_signal("Died"),
             health_changed: create_signal("HealthChanged"),
             move_to_finished: create_signal("MoveToFinished"),
@@ -1884,6 +1887,15 @@ impl UserData for Instance {
                 Ok(())
             },
         );
+
+        methods.add_method("CancelMoveTo", |_, this, ()| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(humanoid) = &mut data.humanoid_data {
+                humanoid.move_to_target = None;
+                humanoid.cancel_move_to = true; // Signal to clear physics target
+            }
+            Ok(())
+        });
 
         methods.add_method("GetPrimaryPartCFrame", |_, this, ()| {
             let data = this.data.lock().unwrap();

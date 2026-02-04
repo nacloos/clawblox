@@ -6,7 +6,9 @@ use uuid::Uuid;
 
 use super::async_bridge::AsyncBridge;
 use super::constants::physics as consts;
-use super::lua::instance::{attributes_to_json, ClassName, Instance, TextXAlignment, TextYAlignment};
+use super::lua::instance::{
+    attributes_to_json, AttributeValue, ClassName, Instance, TextXAlignment, TextYAlignment,
+};
 use super::lua::services::AgentInput;
 use super::lua::LuaRuntime;
 use super::physics::PhysicsWorld;
@@ -525,7 +527,11 @@ impl GameInstance {
                 let mut child_data = child_ref.lock().unwrap();
                 if let Some(humanoid) = &mut child_data.humanoid_data {
                     found_humanoid = true;
-                    if let Some(target) = humanoid.move_to_target.take() {
+                    // Check for cancel first
+                    if humanoid.cancel_move_to {
+                        humanoid.cancel_move_to = false;
+                        self.physics.set_character_target(hrp_id, None);
+                    } else if let Some(target) = humanoid.move_to_target.take() {
                         self.physics.set_character_target(hrp_id, Some([target.x, target.y, target.z]));
                     }
                 }
@@ -930,6 +936,7 @@ impl GameInstance {
                         shape: Some(part_data.shape.name().to_string()),
                         health: None,
                         pickup_type: None,
+                        model_url: Self::extract_model_url(&data.attributes),
                         billboard_gui,
                     });
                 }
@@ -1071,6 +1078,22 @@ impl GameInstance {
             }
         }
 
+        None
+    }
+
+    /// Reads a model URL from instance attributes.
+    /// Supports both `ModelUrl` and `model_url`.
+    fn extract_model_url(
+        attributes: &std::collections::HashMap<String, AttributeValue>,
+    ) -> Option<String> {
+        for key in ["ModelUrl", "model_url"] {
+            if let Some(AttributeValue::String(url)) = attributes.get(key) {
+                let trimmed = url.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
         None
     }
 }
@@ -1255,6 +1278,8 @@ pub struct SpectatorEntity {
     pub health: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pickup_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub billboard_gui: Option<BillboardGuiJson>,
 }

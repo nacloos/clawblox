@@ -40,6 +40,7 @@ MOVE_SPEED = 20.0  # Distance per movement command
 movement = {"x": 0, "z": 0}
 running = True
 last_key = ""
+stop_requested = False
 
 
 def load_cached_keys() -> list[str]:
@@ -92,32 +93,36 @@ def get_api_key(api_base: str) -> str:
 
 def keyboard_thread():
     """Thread that reads keyboard input"""
-    global movement, running, last_key
+    global movement, running, last_key, stop_requested
 
     while running:
         try:
             key = readchar.readkey()
             last_key = key
+            key_lower = key.lower() if len(key) == 1 else ""
 
-            if key.lower() == 'w':
+            if key_lower == 'w':
                 movement = {"x": 0, "z": -1}
-            elif key.lower() == 's':
+            elif key_lower == 's':
                 movement = {"x": 0, "z": 1}
-            elif key.lower() == 'a':
+            elif key_lower == 'a':
                 movement = {"x": -1, "z": 0}
-            elif key.lower() == 'd':
+            elif key_lower == 'd':
                 movement = {"x": 1, "z": 0}
-            elif key.lower() == 'q' or key == readchar.key.ESCAPE:
+            elif key_lower == 'q' or key == readchar.key.ESCAPE:
                 running = False
-            elif key == ' ':
-                # Space = stop
+            elif key_lower in ('x', 'e') or key == ' ':
+                # X, E, or SPACE = stop
+                print(f"\n[STOP KEY] Pressed: '{repr(key)}'")
                 movement = {"x": 0, "z": 0}
-        except Exception:
-            pass
+                stop_requested = True
+        except Exception as e:
+            if running:  # Only log if not shutting down
+                print(f"\n[KB ERROR] {e}")
 
 
 def main():
-    global running, movement
+    global running, movement, stop_requested
 
     parser = argparse.ArgumentParser(description="Manual keyboard controller for Clawblox games")
     parser.add_argument(
@@ -139,7 +144,7 @@ def main():
     print("  S - Move backward (positive Z)")
     print("  A - Move left (negative X)")
     print("  D - Move right (positive X)")
-    print("  SPACE - Stop moving")
+    print("  E, X, or SPACE - Stop moving")
     print("  Q or ESC - Quit")
     print("=" * 60)
 
@@ -218,6 +223,20 @@ def main():
                         json={"type": "MoveTo", "data": {"position": target}},
                         timeout=5
                     )
+                if stop_requested:
+                    # Stop by sending Stop command
+                    stop_requested = False
+                    print(f"\n[STOP] Sending Stop command...")
+                    try:
+                        stop_resp = requests.post(
+                            f"{API_BASE}/games/{game_id}/input",
+                            headers=headers,
+                            json={"type": "Stop", "data": {}},
+                            timeout=5
+                        )
+                        print(f"[STOP] Response: {stop_resp.status_code}")
+                    except Exception as e:
+                        print(f"[STOP] Error: {e}")
 
                 last_pos = pos
 
