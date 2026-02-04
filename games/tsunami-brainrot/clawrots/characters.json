@@ -1,0 +1,88 @@
+{
+  "characters": [
+    {
+      "name": "Samuel de Prompto",
+      "rarity": "legendary",
+      "yield": 100,
+      "model": "altman.glb"
+    },
+    {
+      "name": "Elonio Muskarelli",
+      "rarity": "legendary",
+      "yield": 150,
+      "model": "musk.glb"
+    },
+    {
+      "name": "Linuzzo Torvaldinianni",
+      "rarity": "epic",
+      "yield": 75,
+      "model": "torvalds.glb"
+    },
+    {
+      "name": "Gianni LeCannoli",
+      "rarity": "epic",
+      "yield": 80,
+      "model": "lecun.glb"
+    },
+    {
+      "name": "Fefeina Imagenetti",
+      "rarity": "rare",
+      "yield": 50,
+      "model": "li.glb"
+    },
+    {
+      "name": "Zucc, Il Conte di Meta",
+      "rarity": "legendary",
+      "yield": 120,
+      "model": "zuck.glb"
+    },
+    {
+      "name": "Papa Gabe",
+      "rarity": "epic",
+      "yield": 90,
+      "model": "newell.glb"
+    },
+    {
+      "name": "Pietro Steinbergetti",
+      "rarity": "rare",
+      "yield": 60,
+      "model": "steinberger.glb"
+    },
+    {
+      "name": "Giuseppe Bezzone",
+      "rarity": "legendary",
+      "yield": 140,
+      "model": "bezos.glb"
+    },
+    {
+      "name": "Don Billio di Windows",
+      "rarity": "legendary",
+      "yield": 130,
+      "model": "gates.glb"
+    },
+    {
+      "name": "Jensen al Silicio",
+      "rarity": "epic",
+      "yield": 85,
+      "model": "huang.glb"
+    },
+    {
+      "name": "Mira Muratina",
+      "rarity": "rare",
+      "yield": 55,
+      "model": "murati.glb"
+    },
+    {
+      "name": "Demiessa Hassabisa",
+      "rarity": "epic",
+      "yield": 70,
+      "model": "hassabis.glb"
+    },
+    {
+      "name": "Elizabessa di Sherlock",
+      "rarity": "rare",
+      "yield": 45,
+      "model": "holmes.glb"
+    }
+  ]
+}
