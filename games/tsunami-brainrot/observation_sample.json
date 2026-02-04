@@ -1,0 +1,2139 @@
+{
+  "tick": 6672,
+  "game_status": "active",
+  "player": {
+    "id": "a579f46b-a655-4094-8712-e221b6961301",
+    "position": [
+      444.4352,
+      2.553568,
+      -70.10983
+    ],
+    "health": 100,
+    "attributes": {
+      "BaseCenterX": 475.0,
+      "Money": 106.0,
+      "BaseSizeZ": 20.0,
+      "BaseMaxBrainrots": 10.0,
+      "SpeedLevel": 1.0,
+      "NextSpeedCost": 100.0,
+      "CarriedValue": 0.0,
+      "BaseSizeX": 30.0,
+      "BaseCenterZ": -84.0,
+      "CarryCapacity": 1.0,
+      "ZoneInfo": "[{\"name\":\"Common\",\"value\":10,\"xMax\":350,\"xMin\":250},{\"name\":\"Uncommon\",\"value\":30,\"xMax\":250,\"xMin\":150},{\"name\":\"Rare\",\"value\":80,\"xMax\":150,\"xMin\":0},{\"name\":\"Epic\",\"value\":200,\"xMax\":0,\"xMin\":-150},{\"name\":\"Legendary\",\"value\":500,\"xMax\":-150,\"xMin\":-300},{\"name\":\"Secret\",\"value\":1500,\"xMax\":-300,\"xMin\":-500}]",
+      "CarriedBrainrots": "{}",
+      "PlacedBrainrots": "[{\"displayName\":\"Common\",\"incomeRate\":1,\"index\":1,\"value\":10,\"zone\":\"Common\"},{\"displayName\":\"Common\",\"incomeRate\":1,\"index\":2,\"value\":10,\"zone\":\"Common\"},{\"displayName\":\"Common\",\"incomeRate\":1,\"index\":3,\"value\":10,\"zone\":\"Common\"}]",
+      "CarriedCount": 0.0,
+      "BaseIndex": 1.0,
+      "PassiveIncome": 3.0
+    }
+  },
+  "other_players": [],
+  "world": {
+    "entities": [
+      {
+        "id": 3,
+        "name": "Floor",
+        "entity_type": "part",
+        "position": [
+          0.0,
+          -1.0,
+          0.0
+        ],
+        "size": [
+          1004.0,
+          2.0,
+          228.0
+        ],
+        "color": [
+          0.39215687,
+          0.5882353,
+          0.39215687
+        ],
+        "material": "Plastic",
+        "anchored": true
+      },
+      {
+        "id": 4,
+        "name": "Zone_Common",
+        "entity_type": "part",
+        "position": [
+          300.0,
+          0.05,
+          0.0
+        ],
+        "size": [
+          100.0,
+          0.1,
+          228.0
+        ],
+        "color": [
+          1.0,
+          0.39215687,
+          1.0
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "IsZone": true,
+          "ZoneName": "Common"
+        }
+      },
+      {
+        "id": 5,
+        "name": "Zone_Uncommon",
+        "entity_type": "part",
+        "position": [
+          200.0,
+          0.05,
+          0.0
+        ],
+        "size": [
+          100.0,
+          0.1,
+          228.0
+        ],
+        "color": [
+          0.39215687,
+          0.5882353,
+          1.0
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "IsZone": true,
+          "ZoneName": "Uncommon"
+        }
+      },
+      {
+        "id": 6,
+        "name": "Zone_Rare",
+        "entity_type": "part",
+        "position": [
+          75.0,
+          0.05,
+          0.0
+        ],
+        "size": [
+          150.0,
+          0.1,
+          228.0
+        ],
+        "color": [
+          0.7058824,
+          0.39215687,
+          1.0
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "IsZone": true,
+          "ZoneName": "Rare"
+        }
+      },
+      {
+        "id": 7,
+        "name": "Zone_Epic",
+        "entity_type": "part",
+        "position": [
+          -75.0,
+          0.05,
+          0.0
+        ],
+        "size": [
+          150.0,
+          0.1,
+          228.0
+        ],
+        "color": [
+          1.0,
+          0.5882353,
+          0.19607843
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "ZoneName": "Epic",
+          "IsZone": true
+        }
+      },
+      {
+        "id": 8,
+        "name": "Zone_Legendary",
+        "entity_type": "part",
+        "position": [
+          -225.0,
+          0.05,
+          0.0
+        ],
+        "size": [
+          150.0,
+          0.1,
+          228.0
+        ],
+        "color": [
+          1.0,
+          1.0,
+          0.19607843
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "IsZone": true,
+          "ZoneName": "Legendary"
+        }
+      },
+      {
+        "id": 9,
+        "name": "Zone_Secret",
+        "entity_type": "part",
+        "position": [
+          -400.0,
+          0.05,
+          0.0
+        ],
+        "size": [
+          200.0,
+          0.1,
+          228.0
+        ],
+        "color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "IsZone": true,
+          "ZoneName": "Secret"
+        }
+      },
+      {
+        "id": 10,
+        "name": "SafeAreaGround",
+        "entity_type": "part",
+        "position": [
+          426.0,
+          0.05,
+          0.0
+        ],
+        "size": [
+          152.0,
+          0.1,
+          228.0
+        ],
+        "color": [
+          0.47058824,
+          0.7058824,
+          0.47058824
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "IsSafeZone": true
+        }
+      },
+      {
+        "id": 11,
+        "name": "BasePlatform_1",
+        "entity_type": "part",
+        "position": [
+          475.0,
+          0.1,
+          -84.0
+        ],
+        "size": [
+          30.0,
+          0.2,
+          20.0
+        ],
+        "color": [
+          0.47058824,
+          0.7058824,
+          0.47058824
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "BaseIndex": 1.0,
+          "IsBase": true
+        }
+      },
+      {
+        "id": 12,
+        "name": "DepositArea_1",
+        "entity_type": "part",
+        "position": [
+          475.0,
+          0.25,
+          -84.0
+        ],
+        "size": [
+          26.0,
+          0.1,
+          16.0
+        ],
+        "color": [
+          0.78431374,
+          0.78431374,
+          0.19607843
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "BaseIndex": 1.0,
+          "IsDepositArea": true
+        }
+      },
+      {
+        "id": 13,
+        "name": "BasePlatform_2",
+        "entity_type": "part",
+        "position": [
+          475.0,
+          0.1,
+          -60.0
+        ],
+        "size": [
+          30.0,
+          0.2,
+          20.0
+        ],
+        "color": [
+          0.47058824,
+          0.7058824,
+          0.47058824
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "BaseIndex": 2.0,
+          "IsBase": true
+        }
+      },
+      {
+        "id": 14,
+        "name": "DepositArea_2",
+        "entity_type": "part",
+        "position": [
+          475.0,
+          0.25,
+          -60.0
+        ],
+        "size": [
+          26.0,
+          0.1,
+          16.0
+        ],
+        "color": [
+          0.78431374,
+          0.78431374,
+          0.19607843
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "IsDepositArea": true,
+          "BaseIndex": 2.0
+        }
+      },
+      {
+        "id": 15,
+        "name": "BasePlatform_3",
+        "entity_type": "part",
+        "position": [
+          475.0,
+          0.1,
+          -36.0
+        ],
+        "size": [
+          30.0,
+          0.2,
+          20.0
+        ],
+        "color": [
+          0.47058824,
+          0.7058824,
+          0.47058824
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "BaseIndex": 3.0,
+          "IsBase": true
+        }
+      },
+      {
+        "id": 16,
+        "name": "DepositArea_3",
+        "entity_type": "part",
+        "position": [
+          475.0,
+          0.25,
+          -36.0
+        ],
+        "size": [
+          26.0,
+          0.1,
+          16.0
+        ],
+        "color": [
+          0.78431374,
+          0.78431374,
+          0.19607843
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "BaseIndex": 3.0,
+          "IsDepositArea": true
+        }
+      },
+      {
+        "id": 17,
+        "name": "BasePlatform_4",
+        "entity_type": "part",
+        "position": [
+          475.0,
+          0.1,
+          -12.0
+        ],
+        "size": [
+          30.0,
+          0.2,
+          20.0
+        ],
+        "color": [
+          0.47058824,
+          0.7058824,
+          0.47058824
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "BaseIndex": 4.0,
+          "IsBase": true
+        }
+      },
+      {
+        "id": 18,
+        "name": "DepositArea_4",
+        "entity_type": "part",
+        "position": [
+          475.0,
+          0.25,
+          -12.0
+        ],
+        "size": [
+          26.0,
+          0.1,
+          16.0
+        ],
+        "color": [
+          0.78431374,
+          0.78431374,
+          0.19607843
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "IsDepositArea": true,
+          "BaseIndex": 4.0
+        }
+      },
+      {
+        "id": 19,
+        "name": "BasePlatform_5",
+        "entity_type": "part",
+        "position": [
+          475.0,
+          0.1,
+          12.0
+        ],
+        "size": [
+          30.0,
+          0.2,
+          20.0
+        ],
+        "color": [
+          0.47058824,
+          0.7058824,
+          0.47058824
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "BaseIndex": 5.0,
+          "IsBase": true
+        }
+      },
+      {
+        "id": 20,
+        "name": "DepositArea_5",
+        "entity_type": "part",
+        "position": [
+          475.0,
+          0.25,
+          12.0
+        ],
+        "size": [
+          26.0,
+          0.1,
+          16.0
+        ],
+        "color": [
+          0.78431374,
+          0.78431374,
+          0.19607843
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "IsDepositArea": true,
+          "BaseIndex": 5.0
+        }
+      },
+      {
+        "id": 21,
+        "name": "BasePlatform_6",
+        "entity_type": "part",
+        "position": [
+          475.0,
+          0.1,
+          36.0
+        ],
+        "size": [
+          30.0,
+          0.2,
+          20.0
+        ],
+        "color": [
+          0.47058824,
+          0.7058824,
+          0.47058824
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "IsBase": true,
+          "BaseIndex": 6.0
+        }
+      },
+      {
+        "id": 22,
+        "name": "DepositArea_6",
+        "entity_type": "part",
+        "position": [
+          475.0,
+          0.25,
+          36.0
+        ],
+        "size": [
+          26.0,
+          0.1,
+          16.0
+        ],
+        "color": [
+          0.78431374,
+          0.78431374,
+          0.19607843
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "IsDepositArea": true,
+          "BaseIndex": 6.0
+        }
+      },
+      {
+        "id": 23,
+        "name": "BasePlatform_7",
+        "entity_type": "part",
+        "position": [
+          475.0,
+          0.1,
+          60.0
+        ],
+        "size": [
+          30.0,
+          0.2,
+          20.0
+        ],
+        "color": [
+          0.47058824,
+          0.7058824,
+          0.47058824
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "IsBase": true,
+          "BaseIndex": 7.0
+        }
+      },
+      {
+        "id": 24,
+        "name": "DepositArea_7",
+        "entity_type": "part",
+        "position": [
+          475.0,
+          0.25,
+          60.0
+        ],
+        "size": [
+          26.0,
+          0.1,
+          16.0
+        ],
+        "color": [
+          0.78431374,
+          0.78431374,
+          0.19607843
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "BaseIndex": 7.0,
+          "IsDepositArea": true
+        }
+      },
+      {
+        "id": 25,
+        "name": "BasePlatform_8",
+        "entity_type": "part",
+        "position": [
+          475.0,
+          0.1,
+          84.0
+        ],
+        "size": [
+          30.0,
+          0.2,
+          20.0
+        ],
+        "color": [
+          0.47058824,
+          0.7058824,
+          0.47058824
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "IsBase": true,
+          "BaseIndex": 8.0
+        }
+      },
+      {
+        "id": 26,
+        "name": "DepositArea_8",
+        "entity_type": "part",
+        "position": [
+          475.0,
+          0.25,
+          84.0
+        ],
+        "size": [
+          26.0,
+          0.1,
+          16.0
+        ],
+        "color": [
+          0.78431374,
+          0.78431374,
+          0.19607843
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "IsDepositArea": true,
+          "BaseIndex": 8.0
+        }
+      },
+      {
+        "id": 27,
+        "name": "SpeedShop",
+        "entity_type": "part",
+        "position": [
+          490.0,
+          2.5,
+          84.0
+        ],
+        "size": [
+          10.0,
+          5.0,
+          10.0
+        ],
+        "color": [
+          0.39215687,
+          0.39215687,
+          0.78431374
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "IsShop": true
+        }
+      },
+      {
+        "id": 28,
+        "name": "Wall_1",
+        "entity_type": "part",
+        "position": [
+          0.0,
+          25.0,
+          115.0
+        ],
+        "size": [
+          1004.0,
+          50.0,
+          2.0
+        ],
+        "color": [
+          0.6,
+          0.6,
+          0.6
+        ],
+        "material": "Plastic",
+        "anchored": true
+      },
+      {
+        "id": 29,
+        "name": "Wall_2",
+        "entity_type": "part",
+        "position": [
+          0.0,
+          25.0,
+          -115.0
+        ],
+        "size": [
+          1004.0,
+          50.0,
+          2.0
+        ],
+        "color": [
+          0.6,
+          0.6,
+          0.6
+        ],
+        "material": "Plastic",
+        "anchored": true
+      },
+      {
+        "id": 30,
+        "name": "Wall_3",
+        "entity_type": "part",
+        "position": [
+          501.0,
+          25.0,
+          0.0
+        ],
+        "size": [
+          2.0,
+          50.0,
+          228.0
+        ],
+        "color": [
+          0.6,
+          0.6,
+          0.6
+        ],
+        "material": "Plastic",
+        "anchored": true
+      },
+      {
+        "id": 31,
+        "name": "Wall_4",
+        "entity_type": "part",
+        "position": [
+          -501.0,
+          25.0,
+          0.0
+        ],
+        "size": [
+          2.0,
+          50.0,
+          228.0
+        ],
+        "color": [
+          0.6,
+          0.6,
+          0.6
+        ],
+        "material": "Plastic",
+        "anchored": true
+      },
+      {
+        "id": 32,
+        "name": "GameState",
+        "entity_type": "folder",
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "size": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "anchored": true,
+        "attributes": {
+          "WaveInterval": 30.0,
+          "ZoneInfo": "[{\"name\":\"Common\",\"value\":10,\"xMax\":350,\"xMin\":250},{\"name\":\"Uncommon\",\"value\":30,\"xMax\":250,\"xMin\":150},{\"name\":\"Rare\",\"value\":80,\"xMax\":150,\"xMin\":0},{\"name\":\"Epic\",\"value\":200,\"xMax\":0,\"xMin\":-150},{\"name\":\"Legendary\",\"value\":500,\"xMax\":-150,\"xMin\":-300},{\"name\":\"Secret\",\"value\":1500,\"xMax\":-300,\"xMin\":-500}]",
+          "SpawnedBrainrots": 30.0,
+          "ActiveWaveCount": 1.0,
+          "WaveTimeRemaining": 8.79999889433384
+        }
+      },
+      {
+        "id": 33,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          -144.0,
+          2.5,
+          -86.0
+        ],
+        "size": [
+          2.0,
+          5.0,
+          2.0
+        ],
+        "color": [
+          1.0,
+          0.5882353,
+          0.19607843
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "Zone": "Epic",
+          "IsBrainrot": true,
+          "Value": 850.0,
+          "ModelUrl": "/static/models/clawrots/huang.glb"
+        }
+      },
+      {
+        "id": 38,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          -381.0,
+          2.5,
+          -65.0
+        ],
+        "size": [
+          2.0,
+          5.0,
+          2.0
+        ],
+        "color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "ModelUrl": "/static/models/clawrots/altman.glb",
+          "Value": 1000.0,
+          "Zone": "Secret",
+          "IsBrainrot": true
+        }
+      },
+      {
+        "id": 43,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          261.0,
+          1.0,
+          -14.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          1.0,
+          0.39215687,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "IsBrainrot": true,
+          "Zone": "Common",
+          "Value": 10.0
+        }
+      },
+      {
+        "id": 48,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          225.0,
+          1.0,
+          73.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          0.39215687,
+          0.5882353,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "Value": 30.0,
+          "Zone": "Uncommon",
+          "IsBrainrot": true
+        }
+      },
+      {
+        "id": 53,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          258.0,
+          1.0,
+          103.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          1.0,
+          0.39215687,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "Value": 10.0,
+          "IsBrainrot": true,
+          "Zone": "Common"
+        }
+      },
+      {
+        "id": 58,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          78.0,
+          1.0,
+          -34.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          0.7058824,
+          0.39215687,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "Value": 80.0,
+          "IsBrainrot": true,
+          "Zone": "Rare"
+        }
+      },
+      {
+        "id": 63,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          314.0,
+          1.0,
+          45.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          1.0,
+          0.39215687,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "Zone": "Common",
+          "Value": 10.0,
+          "IsBrainrot": true
+        }
+      },
+      {
+        "id": 68,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          -159.0,
+          2.5,
+          -56.0
+        ],
+        "size": [
+          2.0,
+          5.0,
+          2.0
+        ],
+        "color": [
+          1.0,
+          1.0,
+          0.19607843
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "Zone": "Legendary",
+          "Value": 1500.0,
+          "IsBrainrot": true,
+          "ModelUrl": "/static/models/clawrots/musk.glb"
+        }
+      },
+      {
+        "id": 73,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          296.0,
+          1.0,
+          -2.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          1.0,
+          0.39215687,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "IsBrainrot": true,
+          "Value": 10.0,
+          "Zone": "Common"
+        }
+      },
+      {
+        "id": 78,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          -466.0,
+          2.5,
+          54.0
+        ],
+        "size": [
+          2.0,
+          5.0,
+          2.0
+        ],
+        "color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "Value": 1500.0,
+          "Zone": "Secret",
+          "IsBrainrot": true,
+          "ModelUrl": "/static/models/clawrots/musk.glb"
+        }
+      },
+      {
+        "id": 83,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          223.0,
+          1.0,
+          -63.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          0.39215687,
+          0.5882353,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "Value": 30.0,
+          "Zone": "Uncommon",
+          "IsBrainrot": true
+        }
+      },
+      {
+        "id": 88,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          261.0,
+          1.0,
+          -17.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          1.0,
+          0.39215687,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "Value": 10.0,
+          "Zone": "Common",
+          "IsBrainrot": true
+        }
+      },
+      {
+        "id": 95,
+        "name": "HumanoidRootPart",
+        "entity_type": "part",
+        "position": [
+          444.4352,
+          2.553568,
+          -70.10983
+        ],
+        "size": [
+          2.0,
+          5.0,
+          2.0
+        ],
+        "color": [
+          0.9,
+          0.45,
+          0.3
+        ],
+        "material": "Plastic",
+        "anchored": false,
+        "attributes": {
+          "ModelUrl": "/static/models/player.glb"
+        }
+      },
+      {
+        "id": 108,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          239.0,
+          1.0,
+          -64.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          0.39215687,
+          0.5882353,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "Value": 30.0,
+          "Zone": "Uncommon",
+          "IsBrainrot": true
+        }
+      },
+      {
+        "id": 113,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          210.0,
+          1.0,
+          21.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          0.39215687,
+          0.5882353,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "IsBrainrot": true,
+          "Zone": "Uncommon",
+          "Value": 30.0
+        }
+      },
+      {
+        "id": 118,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          -254.0,
+          2.5,
+          34.0
+        ],
+        "size": [
+          2.0,
+          5.0,
+          2.0
+        ],
+        "color": [
+          1.0,
+          1.0,
+          0.19607843
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "ModelUrl": "/static/models/clawrots/altman.glb",
+          "Value": 1000.0,
+          "IsBrainrot": true,
+          "Zone": "Legendary"
+        }
+      },
+      {
+        "id": 123,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          263.0,
+          1.0,
+          -4.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          1.0,
+          0.39215687,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "Value": 10.0,
+          "IsBrainrot": true,
+          "Zone": "Common"
+        }
+      },
+      {
+        "id": 128,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          462.0,
+          1.0,
+          -91.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          1.0,
+          0.39215687,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "OwnerUserId": 5315184005878529.0,
+          "IsPlaced": true,
+          "Value": 10.0,
+          "IsBrainrot": true,
+          "Zone": "Common"
+        }
+      },
+      {
+        "id": 133,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          475.0,
+          1.0,
+          -91.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          1.0,
+          0.39215687,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "OwnerUserId": 5315184005878529.0,
+          "Zone": "Common",
+          "Value": 10.0,
+          "IsBrainrot": true,
+          "IsPlaced": true
+        }
+      },
+      {
+        "id": 138,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          326.0,
+          1.0,
+          81.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          1.0,
+          0.39215687,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "IsBrainrot": true,
+          "Value": 10.0,
+          "Zone": "Common"
+        }
+      },
+      {
+        "id": 143,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          211.0,
+          1.0,
+          30.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          0.39215687,
+          0.5882353,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "Zone": "Uncommon",
+          "IsBrainrot": true,
+          "Value": 30.0
+        }
+      },
+      {
+        "id": 148,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          209.0,
+          1.0,
+          -32.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          0.39215687,
+          0.5882353,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "IsBrainrot": true,
+          "Value": 30.0,
+          "Zone": "Uncommon"
+        }
+      },
+      {
+        "id": 153,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          292.0,
+          1.0,
+          27.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          1.0,
+          0.39215687,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "Value": 10.0,
+          "Zone": "Common",
+          "IsBrainrot": true
+        }
+      },
+      {
+        "id": 158,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          -141.0,
+          2.5,
+          19.0
+        ],
+        "size": [
+          2.0,
+          5.0,
+          2.0
+        ],
+        "color": [
+          1.0,
+          0.5882353,
+          0.19607843
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "ModelUrl": "/static/models/clawrots/huang.glb",
+          "Value": 850.0,
+          "IsBrainrot": true,
+          "Zone": "Epic"
+        }
+      },
+      {
+        "id": 163,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          344.0,
+          1.0,
+          83.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          1.0,
+          0.39215687,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "IsBrainrot": true,
+          "Zone": "Common",
+          "Value": 10.0
+        }
+      },
+      {
+        "id": 168,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          -196.0,
+          2.5,
+          -91.0
+        ],
+        "size": [
+          2.0,
+          5.0,
+          2.0
+        ],
+        "color": [
+          1.0,
+          1.0,
+          0.19607843
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "IsBrainrot": true,
+          "Zone": "Legendary",
+          "Value": 1500.0,
+          "ModelUrl": "/static/models/clawrots/musk.glb"
+        }
+      },
+      {
+        "id": 173,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          -91.0,
+          2.5,
+          -37.0
+        ],
+        "size": [
+          2.0,
+          5.0,
+          2.0
+        ],
+        "color": [
+          1.0,
+          0.5882353,
+          0.19607843
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "Value": 850.0,
+          "IsBrainrot": true,
+          "ModelUrl": "/static/models/clawrots/huang.glb",
+          "Zone": "Epic"
+        }
+      },
+      {
+        "id": 178,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          170.0,
+          1.0,
+          -81.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          0.39215687,
+          0.5882353,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "IsBrainrot": true,
+          "Zone": "Uncommon",
+          "Value": 30.0
+        }
+      },
+      {
+        "id": 183,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          9.0,
+          1.0,
+          30.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          0.7058824,
+          0.39215687,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "Zone": "Rare",
+          "IsBrainrot": true,
+          "Value": 80.0
+        }
+      },
+      {
+        "id": 188,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          257.0,
+          1.0,
+          -38.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          1.0,
+          0.39215687,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "Value": 10.0,
+          "Zone": "Common",
+          "IsBrainrot": true
+        }
+      },
+      {
+        "id": 193,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          169.0,
+          1.0,
+          -20.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          0.39215687,
+          0.5882353,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "Zone": "Uncommon",
+          "IsBrainrot": true,
+          "Value": 30.0
+        }
+      },
+      {
+        "id": 215,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          468.5,
+          1.0,
+          -91.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          1.0,
+          0.39215687,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "Value": 10.0,
+          "IsPlaced": true,
+          "Zone": "Common",
+          "IsBrainrot": true,
+          "OwnerUserId": 5315184005878529.0
+        }
+      },
+      {
+        "id": 237,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          -261.0,
+          2.5,
+          37.0
+        ],
+        "size": [
+          2.0,
+          5.0,
+          2.0
+        ],
+        "color": [
+          1.0,
+          1.0,
+          0.19607843
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "Value": 1500.0,
+          "ModelUrl": "/static/models/clawrots/musk.glb",
+          "Zone": "Legendary",
+          "IsBrainrot": true
+        }
+      },
+      {
+        "id": 242,
+        "name": "TsunamiWave_0",
+        "entity_type": "part",
+        "position": [
+          242.58337,
+          7.5,
+          -107.28
+        ],
+        "size": [
+          10.0,
+          15.0,
+          13.44
+        ],
+        "color": [
+          0.6,
+          0.6,
+          0.6
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "ModelUrl": "/static/models/wave.glb",
+          "ModelScale": 1.12
+        }
+      },
+      {
+        "id": 243,
+        "name": "TsunamiWave_1",
+        "entity_type": "part",
+        "position": [
+          242.58337,
+          7.5,
+          -93.84
+        ],
+        "size": [
+          10.0,
+          15.0,
+          13.44
+        ],
+        "color": [
+          0.6,
+          0.6,
+          0.6
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "ModelUrl": "/static/models/wave.glb",
+          "ModelScale": 1.12
+        }
+      },
+      {
+        "id": 244,
+        "name": "TsunamiWave_2",
+        "entity_type": "part",
+        "position": [
+          242.58337,
+          7.5,
+          -80.4
+        ],
+        "size": [
+          10.0,
+          15.0,
+          13.44
+        ],
+        "color": [
+          0.6,
+          0.6,
+          0.6
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "ModelScale": 1.12,
+          "ModelUrl": "/static/models/wave.glb"
+        }
+      },
+      {
+        "id": 245,
+        "name": "TsunamiWave_3",
+        "entity_type": "part",
+        "position": [
+          242.58337,
+          7.5,
+          -66.96
+        ],
+        "size": [
+          10.0,
+          15.0,
+          13.44
+        ],
+        "color": [
+          0.6,
+          0.6,
+          0.6
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "ModelScale": 1.12,
+          "ModelUrl": "/static/models/wave.glb"
+        }
+      },
+      {
+        "id": 246,
+        "name": "TsunamiWave_4",
+        "entity_type": "part",
+        "position": [
+          242.58337,
+          7.5,
+          -53.52
+        ],
+        "size": [
+          10.0,
+          15.0,
+          13.44
+        ],
+        "color": [
+          0.6,
+          0.6,
+          0.6
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "ModelUrl": "/static/models/wave.glb",
+          "ModelScale": 1.12
+        }
+      },
+      {
+        "id": 247,
+        "name": "TsunamiWave_5",
+        "entity_type": "part",
+        "position": [
+          242.58337,
+          7.5,
+          -40.08
+        ],
+        "size": [
+          10.0,
+          15.0,
+          13.44
+        ],
+        "color": [
+          0.6,
+          0.6,
+          0.6
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "ModelUrl": "/static/models/wave.glb",
+          "ModelScale": 1.12
+        }
+      },
+      {
+        "id": 248,
+        "name": "TsunamiWave_6",
+        "entity_type": "part",
+        "position": [
+          242.58337,
+          7.5,
+          -26.64
+        ],
+        "size": [
+          10.0,
+          15.0,
+          13.44
+        ],
+        "color": [
+          0.6,
+          0.6,
+          0.6
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "ModelUrl": "/static/models/wave.glb",
+          "ModelScale": 1.12
+        }
+      },
+      {
+        "id": 249,
+        "name": "TsunamiWave_7",
+        "entity_type": "part",
+        "position": [
+          242.58337,
+          7.5,
+          -13.2
+        ],
+        "size": [
+          10.0,
+          15.0,
+          13.44
+        ],
+        "color": [
+          0.6,
+          0.6,
+          0.6
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "ModelUrl": "/static/models/wave.glb",
+          "ModelScale": 1.12
+        }
+      },
+      {
+        "id": 250,
+        "name": "TsunamiWave_8",
+        "entity_type": "part",
+        "position": [
+          242.58337,
+          7.5,
+          0.24
+        ],
+        "size": [
+          10.0,
+          15.0,
+          13.44
+        ],
+        "color": [
+          0.6,
+          0.6,
+          0.6
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "ModelUrl": "/static/models/wave.glb",
+          "ModelScale": 1.12
+        }
+      },
+      {
+        "id": 251,
+        "name": "TsunamiWave_9",
+        "entity_type": "part",
+        "position": [
+          242.58337,
+          7.5,
+          13.68
+        ],
+        "size": [
+          10.0,
+          15.0,
+          13.44
+        ],
+        "color": [
+          0.6,
+          0.6,
+          0.6
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "ModelScale": 1.12,
+          "ModelUrl": "/static/models/wave.glb"
+        }
+      },
+      {
+        "id": 252,
+        "name": "TsunamiWave_10",
+        "entity_type": "part",
+        "position": [
+          242.58337,
+          7.5,
+          27.12
+        ],
+        "size": [
+          10.0,
+          15.0,
+          13.44
+        ],
+        "color": [
+          0.6,
+          0.6,
+          0.6
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "ModelScale": 1.12,
+          "ModelUrl": "/static/models/wave.glb"
+        }
+      },
+      {
+        "id": 253,
+        "name": "TsunamiWave_11",
+        "entity_type": "part",
+        "position": [
+          242.58337,
+          7.5,
+          40.56
+        ],
+        "size": [
+          10.0,
+          15.0,
+          13.44
+        ],
+        "color": [
+          0.6,
+          0.6,
+          0.6
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "ModelUrl": "/static/models/wave.glb",
+          "ModelScale": 1.12
+        }
+      },
+      {
+        "id": 254,
+        "name": "TsunamiWave_12",
+        "entity_type": "part",
+        "position": [
+          242.58337,
+          7.5,
+          54.0
+        ],
+        "size": [
+          10.0,
+          15.0,
+          13.44
+        ],
+        "color": [
+          0.6,
+          0.6,
+          0.6
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "ModelUrl": "/static/models/wave.glb",
+          "ModelScale": 1.12
+        }
+      },
+      {
+        "id": 255,
+        "name": "TsunamiWave_13",
+        "entity_type": "part",
+        "position": [
+          242.58337,
+          7.5,
+          67.44
+        ],
+        "size": [
+          10.0,
+          15.0,
+          13.44
+        ],
+        "color": [
+          0.6,
+          0.6,
+          0.6
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "ModelUrl": "/static/models/wave.glb",
+          "ModelScale": 1.12
+        }
+      },
+      {
+        "id": 256,
+        "name": "TsunamiWave_14",
+        "entity_type": "part",
+        "position": [
+          242.58337,
+          7.5,
+          80.88
+        ],
+        "size": [
+          10.0,
+          15.0,
+          13.44
+        ],
+        "color": [
+          0.6,
+          0.6,
+          0.6
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "ModelScale": 1.12,
+          "ModelUrl": "/static/models/wave.glb"
+        }
+      },
+      {
+        "id": 257,
+        "name": "TsunamiWave_15",
+        "entity_type": "part",
+        "position": [
+          242.58337,
+          7.5,
+          94.32
+        ],
+        "size": [
+          10.0,
+          15.0,
+          13.44
+        ],
+        "color": [
+          0.6,
+          0.6,
+          0.6
+        ],
+        "material": "Plastic",
+        "anchored": true,
+        "attributes": {
+          "ModelScale": 1.12,
+          "ModelUrl": "/static/models/wave.glb"
+        }
+      },
+      {
+        "id": 259,
+        "name": "Brainrot",
+        "entity_type": "part",
+        "position": [
+          221.0,
+          1.0,
+          22.0
+        ],
+        "size": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "color": [
+          0.39215687,
+          0.5882353,
+          1.0
+        ],
+        "material": "Neon",
+        "anchored": true,
+        "attributes": {
+          "IsBrainrot": true,
+          "Value": 30.0,
+          "Zone": "Uncommon"
+        }
+      }
+    ]
+  },
+  "events": []
+}

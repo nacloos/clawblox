@@ -700,10 +700,14 @@ impl GameInstance {
     /// Updates character controller movement towards targets.
     /// Uses Rapier's kinematic character controller for full 3D translation.
     fn update_character_movement(&mut self, dt: f32) {
-        // Collect HRP IDs to process (avoid borrow issues)
-        let hrp_ids: Vec<u64> = self.player_hrp_ids.values().copied().collect();
+        // Collect agent_id -> hrp_id pairs to process (avoid borrow issues)
+        let agent_hrp_pairs: Vec<(Uuid, u64)> = self
+            .player_hrp_ids
+            .iter()
+            .map(|(&agent_id, &hrp_id)| (agent_id, hrp_id))
+            .collect();
 
-        for hrp_id in hrp_ids {
+        for (agent_id, hrp_id) in agent_hrp_pairs {
             // Get current position, target, and vertical velocity
             let (current_pos, target, vertical_velocity, grounded) = {
                 let Some(state) = self.physics.get_character_state(hrp_id) else {
@@ -714,6 +718,9 @@ impl GameInstance {
                 };
                 (pos, state.target_position, state.vertical_velocity, state.grounded)
             };
+
+            // Look up the humanoid's walk_speed from Lua instance data
+            let walk_speed = self.get_humanoid_walk_speed(agent_id).unwrap_or(WALK_SPEED);
 
             let gravity = self.physics.gravity.y;
             let mut new_vertical_velocity = vertical_velocity + gravity * dt;
@@ -728,7 +735,7 @@ impl GameInstance {
                 let dist_xz = (tx * tx + tz * tz).sqrt();
 
                 if dist_xz > 0.5 {
-                    let speed = WALK_SPEED * dt;
+                    let speed = walk_speed * dt;
                     dx = (tx / dist_xz) * speed;
                     dz = (tz / dist_xz) * speed;
                 } else {
@@ -856,6 +863,31 @@ impl GameInstance {
                 if let Some(humanoid) = &child_data.humanoid_data {
                     return Some(humanoid.health as i32);
                 }
+            }
+        }
+        None
+    }
+
+    /// Get walk speed from the player's Humanoid
+    fn get_humanoid_walk_speed(&self, agent_id: Uuid) -> Option<f32> {
+        let user_id = *self.players.get(&agent_id)?;
+        let runtime = self.lua_runtime.as_ref()?;
+        let player = runtime.players().get_player_by_user_id(user_id)?;
+
+        let player_data = player.data.lock().unwrap();
+        let character = player_data
+            .player_data
+            .as_ref()?
+            .character
+            .as_ref()?
+            .upgrade()?;
+        drop(player_data);
+
+        let char_data = character.lock().unwrap();
+        for child in &char_data.children {
+            let child_data = child.lock().unwrap();
+            if let Some(humanoid) = &child_data.humanoid_data {
+                return Some(humanoid.walk_speed);
             }
         }
         None
@@ -1999,5 +2031,94 @@ mod tests {
         // Player should still be there (activity reset the timer)
         // Total time since reset: ~100ms, which is less than 200ms timeout
         assert_eq!(instance.players.len(), 1, "Player should NOT be kicked - activity reset timer");
+    }
+
+    #[test]
+    fn test_humanoid_walk_speed_affects_movement() {
+        // Test that custom WalkSpeed on humanoid affects actual movement speed
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        // Load a script that creates a floor and handles SetSpeed input
+        instance.load_script(r#"
+            local AgentInputService = game:GetService("AgentInputService")
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(200, 1, 200)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            -- Handle SetSpeed input to change WalkSpeed
+            if AgentInputService then
+                AgentInputService.InputReceived:Connect(function(player, inputType, data)
+                    if inputType == "SetSpeed" and data and data.speed then
+                        local humanoid = player.Character and player.Character:FindFirstChild("Humanoid")
+                        if humanoid then
+                            humanoid.WalkSpeed = data.speed
+                            print("[Test] Set WalkSpeed to " .. data.speed)
+                        end
+                    end
+                end)
+            end
+        "#);
+
+        // Add a player
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "SpeedTestPlayer"));
+
+        let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+        let user_id = *instance.players.get(&agent_id).unwrap();
+
+        // Verify default walk speed is returned
+        let default_speed = instance.get_humanoid_walk_speed(agent_id);
+        assert!(default_speed.is_some(), "Should be able to get humanoid walk speed");
+        assert_eq!(default_speed.unwrap(), 16.0, "Default walk speed should be 16.0");
+
+        // Get initial position and queue movement
+        let initial_pos = instance.physics.get_character_position(hrp_id).unwrap();
+        instance.queue_action(agent_id, GameAction::Goto { position: [50.0, initial_pos[1], 0.0] });
+
+        // Run 60 ticks (1 second at default speed)
+        for _ in 0..60 {
+            instance.tick();
+        }
+
+        let pos_after_default = instance.physics.get_character_position(hrp_id).unwrap();
+        let distance_default = (pos_after_default[0] - initial_pos[0]).abs();
+        println!("Distance moved at default speed (16): {}", distance_default);
+
+        // Now set a higher WalkSpeed via agent input (simulating speed upgrade)
+        instance.queue_agent_input(user_id, "SetSpeed".to_string(), serde_json::json!({"speed": 32.0}));
+
+        // Process the input
+        instance.tick();
+
+        // Verify the new walk speed is returned
+        let new_speed = instance.get_humanoid_walk_speed(agent_id);
+        assert!(new_speed.is_some(), "Should still be able to get humanoid walk speed");
+        assert_eq!(new_speed.unwrap(), 32.0, "Walk speed should now be 32.0");
+
+        // Reset position and move again
+        let start_pos = instance.physics.get_character_position(hrp_id).unwrap();
+        instance.queue_action(agent_id, GameAction::Goto { position: [start_pos[0] + 50.0, start_pos[1], start_pos[2]] });
+
+        // Run another 60 ticks (1 second at double speed)
+        for _ in 0..60 {
+            instance.tick();
+        }
+
+        let pos_after_fast = instance.physics.get_character_position(hrp_id).unwrap();
+        let distance_fast = (pos_after_fast[0] - start_pos[0]).abs();
+        println!("Distance moved at fast speed (32): {}", distance_fast);
+
+        // Player should move roughly twice as far with double speed
+        // Allow some tolerance for physics/rounding
+        assert!(
+            distance_fast > distance_default * 1.5,
+            "Player should move significantly faster with higher WalkSpeed. Default: {}, Fast: {}",
+            distance_default,
+            distance_fast
+        );
     }
 }

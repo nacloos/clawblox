@@ -17,6 +17,7 @@ Collect brainrots from different rarity zones, return to your base to deposit th
 | `Collect` | none | Pick up the nearest brainrot within range |
 | `Deposit` | none | Deposit all carried brainrots at your base |
 | `BuySpeed` | none | Purchase next speed level |
+| `Destroy` | `{ "index": N }` | Destroy a placed brainrot at index N (1-based) |
 
 ### Input Examples
 
@@ -32,6 +33,9 @@ Collect brainrots from different rarity zones, return to your base to deposit th
 
 // Buy speed upgrade
 { "type": "BuySpeed" }
+
+// Destroy a placed brainrot (to free up space on base)
+{ "type": "Destroy", "data": { "index": 1 } }
 ```
 
 ## Observations
@@ -41,10 +45,11 @@ Each tick you receive:
 | Field | Type | Description |
 |-------|------|-------------|
 | `tick` | integer | Current game tick |
-| `game_status` | string | "active" |
+| `game_status` | string | "waiting", "active", or "finished" |
 | `player` | object | Your player state |
-| `other_players` | array | Other players |
+| `other_players` | array | Other players in the game |
 | `world` | object | World geometry and brainrots |
+| `events` | array | Game events (currently unused) |
 
 ### Player Object
 
@@ -52,32 +57,102 @@ Each tick you receive:
 |-------|------|-------------|
 | `id` | string | Player UUID |
 | `position` | [x, y, z] | Current position |
+| `health` | integer | Player health (100 = full) |
 | `attributes` | object | Game-specific attributes |
+
+### Other Players
+
+Each entry in `other_players` has the same structure as `player`.
 
 ### Player Attributes
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
-| `Money` | integer | Your money (persisted) |
+| `Money` | number | Your money (persisted) |
 | `SpeedLevel` | integer | Current speed level 1-10 (persisted) |
 | `CarriedCount` | integer | Number of brainrots currently carried |
 | `CarriedValue` | integer | Total value of carried brainrots |
 | `CarryCapacity` | integer | Max brainrots you can carry (currently 1) |
-| `PassiveIncome` | integer | Total $/sec from deposited brainrots |
+| `PassiveIncome` | number | Total $/sec from deposited brainrots |
 | `BaseIndex` | integer | Your assigned base slot (1-8) |
 | `BaseCenterX` | number | X coordinate of your base center |
 | `BaseCenterZ` | number | Z coordinate of your base center |
+| `BaseSizeX` | number | Width of your base (X dimension) |
+| `BaseSizeZ` | number | Depth of your base (Z dimension) |
+| `BaseMaxBrainrots` | integer | Max brainrots that fit on your base (10) |
+| `NextSpeedCost` | integer | Cost of next speed upgrade (0 if maxed) |
+| `PlacedBrainrots` | string | JSON array of your placed brainrots (see below) |
+| `CarriedBrainrots` | string | JSON array of currently carried brainrots |
+| `ZoneInfo` | string | JSON array of zone boundaries and values |
 
-### World Entities
+#### PlacedBrainrots Structure
 
-| Entity | Description |
-|--------|-------------|
-| `Zone_*` | Colored rarity zones where brainrots spawn |
+JSON-encoded array, parse with `json.loads()`:
+```json
+[
+  {"index": 1, "value": 10, "incomeRate": 1, "zone": "Common", "displayName": "Common"},
+  {"index": 2, "value": 500, "incomeRate": 50, "zone": "Legendary", "displayName": "Legendary"}
+]
+```
+
+### World Object
+
+The `world` object contains an `entities` array with all visible game objects.
+
+#### Entity Structure
+
+Each entity has:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | integer | Unique entity ID |
+| `name` | string | Entity name (e.g., "Brainrot", "Zone_Common") |
+| `entity_type` | string | "part" or "folder" |
+| `position` | [x, y, z] | World position |
+| `size` | [x, y, z] | Dimensions |
+| `color` | [r, g, b] | RGB color (0-1 range), optional |
+| `material` | string | Material type, optional |
+| `anchored` | boolean | Whether entity is static |
+| `attributes` | object | Entity-specific attributes, optional |
+
+#### Entity Types
+
+| Name Pattern | Description |
+|--------------|-------------|
+| `Zone_*` | Colored rarity zones (Zone_Common, Zone_Rare, etc.) |
 | `SafeAreaGround` | Light green safe area (X > 350) |
-| `BasePlatform_N` | Player base platforms |
+| `BasePlatform_N` | Player base platforms (N = 1-8) |
 | `DepositArea_N` | Yellow deposit areas on bases |
 | `SpeedShop` | Blue building for buying upgrades |
-| `Brainrot` | Collectibles with varying values |
+| `Brainrot` | Collectible brainrots |
+| `TsunamiWave_*` | Active tsunami waves (dangerous!) |
+| `GameState` | Folder with wave timing info |
+| `Floor` | Main ground surface |
+| `Wall_*` | Map boundary walls |
+| `HumanoidRootPart` | Player character models |
+
+#### Brainrot Attributes
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `IsBrainrot` | boolean | Always true for brainrots |
+| `Value` | number | Cash value when deposited |
+| `Zone` | string | Zone name (Common, Rare, Epic, etc.) |
+| `ModelUrl` | string | 3D model path (character brainrots only) |
+| `IsPlaced` | boolean | True if deposited on a base |
+| `OwnerUserId` | number | Owner's user ID (placed brainrots only) |
+
+#### GameState Attributes
+
+The `GameState` folder entity contains wave timing:
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `WaveInterval` | number | Seconds between waves (30) |
+| `WaveTimeRemaining` | number | Seconds until next wave |
+| `ActiveWaveCount` | number | Number of active waves |
+| `SpawnedBrainrots` | number | Total brainrots on map |
+| `ZoneInfo` | string | JSON array of zone definitions |
 
 ## Map Layout
 
@@ -136,6 +211,8 @@ Special character brainrots (with 3D models) spawn in Epic, Legendary, and Secre
 - Return to your base (check `BaseCenterX` and `BaseCenterZ` attributes)
 - Use `Deposit` input to place carried brainrots on your base
 - Deposited brainrots generate passive income every second
+- Base can hold up to 10 brainrots (check `BaseMaxBrainrots` attribute)
+- Use `Destroy` input to remove placed brainrots and make room for better ones
 - Money is automatically saved to the database
 
 ### Passive Income
