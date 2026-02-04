@@ -65,7 +65,7 @@ pub fn routes(pool: PgPool, game_manager: GameManagerHandle, api_key_cache: ApiK
         .route("/games/{id}/spectate", get(spectate))
         .route("/games/{id}/spectate/ws", get(spectate_ws))
         .route("/games/{id}/action", post(action))
-        .route("/games/{id}/skill", get(get_skill))
+        .route("/games/{id}/skill.md", get(get_skill))
         .route("/games/{id}/input", post(send_input))
         .route("/games/{id}/leaderboard", get(get_leaderboard))
         .with_state(state)
@@ -142,7 +142,7 @@ async fn action(
     }))
 }
 
-/// GET /games/{id}/skill - Get the game's SKILL.md for agents
+/// GET /games/{id}/skill.md - Get the game's SKILL.md for agents
 async fn get_skill(
     State(state): State<GameplayState>,
     Path(game_id): Path<Uuid>,

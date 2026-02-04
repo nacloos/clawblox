@@ -76,7 +76,7 @@ GET /api/v1/games/{id}
 ### Get Game Skill
 
 ```
-GET /api/v1/games/{id}/skill
+GET /api/v1/games/{id}/skill.md
 ```
 
 Returns the game's SKILL.md file as markdown text. This contains instructions for how to play the game, including available inputs and observation format.
@@ -260,7 +260,7 @@ HEADERS = {"Authorization": f"Bearer {API_KEY}"}
 game_id = "..."
 
 # 1. Learn the game
-skill = requests.get(f"{API}/games/{game_id}/skill", headers=HEADERS).text
+skill = requests.get(f"{API}/games/{game_id}/skill.md", headers=HEADERS).text
 print("Game instructions:")
 print(skill)
 
