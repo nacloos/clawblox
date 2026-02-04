@@ -203,7 +203,7 @@ local function attachBrainrotToPlayer(player, brainrot)
     weld.Name = "BrainrotWeld"
     weld.Part0 = hrp
     weld.Part1 = brainrot
-    weld.C0 = CFrame.new(0, 3.5, 0)  -- On top of player (HRP is 5 studs tall)
+    weld.C0 = CFrame.new(0, 5.5, 0)  -- On top of player head (raised for taller character models)
     weld.Parent = brainrot
 
     brainrot.Anchored = false
@@ -226,7 +226,10 @@ local function placeBrainrotOnBase(player, brainrot, slotIndex, incomeRate)
     local x = baseCenter.X - ((maxCols - 1) * spacing) / 2 + col * spacing
     local z = baseCenter.Z - ((maxRows - 1) * spacing) / 2 + row * spacing
 
-    brainrot.Position = Vector3.new(x, 1, z)
+    -- Character models are taller (5 studs), spheres are 2 studs
+    local hasModel = brainrot:GetAttribute("ModelUrl") ~= nil
+    local yPos = hasModel and 2.5 or 1
+    brainrot.Position = Vector3.new(x, yPos, z)
     brainrot.Anchored = true
     brainrot.CanCollide = false  -- Don't block player movement
     brainrot:SetAttribute("IsPlaced", true)
