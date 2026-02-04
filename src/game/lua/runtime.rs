@@ -5,8 +5,8 @@ use uuid::Uuid;
 
 use super::instance::{AttributeValue, Instance, InstanceData};
 use super::services::{
-    register_raycast_params, AgentInput, AgentInputService, DataStoreService, PlayersService,
-    RunService, WorkspaceService,
+    register_raycast_params, AgentInput, AgentInputService, DataStoreService, HttpService,
+    PlayersService, RunService, WorkspaceService,
 };
 use super::types::register_all_types;
 use crate::game::async_bridge::AsyncBridge;
@@ -104,6 +104,10 @@ impl UserData for Game {
                 "DataStoreService" => Ok(Value::UserData(
                     lua.create_userdata(dm.data_store_service.clone())?,
                 )),
+                "HttpService" => {
+                    drop(dm); // Release lock before creating userdata
+                    Ok(Value::UserData(lua.create_userdata(HttpService::new())?))
+                }
                 _ => Ok(Value::Nil),
             }
         });

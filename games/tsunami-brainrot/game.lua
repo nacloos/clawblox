@@ -5,6 +5,7 @@ local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local DataStoreService = game:GetService("DataStoreService")
 local AgentInputService = game:GetService("AgentInputService")
+local HttpService = game:GetService("HttpService")
 
 --------------------------------------------------------------------------------
 -- CONFIGURATION
@@ -390,6 +391,37 @@ local function updatePlayerAttributes(player)
         humanoid.WalkSpeed = SPEED_UPGRADES[data.speedLevel].speed
     end
 
+    -- Placed brainrots details
+    local placedInfo = {}
+    for i, placed in ipairs(data.placedBrainrots) do
+        table.insert(placedInfo, {
+            index = i, value = placed.value, incomeRate = placed.incomeRate,
+            zone = placed.part:GetAttribute("Zone"), displayName = placed.displayName
+        })
+    end
+    player:SetAttribute("PlacedBrainrots", HttpService:JSONEncode(placedInfo))
+
+    -- Carried brainrots details
+    local carriedInfo = {}
+    for i, carried in ipairs(data.carriedBrainrots) do
+        table.insert(carriedInfo, {
+            index = i, value = carried.value, displayName = carried.displayName
+        })
+    end
+    player:SetAttribute("CarriedBrainrots", HttpService:JSONEncode(carriedInfo))
+
+    -- Base capacity
+    player:SetAttribute("BaseMaxBrainrots", BASE_MAX_BRAINROTS)
+
+    -- Note: WaveTimeRemaining is now on GameState (Folder in Workspace) for real-time updates
+
+    -- Next speed upgrade cost
+    local nextCost = 0
+    if data.speedLevel < #SPEED_UPGRADES then
+        nextCost = SPEED_UPGRADES[data.speedLevel + 1].cost
+    end
+    player:SetAttribute("NextSpeedCost", nextCost)
+
     -- Update GUI
     local playerGui = player.PlayerGui
     if playerGui then
@@ -620,6 +652,13 @@ local function loadPlayerData(player)
     player:SetAttribute("BaseSizeX", BASE_SIZE_X)
     player:SetAttribute("BaseSizeZ", BASE_SIZE_Z)
 
+    -- Expose zone info once at player setup
+    local zoneInfo = {}
+    for _, zone in ipairs(ZONES) do
+        table.insert(zoneInfo, {name = zone.name, xMin = zone.xMin, xMax = zone.xMax, value = zone.value})
+    end
+    player:SetAttribute("ZoneInfo", HttpService:JSONEncode(zoneInfo))
+
     -- Restore in-memory brainrots first (for temporary disconnects within same server session)
     if #data.placedBrainrots > 0 then
         for i, placed in ipairs(data.placedBrainrots) do
@@ -810,6 +849,22 @@ local function createMap()
     end
 
     print("Map created (800-stud): Base zone (X>=350), 6 rarity zones, 8 bases")
+
+    -- Create GameState object for shared game info (updates every tick)
+    local gameStateFolder = Instance.new("Folder")
+    gameStateFolder.Name = "GameState"
+    gameStateFolder:SetAttribute("WaveInterval", WAVE_CONFIG.spawnInterval)
+    gameStateFolder:SetAttribute("WaveTimeRemaining", WAVE_CONFIG.spawnInterval)
+    gameStateFolder:SetAttribute("ActiveWaveCount", 0)
+    gameStateFolder:SetAttribute("SpawnedBrainrots", 0)
+    -- Static zone info (set once)
+    local zoneInfoForState = {}
+    for _, zone in ipairs(ZONES) do
+        table.insert(zoneInfoForState, {name = zone.name, xMin = zone.xMin, xMax = zone.xMax, value = zone.value})
+    end
+    gameStateFolder:SetAttribute("ZoneInfo", HttpService:JSONEncode(zoneInfoForState))
+    gameStateFolder.Parent = Workspace
+    print("GameState folder created in Workspace")
 end
 
 --------------------------------------------------------------------------------
@@ -1062,6 +1117,20 @@ local function depositBrainrots(player)
     local totalIncome = getTotalPassiveIncome(data)
     print("[Deposit] " .. player.Name .. " placed " .. depositCount .. " brainrots (total income: $" .. totalIncome .. "/sec, base: " .. #data.placedBrainrots .. "/" .. BASE_MAX_BRAINROTS .. ")")
 
+    return true
+end
+
+local function destroyBrainrot(player, index)
+    local data = getPlayerData(player)
+    if not data or not data.placedBrainrots[index] then
+        return false
+    end
+    local placed = data.placedBrainrots[index]
+    if placed.part then placed.part:Destroy() end
+    table.remove(data.placedBrainrots, index)
+    updatePlayerAttributes(player)
+    markDirty(player)
+    print("[Destroy] " .. player.Name .. " destroyed brainrot at index " .. index .. " (base: " .. #data.placedBrainrots .. "/" .. BASE_MAX_BRAINROTS .. ")")
     return true
 end
 
@@ -1323,6 +1392,11 @@ if AgentInputService then
 
         elseif inputType == "BuySpeed" then
             buySpeedUpgrade(player)
+
+        elseif inputType == "Destroy" then
+            if data and data.index then
+                destroyBrainrot(player, data.index)
+            end
         end
     end)
 end
@@ -1390,6 +1464,14 @@ RunService.Heartbeat:Connect(function(dt)
         waveTimer = 0
     end
     updateWaves(dt)
+
+    -- Update shared game state (every tick for real-time observation)
+    local gameStateFolder = Workspace:FindFirstChild("GameState")
+    if gameStateFolder then
+        gameStateFolder:SetAttribute("WaveTimeRemaining", WAVE_CONFIG.spawnInterval - waveTimer)
+        gameStateFolder:SetAttribute("ActiveWaveCount", #waves)
+        gameStateFolder:SetAttribute("SpawnedBrainrots", #brainrots)
+    end
 
     -- Passive income from placed brainrots
     for _, player in ipairs(Players:GetPlayers()) do

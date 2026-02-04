@@ -861,7 +861,7 @@ impl GameInstance {
         None
     }
 
-    /// Get world info (all visible parts from Workspace)
+    /// Get world info (all visible parts and folders from Workspace)
     fn get_world_info(&self) -> WorldInfo {
         let mut entities = Vec::new();
 
@@ -870,15 +870,34 @@ impl GameInstance {
                 let data = part.data.lock().unwrap();
 
                 if let Some(part_data) = &data.part_data {
+                    let attrs = attributes_to_json(&data.attributes);
                     entities.push(WorldEntity {
                         id: data.id.0,
                         name: data.name.clone(),
+                        entity_type: Some("part".to_string()),
                         position: [part_data.position.x, part_data.position.y, part_data.position.z],
                         size: [part_data.size.x, part_data.size.y, part_data.size.z],
                         color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
                         material: Some(part_data.material.name().to_string()),
                         anchored: part_data.anchored,
+                        attributes: if attrs.is_empty() { None } else { Some(attrs) },
                     });
+                } else if data.class_name == ClassName::Folder {
+                    // Include Folders with attributes (e.g., GameState)
+                    let attrs = attributes_to_json(&data.attributes);
+                    if !attrs.is_empty() {
+                        entities.push(WorldEntity {
+                            id: data.id.0,
+                            name: data.name.clone(),
+                            entity_type: Some("folder".to_string()),
+                            position: [0.0, 0.0, 0.0],
+                            size: [0.0, 0.0, 0.0],
+                            color: None,
+                            material: None,
+                            anchored: true,
+                            attributes: Some(attrs),
+                        });
+                    }
                 }
             }
         }
@@ -1248,6 +1267,8 @@ pub struct WorldInfo {
 pub struct WorldEntity {
     pub id: u64,
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entity_type: Option<String>,
     pub position: [f32; 3],
     pub size: [f32; 3],
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1255,6 +1276,8 @@ pub struct WorldEntity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub material: Option<String>,
     pub anchored: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
