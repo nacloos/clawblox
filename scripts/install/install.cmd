@@ -63,7 +63,7 @@ del "%DOWNLOAD_DIR%\version.txt" 2>nul
 del "%DOWNLOAD_DIR%\manifest.json" 2>nul
 
 :: Refresh PATH
-set "PATH=%USERPROFILE%\.clawblox\bin;%PATH%"
+set "PATH=%USERPROFILE%\.local\bin;%PATH%"
 
 echo.
 echo Installation complete!

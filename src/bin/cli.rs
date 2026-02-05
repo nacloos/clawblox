@@ -120,14 +120,14 @@ fn install_cli() {
     {
         let home = home::home_dir().expect("Failed to get home directory");
 
-        // Install to ~/.clawblox/versions/X.X.X
-        let versions_dir = home.join(".clawblox").join("versions");
+        // Install to ~/.local/share/clawblox/versions/X.X.X
+        let versions_dir = home.join(".local").join("share").join("clawblox").join("versions");
         std::fs::create_dir_all(&versions_dir).expect("Failed to create versions directory");
         let version_path = versions_dir.join(format!("{}.exe", version));
         std::fs::copy(&current_exe, &version_path).expect("Failed to copy binary");
 
-        // Create launcher in ~/.clawblox/bin
-        let install_dir = home.join(".clawblox").join("bin");
+        // Create launcher in ~/.local/bin (same as Claude Code)
+        let install_dir = home.join(".local").join("bin");
         std::fs::create_dir_all(&install_dir).expect("Failed to create bin directory");
         let install_path = install_dir.join("clawblox.exe");
         std::fs::copy(&version_path, &install_path).expect("Failed to copy to bin");
