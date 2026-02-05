@@ -36,14 +36,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.92.0"
           targets: ${{ matrix.target }}
 
       - name: Install cross (Linux)
         if: runner.os == 'Linux'
-        run: cargo install cross
+        run: cargo install cross --locked
 
       - name: Build (Linux with cross)
         if: runner.os == 'Linux'
