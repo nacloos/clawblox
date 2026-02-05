@@ -3,7 +3,13 @@ setlocal enabledelayedexpansion
 
 set "RELEASES_URL=https://releases.clawblox.com"
 set "DOWNLOAD_DIR=%USERPROFILE%\.clawblox\downloads"
-set "PLATFORM=win32-x64"
+
+:: Detect architecture
+if "%PROCESSOR_ARCHITECTURE%"=="ARM64" (
+    set "PLATFORM=win32-arm64"
+) else (
+    set "PLATFORM=win32-x64"
+)
 
 if not exist "%DOWNLOAD_DIR%" mkdir "%DOWNLOAD_DIR%"
 

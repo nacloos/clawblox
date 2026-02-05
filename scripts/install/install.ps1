@@ -3,7 +3,14 @@ $ProgressPreference = 'SilentlyContinue'
 
 $ReleasesUrl = "https://releases.clawblox.com"
 $DownloadDir = "$env:USERPROFILE\.clawblox\downloads"
-$Platform = "win32-x64"
+
+# Detect architecture
+$Arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+if ($Arch -eq "Arm64") {
+    $Platform = "win32-arm64"
+} else {
+    $Platform = "win32-x64"
+}
 
 # Create download directory
 New-Item -ItemType Directory -Force -Path $DownloadDir | Out-Null
