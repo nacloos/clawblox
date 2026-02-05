@@ -3,10 +3,15 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
     },
-    http::{HeaderMap, StatusCode},
+    http::{self, HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
+};
+use tower_governor::{
+    governor::GovernorConfigBuilder,
+    key_extractor::KeyExtractor,
+    GovernorError, GovernorLayer,
 };
 use flate2::{write::GzEncoder, Compression};
 use futures_util::{SinkExt, StreamExt};
@@ -26,6 +31,23 @@ use crate::game::{
 
 use super::agents::extract_api_key;
 use super::ApiKeyCache;
+
+/// Extracts API key from Authorization header for rate limiting
+#[derive(Clone)]
+struct ApiKeyExtractor;
+
+impl KeyExtractor for ApiKeyExtractor {
+    type Key = String;
+
+    fn extract<T>(&self, req: &http::Request<T>) -> Result<Self::Key, GovernorError> {
+        req.headers()
+            .get("Authorization")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .map(|s| s.to_string())
+            .ok_or(GovernorError::UnableToExtractKey)
+    }
+}
 
 /// Compress data with gzip. Returns None if compression fails or data is too small.
 fn gzip_compress(data: &[u8]) -> Option<Vec<u8>> {
@@ -73,15 +95,37 @@ async fn get_agent_id_from_api_key(
 pub fn routes(pool: PgPool, game_manager: GameManagerHandle, api_key_cache: ApiKeyCache) -> Router {
     let state = GameplayState { pool, game_manager, api_key_cache };
 
-    Router::new()
+    // Rate limit: 10 requests/second per agent, burst of 20
+    // per_millisecond(100) = 1 token every 100ms = 10 tokens/second
+    let governor_conf = GovernorConfigBuilder::default()
+        .key_extractor(ApiKeyExtractor)
+        .per_millisecond(100)
+        .burst_size(20)
+        .use_headers() // Adds x-ratelimit-* headers for debugging
+        .finish()
+        .unwrap();
+
+    // AGENT ROUTES: Require auth, are rate-limited
+    // Add new authenticated endpoints here
+    let agent_routes = Router::new()
         .route("/games/{id}/observe", get(observe))
+        .route("/games/{id}/input", post(send_input))
+        .route("/games/{id}/action", post(action))
+        .layer(GovernorLayer::new(governor_conf));
+
+    // PUBLIC ROUTES: No auth, no rate limit
+    // Add new public endpoints here
+    let public_routes = Router::new()
         .route("/games/{id}/spectate", get(spectate))
         .route("/games/{id}/spectate/ws", get(spectate_ws))
-        .route("/games/{id}/action", post(action))
         .route("/games/{id}/skill.md", get(get_skill))
-        .route("/games/{id}/input", post(send_input))
         .route("/games/{id}/leaderboard", get(get_leaderboard))
-        .route("/games/{id}/map", get(get_map))
+        .route("/games/{id}/map", get(get_map));
+
+    // DO NOT add routes here - use agent_routes or public_routes above
+    Router::new()
+        .merge(agent_routes)
+        .merge(public_routes)
         .with_state(state)
 }
 
