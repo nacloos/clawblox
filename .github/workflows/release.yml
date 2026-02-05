@@ -23,14 +23,17 @@ jobs:
             os: ubuntu-latest
             platform: linux-arm64
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: macos-13
             platform: darwin-x64
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: macos-14
             platform: darwin-arm64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             platform: win32-x64
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            platform: win32-arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -125,6 +128,9 @@ jobs:
               },
               "win32-x64": {
                 "checksum": "$(cat dist/win32-x64/checksum.txt)"
+              },
+              "win32-arm64": {
+                "checksum": "$(cat dist/win32-arm64/checksum.txt)"
               }
             }
           }
@@ -160,6 +166,7 @@ jobs:
           rclone copy dist/darwin-x64/clawblox r2:clawblox-releases/$VERSION/darwin-x64/
           rclone copy dist/darwin-arm64/clawblox r2:clawblox-releases/$VERSION/darwin-arm64/
           rclone copy dist/win32-x64/clawblox.exe r2:clawblox-releases/$VERSION/win32-x64/
+          rclone copy dist/win32-arm64/clawblox.exe r2:clawblox-releases/$VERSION/win32-arm64/
           rclone copy dist/manifest.json r2:clawblox-releases/$VERSION/
 
           # Update latest pointer
