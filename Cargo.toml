@@ -30,3 +30,7 @@ clap = { version = "4", features = ["derive"] }
 [[bin]]
 name = "clawblox"
 path = "src/bin/cli.rs"
+
+[[bin]]
+name = "clawblox-server"
+path = "src/main.rs"
