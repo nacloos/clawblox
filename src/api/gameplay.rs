@@ -8,9 +8,11 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use flate2::{write::GzEncoder, Compression};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::io::Write;
 use std::time::Duration;
 use tokio::time::interval;
 use uuid::Uuid;
@@ -24,6 +26,17 @@ use crate::game::{
 
 use super::agents::extract_api_key;
 use super::ApiKeyCache;
+
+/// Compress data with gzip. Returns None if compression fails or data is too small.
+fn gzip_compress(data: &[u8]) -> Option<Vec<u8>> {
+    const MIN_SIZE_FOR_COMPRESSION: usize = 1024;
+    if data.len() < MIN_SIZE_FOR_COMPRESSION {
+        return None;
+    }
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    encoder.write_all(data).ok()?;
+    encoder.finish().ok()
+}
 
 #[derive(Clone)]
 pub struct GameplayState {
@@ -384,8 +397,13 @@ async fn handle_spectate_ws(socket: WebSocket, state: GameplayState, game_id: Uu
                             // New tick - send immediately
                             last_tick = obs.tick;
                             same_tick_count = 0;
-                            if let Ok(json) = serde_json::to_string(&obs) {
-                                if sender.send(Message::Text(json.into())).await.is_err() {
+                            if let Ok(json) = serde_json::to_vec(&obs) {
+                                let msg = if let Some(compressed) = gzip_compress(&json) {
+                                    Message::Binary(compressed.into())
+                                } else {
+                                    Message::Text(String::from_utf8_lossy(&json).into_owned().into())
+                                };
+                                if sender.send(msg).await.is_err() {
                                     break;
                                 }
                             }
@@ -396,8 +414,13 @@ async fn handle_spectate_ws(socket: WebSocket, state: GameplayState, game_id: Uu
                             // Send every ~5th check (~150ms) when no new ticks
                             if same_tick_count >= 5 {
                                 same_tick_count = 0;
-                                if let Ok(json) = serde_json::to_string(&obs) {
-                                    if sender.send(Message::Text(json.into())).await.is_err() {
+                                if let Ok(json) = serde_json::to_vec(&obs) {
+                                    let msg = if let Some(compressed) = gzip_compress(&json) {
+                                        Message::Binary(compressed.into())
+                                    } else {
+                                        Message::Text(String::from_utf8_lossy(&json).into_owned().into())
+                                    };
+                                    if sender.send(msg).await.is_err() {
                                         break;
                                     }
                                 }

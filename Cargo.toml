@@ -22,3 +22,4 @@ mlua = { version = "0.11", features = ["luau", "serialize", "send", "async"] }
 dashmap = "6"
 parking_lot = "0.12"
 toml = "0.8"
+flate2 = "1.1"

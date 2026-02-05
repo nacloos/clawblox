@@ -1,3 +1,5 @@
+import * as pako from 'pako'
+
 export interface UDim2 {
   x_scale: number
   x_offset: number
@@ -101,9 +103,20 @@ export function createGameWebSocket(
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const ws = new WebSocket(`${protocol}//${window.location.host}/api/v1/games/${gameId}/spectate/ws`)
 
+  ws.binaryType = 'arraybuffer'
+
   ws.onmessage = (event) => {
     try {
-      const data = JSON.parse(event.data)
+      let jsonStr: string
+      if (event.data instanceof ArrayBuffer) {
+        // Binary message - decompress gzip
+        const decompressed = pako.ungzip(new Uint8Array(event.data))
+        jsonStr = new TextDecoder().decode(decompressed)
+      } else {
+        // Text message - use as-is
+        jsonStr = event.data
+      }
+      const data = JSON.parse(jsonStr)
       if (data.error) {
         onError(data.error)
       } else {

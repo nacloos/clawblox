@@ -25,6 +25,18 @@ const AFK_CHECK_INTERVAL_TICKS: u64 = 60;
 /// Default max players when not specified
 const DEFAULT_MAX_PLAYERS: u32 = 8;
 
+/// Round a float to 2 decimal places (reduces JSON payload size)
+#[inline]
+fn round_f32(v: f32) -> f32 {
+    (v * 100.0).round() / 100.0
+}
+
+/// Round a position array to 2 decimal places
+#[inline]
+fn round_position(pos: [f32; 3]) -> [f32; 3] {
+    [round_f32(pos[0]), round_f32(pos[1]), round_f32(pos[2])]
+}
+
 /// A game instance that runs Lua scripts with Rapier physics.
 /// This is the Roblox-like architecture where:
 /// - Lua controls game logic via Workspace, Parts, etc.
@@ -836,8 +848,8 @@ impl GameInstance {
         let runtime = self.lua_runtime.as_ref()?;
         let player = runtime.players().get_player_by_user_id(user_id)?;
 
-        // Get position from character's HumanoidRootPart
-        let position = self.get_player_position(agent_id).unwrap_or([0.0, 3.0, 0.0]);
+        // Get position from character's HumanoidRootPart (rounded to reduce payload size)
+        let position = round_position(self.get_player_position(agent_id).unwrap_or([0.0, 3.0, 0.0]));
 
         {
             let mut counts = self.observation_log_counts.lock().unwrap();
@@ -1008,8 +1020,8 @@ impl GameInstance {
                             id: data.id.0,
                             name: data.name.clone(),
                             entity_type: Some("part".to_string()),
-                            position: [part_data.position.x, part_data.position.y, part_data.position.z],
-                            size: [part_data.size.x, part_data.size.y, part_data.size.z],
+                            position: round_position([part_data.position.x, part_data.position.y, part_data.position.z]),
+                            size: round_position([part_data.size.x, part_data.size.y, part_data.size.z]),
                             color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
                             material: Some(part_data.material.name().to_string()),
                             anchored: part_data.anchored,
@@ -1133,7 +1145,7 @@ impl GameInstance {
 
             others.push(OtherPlayerInfo {
                 id: agent_id,
-                position,
+                position: round_position(position),
                 health,
                 attributes,
             });
@@ -1249,13 +1261,13 @@ impl GameInstance {
                     entities.push(SpectatorEntity {
                         id: data.id.0 as u32,
                         entity_type: "part".to_string(),
-                        position: [
+                        position: round_position([
                             part_data.position.x,
                             part_data.position.y,
                             part_data.position.z,
-                        ],
+                        ]),
                         rotation: if is_identity { None } else { Some(rot) },
-                        size: Some([part_data.size.x, part_data.size.y, part_data.size.z]),
+                        size: Some(round_position([part_data.size.x, part_data.size.y, part_data.size.z])),
                         color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
                         material: Some(part_data.material.name().to_string()),
                         shape: Some(part_data.shape.name().to_string()),
@@ -1335,7 +1347,7 @@ impl GameInstance {
                     players.push(SpectatorPlayerInfo {
                         id: agent_id,
                         name,
-                        position,
+                        position: round_position(position),
                         health,
                         attributes,
                         gui,
