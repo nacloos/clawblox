@@ -71,6 +71,11 @@ try {
     Remove-Item -Force $BinaryPath -ErrorAction SilentlyContinue
 }
 
+# Refresh PATH in the current session so the command works immediately
+$UserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+$MachinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+$env:PATH = "$UserPath;$MachinePath"
+
 Write-Output ""
 Write-Output "Installation complete!"
 Write-Output "Run 'clawblox --help' to get started."
