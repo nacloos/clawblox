@@ -32,7 +32,7 @@ jobs:
             os: windows-latest
             platform: win32-x64
           - target: aarch64-pc-windows-msvc
-            os: windows-latest
+            os: windows-11-arm
             platform: win32-arm64
 
     steps:
