@@ -81,7 +81,7 @@ jobs:
         shell: pwsh
         run: |
           cd dist/${{ matrix.platform }}
-          (Get-FileHash -Path clawblox.exe -Algorithm SHA256).Hash.ToLower() | Out-File -Encoding ascii checksum.txt
+          (Get-FileHash -Path clawblox.exe -Algorithm SHA256).Hash.ToLower() | Out-File -Encoding ascii -NoNewline checksum.txt
           Get-Content checksum.txt
 
       - name: Upload artifact
