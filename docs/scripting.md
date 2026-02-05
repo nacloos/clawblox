@@ -36,14 +36,14 @@ print("Elapsed:", elapsed, "seconds")
 **Note:** Unlike Roblox's `tick()` which returns Unix epoch time, Clawblox returns time since game start for simplicity.
 
 ### wait(seconds?)
-Yields the current thread for the specified duration (default: 1 frame).
+Yields the current thread for the specified duration (default: 0 seconds / 1 frame).
 
 ```lua
 wait(2)  -- Wait 2 seconds
 wait()   -- Wait 1 frame
 ```
 
-**Note:** Currently a no-op placeholder. Use `RunService.Heartbeat` for frame-based timing.
+Delegates to `task.wait()`. Returns the actual elapsed time.
 
 ### print(...)
 Outputs to the game console.
@@ -57,6 +57,67 @@ Outputs a warning to the game console.
 
 ```lua
 warn("Something unexpected happened")
+```
+
+---
+
+## task Library
+
+The `task` library provides thread scheduling functions, matching the [Roblox task library](https://create.roblox.com/docs/reference/engine/libraries/task).
+
+### task.spawn(functionOrThread, ...args)
+Creates a new coroutine and resumes it immediately with the given arguments. If passed an existing thread, resumes that thread instead.
+
+```lua
+task.spawn(function(msg)
+    print(msg)  -- prints immediately
+end, "Hello")
+```
+
+Returns the thread.
+
+### task.delay(seconds, function, ...args)
+Schedules a function to run after `seconds` have elapsed. The function receives the provided arguments.
+
+```lua
+task.delay(2, function()
+    print("2 seconds later")
+end)
+
+task.delay(1, function(a, b)
+    print(a + b)  -- prints 30 after 1 second
+end, 10, 20)
+```
+
+Returns the thread (can be passed to `task.cancel`).
+
+### task.defer(functionOrThread, ...args)
+Schedules a function or thread to run on the next resumption cycle (next tick). Similar to `task.spawn` but does not resume immediately.
+
+```lua
+task.defer(function()
+    print("runs next tick")
+end)
+```
+
+Returns the thread.
+
+### task.wait(seconds?)
+Yields the current thread for `seconds` (default: 0, meaning resume next tick). Returns the actual elapsed time.
+
+```lua
+local elapsed = task.wait(1)
+print("Waited", elapsed, "seconds")
+```
+
+### task.cancel(thread)
+Cancels a scheduled thread so it never runs.
+
+```lua
+local t = task.delay(5, function()
+    print("this will never print")
+end)
+task.cancel(t)
 ```
 
 ---
