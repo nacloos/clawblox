@@ -868,8 +868,8 @@ impl GameInstance {
         // Get other players (with LOS filtering)
         let other_players = self.get_other_players(agent_id, position);
 
-        // Get world entities
-        let world = self.get_world_info();
+        // Get dynamic world entities only (static entities fetched via /map endpoint)
+        let world = self.get_dynamic_world_info();
 
         Some(PlayerObservation {
             tick: self.tick,
@@ -954,7 +954,93 @@ impl GameInstance {
         None
     }
 
+    /// Get static map geometry (entities with "Static" tag)
+    /// Used for one-time fetch via /map endpoint
+    pub fn get_map_info(&self) -> MapInfo {
+        let mut entities = Vec::new();
+
+        if let Some(runtime) = &self.lua_runtime {
+            for part in runtime.workspace().get_descendants() {
+                let data = part.data.lock().unwrap();
+
+                // Only include entities with "Static" tag
+                if !data.tags.contains("Static") {
+                    continue;
+                }
+
+                if let Some(part_data) = &data.part_data {
+                    let attrs = attributes_to_json(&data.attributes);
+                    entities.push(WorldEntity {
+                        id: data.id.0,
+                        name: data.name.clone(),
+                        entity_type: Some("part".to_string()),
+                        position: [part_data.position.x, part_data.position.y, part_data.position.z],
+                        size: [part_data.size.x, part_data.size.y, part_data.size.z],
+                        color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
+                        material: Some(part_data.material.name().to_string()),
+                        anchored: part_data.anchored,
+                        attributes: if attrs.is_empty() { None } else { Some(attrs) },
+                    });
+                }
+            }
+        }
+
+        MapInfo { entities }
+    }
+
+    /// Get dynamic world info (entities WITHOUT "Static" tag + folders with attributes)
+    /// Used for per-tick observations - excludes static geometry
+    fn get_dynamic_world_info(&self) -> WorldInfo {
+        let mut entities = Vec::new();
+
+        if let Some(runtime) = &self.lua_runtime {
+            for part in runtime.workspace().get_descendants() {
+                let data = part.data.lock().unwrap();
+
+                // Skip entities with "Static" tag - they're fetched via /map endpoint
+                let is_static = data.tags.contains("Static");
+
+                if let Some(part_data) = &data.part_data {
+                    // Only include parts WITHOUT "Static" tag
+                    if !is_static {
+                        let attrs = attributes_to_json(&data.attributes);
+                        entities.push(WorldEntity {
+                            id: data.id.0,
+                            name: data.name.clone(),
+                            entity_type: Some("part".to_string()),
+                            position: [part_data.position.x, part_data.position.y, part_data.position.z],
+                            size: [part_data.size.x, part_data.size.y, part_data.size.z],
+                            color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
+                            material: Some(part_data.material.name().to_string()),
+                            anchored: part_data.anchored,
+                            attributes: if attrs.is_empty() { None } else { Some(attrs) },
+                        });
+                    }
+                } else if data.class_name == ClassName::Folder && !is_static {
+                    // Include Folders with attributes (e.g., GameState) - these are dynamic
+                    let attrs = attributes_to_json(&data.attributes);
+                    if !attrs.is_empty() {
+                        entities.push(WorldEntity {
+                            id: data.id.0,
+                            name: data.name.clone(),
+                            entity_type: Some("folder".to_string()),
+                            position: [0.0, 0.0, 0.0],
+                            size: [0.0, 0.0, 0.0],
+                            color: None,
+                            material: None,
+                            anchored: true,
+                            attributes: Some(attrs),
+                        });
+                    }
+                }
+            }
+        }
+
+        WorldInfo { entities }
+    }
+
     /// Get world info (all visible parts and folders from Workspace)
+    #[allow(dead_code)]
     fn get_world_info(&self) -> WorldInfo {
         let mut entities = Vec::new();
 
@@ -1353,6 +1439,12 @@ pub struct PlayerObservation {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct WorldInfo {
+    pub entities: Vec<WorldEntity>,
+}
+
+/// Static map geometry (anchored entities that never change)
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MapInfo {
     pub entities: Vec<WorldEntity>,
 }
 

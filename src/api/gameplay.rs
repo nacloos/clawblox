@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::db::models::Game;
 use crate::game::{
     self,
-    instance::{GameAction, PlayerObservation, SpectatorObservation},
+    instance::{GameAction, MapInfo, PlayerObservation, SpectatorObservation},
     GameManagerHandle,
 };
 
@@ -68,6 +68,7 @@ pub fn routes(pool: PgPool, game_manager: GameManagerHandle, api_key_cache: ApiK
         .route("/games/{id}/skill.md", get(get_skill))
         .route("/games/{id}/input", post(send_input))
         .route("/games/{id}/leaderboard", get(get_leaderboard))
+        .route("/games/{id}/map", get(get_map))
         .with_state(state)
 }
 
@@ -113,6 +114,35 @@ async fn spectate(
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
 
     Ok(Json(observation))
+}
+
+/// GET /games/{id}/map - Get static map geometry (one-time fetch)
+async fn get_map(
+    State(state): State<GameplayState>,
+    Path(game_id): Path<Uuid>,
+) -> Result<Json<MapInfo>, (StatusCode, String)> {
+    // Verify game exists in database and get script + max_players
+    let db_game: Game = sqlx::query_as("SELECT * FROM games WHERE id = $1")
+        .bind(game_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Game not found".to_string()))?;
+
+    // Auto-start the game instance if not running
+    if !game::is_instance_running(&state.game_manager, game_id) {
+        game::find_or_create_instance(
+            &state.game_manager,
+            game_id,
+            db_game.max_players as u32,
+            db_game.script_code.as_deref(),
+        );
+    }
+
+    let map_info = game::get_map(&state.game_manager, game_id)
+        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
+
+    Ok(Json(map_info))
 }
 
 #[derive(Serialize)]

@@ -1,5 +1,5 @@
 use mlua::{FromLua, Lua, Result, UserData, UserDataFields, UserDataMethods, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -168,6 +168,7 @@ pub struct InstanceData {
     pub parent: Option<WeakInstanceRef>,
     pub children: Vec<InstanceRef>,
     pub attributes: HashMap<String, AttributeValue>,
+    pub tags: HashSet<String>,
 
     pub child_added: RBXScriptSignal,
     pub child_removed: RBXScriptSignal,
@@ -551,6 +552,7 @@ impl InstanceData {
             parent: None,
             children: Vec::new(),
             attributes: HashMap::new(),
+            tags: HashSet::new(),
             child_added: create_signal("ChildAdded"),
             child_removed: create_signal("ChildRemoved"),
             destroying: create_signal("Destroying"),
@@ -801,6 +803,7 @@ impl Instance {
         let data = self.data.lock().unwrap();
         let mut new_data = InstanceData::new(data.class_name, &data.name);
         new_data.attributes = data.attributes.clone();
+        new_data.tags = data.tags.clone();
         new_data.part_data = data.part_data.clone();
         new_data.humanoid_data = data.humanoid_data.clone();
         new_data.model_data = data.model_data.clone();
@@ -845,6 +848,22 @@ impl Instance {
 
     pub fn get_attributes(&self) -> HashMap<String, AttributeValue> {
         self.data.lock().unwrap().attributes.clone()
+    }
+
+    pub fn add_tag(&self, tag: &str) {
+        self.data.lock().unwrap().tags.insert(tag.to_string());
+    }
+
+    pub fn has_tag(&self, tag: &str) -> bool {
+        self.data.lock().unwrap().tags.contains(tag)
+    }
+
+    pub fn remove_tag(&self, tag: &str) {
+        self.data.lock().unwrap().tags.remove(tag);
+    }
+
+    pub fn get_tags(&self) -> HashSet<String> {
+        self.data.lock().unwrap().tags.clone()
     }
 
     pub fn weak_ref(&self) -> WeakInstanceRef {
@@ -1828,6 +1847,30 @@ impl UserData for Instance {
                     AttributeValue::Color3(c) => Value::UserData(lua.create_userdata(c)?),
                 };
                 table.set(key, lua_value)?;
+            }
+            Ok(table)
+        });
+
+        // Tag methods (Roblox CollectionService-style tags)
+        methods.add_method("AddTag", |_, this, tag: String| {
+            this.add_tag(&tag);
+            Ok(())
+        });
+
+        methods.add_method("HasTag", |_, this, tag: String| {
+            Ok(this.has_tag(&tag))
+        });
+
+        methods.add_method("RemoveTag", |_, this, tag: String| {
+            this.remove_tag(&tag);
+            Ok(())
+        });
+
+        methods.add_method("GetTags", |lua, this, ()| {
+            let tags = this.get_tags();
+            let table = lua.create_table()?;
+            for (i, tag) in tags.iter().enumerate() {
+                table.set(i + 1, tag.clone())?;
             }
             Ok(table)
         });

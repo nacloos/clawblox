@@ -97,7 +97,15 @@ JSON-encoded array, parse with `json.loads()`:
 
 ### World Object
 
-The `world` object contains an `entities` array with all visible game objects.
+The `world` object contains an `entities` array with **dynamic** game objects only (brainrots, tsunami waves, players, GameState).
+
+**Static geometry** (floor, walls, zones, base platforms) is NOT included in observations. Fetch it once via the `/map` endpoint:
+
+```
+GET /api/v1/games/{id}/map
+```
+
+This reduces bandwidth since static entities never change.
 
 #### Entity Structure
 
@@ -117,18 +125,25 @@ Each entity has:
 
 #### Entity Types
 
+**Static entities** (fetch once via `/map`):
+
 | Name Pattern | Description |
 |--------------|-------------|
+| `Floor` | Main ground surface |
 | `Zone_*` | Colored rarity zones (Zone_Common, Zone_Rare, etc.) |
 | `SafeAreaGround` | Light green safe area (X > 350) |
 | `BasePlatform_N` | Player base platforms (N = 1-8) |
 | `DepositArea_N` | Yellow deposit areas on bases |
 | `SpeedShop` | Blue building for buying upgrades |
+| `Wall_*` | Map boundary walls (invisible) |
+
+**Dynamic entities** (included in observations):
+
+| Name Pattern | Description |
+|--------------|-------------|
 | `Brainrot` | Collectible brainrots |
 | `TsunamiWave_*` | Active tsunami waves (dangerous!) |
 | `GameState` | Folder with wave timing info |
-| `Floor` | Main ground surface |
-| `Wall_*` | Map boundary walls |
 | `HumanoidRootPart` | Player character models |
 
 #### Brainrot Attributes

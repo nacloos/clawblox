@@ -748,6 +748,7 @@ local function createMap()
     floor.Position = Vector3.new(0, -1, 0)  -- Top at Y=0
     floor.Anchored = true
     floor.Color = Color3.fromRGB(100, 150, 100)  -- Green grass
+    floor:AddTag("Static")
     floor.Parent = Workspace
 
     -- Create zone overlays (semi-transparent colored zones)
@@ -765,6 +766,7 @@ local function createMap()
         zoneOverlay.CanCollide = false
         zoneOverlay:SetAttribute("IsZone", true)
         zoneOverlay:SetAttribute("ZoneName", zone.name)
+        zoneOverlay:AddTag("Static")
         zoneOverlay.Parent = Workspace
     end
 
@@ -780,6 +782,7 @@ local function createMap()
     safeAreaGround.Color = Color3.fromRGB(120, 180, 120)  -- Lighter green
     safeAreaGround.CanCollide = false
     safeAreaGround:SetAttribute("IsSafeZone", true)
+    safeAreaGround:AddTag("Static")
     safeAreaGround.Parent = Workspace
 
     -- Player base platforms + deposit areas
@@ -798,6 +801,7 @@ local function createMap()
         basePlatform.CanCollide = false
         basePlatform:SetAttribute("IsBase", true)
         basePlatform:SetAttribute("BaseIndex", i)
+        basePlatform:AddTag("Static")
         basePlatform.Parent = Workspace
 
         local depositArea = Instance.new("Part")
@@ -809,6 +813,7 @@ local function createMap()
         depositArea.CanCollide = false
         depositArea:SetAttribute("IsDepositArea", true)
         depositArea:SetAttribute("BaseIndex", i)
+        depositArea:AddTag("Static")
         depositArea.Parent = Workspace
     end
 
@@ -820,6 +825,7 @@ local function createMap()
     shop.Anchored = true
     shop.Color = Color3.fromRGB(100, 100, 200)  -- Blue
     shop:SetAttribute("IsShop", true)
+    shop:AddTag("Static")
     shop.Parent = Workspace
 
     -- Walls to prevent going out of bounds
@@ -840,6 +846,7 @@ local function createMap()
         wall.Anchored = true
         wall.Transparency = 1
         wall.CanCollide = true
+        wall:AddTag("Static")
         wall.Parent = Workspace
     end
 

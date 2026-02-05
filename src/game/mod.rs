@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use async_bridge::AsyncBridge;
-use instance::{GameAction, GameInstance, GameStatus, PlayerObservation, SpectatorObservation};
+use instance::{GameAction, GameInstance, GameStatus, MapInfo, PlayerObservation, SpectatorObservation};
 
 /// Handle to the game manager state
 pub type GameManagerHandle = Arc<GameManagerState>;
@@ -38,6 +38,8 @@ pub struct GameManagerState {
     pub observation_cache: DashMap<(Uuid, Uuid), PlayerObservation>,
     /// Cached spectator observations, keyed by instance_id
     pub spectator_cache: DashMap<Uuid, SpectatorObservation>,
+    /// Cached static map geometry, keyed by game_id (same for all instances of a game)
+    pub map_cache: DashMap<Uuid, MapInfo>,
     /// Shared async bridge for database operations
     pub async_bridge: Option<Arc<AsyncBridge>>,
 }
@@ -50,6 +52,7 @@ impl GameManagerState {
             player_instances: DashMap::new(),
             observation_cache: DashMap::new(),
             spectator_cache: DashMap::new(),
+            map_cache: DashMap::new(),
             async_bridge,
         }
     }
@@ -423,6 +426,40 @@ pub fn get_spectator_observation_for_instance(
         .get(&instance_id)
         .map(|r| r.clone())
         .ok_or_else(|| "Instance not found".to_string())
+}
+
+/// Get static map geometry for a game (cached per game_id)
+pub fn get_map(
+    state: &GameManagerHandle,
+    game_id: Uuid,
+) -> Result<MapInfo, String> {
+    // Check cache first
+    if let Some(cached) = state.map_cache.get(&game_id) {
+        return Ok(cached.clone());
+    }
+
+    // Find any instance for this game to get map info
+    let instance_ids = state
+        .game_instances
+        .get(&game_id)
+        .ok_or_else(|| "No instances for this game".to_string())?;
+
+    let instance_id = instance_ids
+        .first()
+        .ok_or_else(|| "No instances available".to_string())?;
+
+    let instance_handle = state
+        .instances
+        .get(instance_id)
+        .ok_or_else(|| "Instance not found".to_string())?;
+
+    let instance = instance_handle.read();
+    let map_info = instance.get_map_info();
+
+    // Cache for future requests
+    state.map_cache.insert(game_id, map_info.clone());
+
+    Ok(map_info)
 }
 
 // =============================================================================
