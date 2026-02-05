@@ -77,6 +77,8 @@ fi
 
 if [ "$actual" != "$checksum" ]; then
     echo "Error: Checksum verification failed" >&2
+    echo "  Expected: '$checksum'" >&2
+    echo "  Actual:   '$actual'" >&2
     rm -f "$binary_path"
     exit 1
 fi
