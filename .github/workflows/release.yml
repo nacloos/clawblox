@@ -42,7 +42,7 @@ jobs:
 
       - name: Install cross (Linux)
         if: runner.os == 'Linux'
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        run: cargo install cross --version 0.2.5
 
       - name: Build (Linux with cross)
         if: runner.os == 'Linux'
