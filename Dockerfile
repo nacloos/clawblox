@@ -18,5 +18,6 @@ WORKDIR /app
 COPY --from=backend /app/target/release/clawblox-server ./
 COPY --from=frontend /app/frontend/dist ./frontend/dist
 COPY static ./static
+COPY scripts ./scripts
 EXPOSE 8080
 CMD ["./clawblox-server"]
