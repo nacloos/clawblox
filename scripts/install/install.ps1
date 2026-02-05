@@ -29,7 +29,7 @@ try {
 # Get manifest
 try {
     $Manifest = Invoke-RestMethod -Uri "$ReleasesUrl/$Version/manifest.json"
-    $Checksum = $Manifest.platforms.$Platform.checksum
+    $Checksum = $Manifest.platforms.$Platform.checksum.Trim()
 
     if (-not $Checksum) {
         Write-Error "Platform $Platform not found in manifest"
@@ -56,6 +56,8 @@ $ActualChecksum = (Get-FileHash -Path $BinaryPath -Algorithm SHA256).Hash.ToLowe
 
 if ($ActualChecksum -ne $Checksum) {
     Write-Error "Checksum verification failed"
+    Write-Error "  Expected: $Checksum"
+    Write-Error "  Actual:   $ActualChecksum"
     Remove-Item -Force $BinaryPath
     exit 1
 }

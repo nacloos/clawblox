@@ -69,21 +69,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist/${{ matrix.platform }}
           Copy-Item target/${{ matrix.target }}/release/clawblox.exe dist/${{ matrix.platform }}/clawblox.exe
 
-      - name: Calculate checksum (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          cd dist/${{ matrix.platform }}
-          shasum -a 256 clawblox | cut -d' ' -f1 > checksum.txt
-          cat checksum.txt
-
-      - name: Calculate checksum (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          cd dist/${{ matrix.platform }}
-          (Get-FileHash -Path clawblox.exe -Algorithm SHA256).Hash.ToLower() | Out-File -Encoding ascii -NoNewline checksum.txt
-          Get-Content checksum.txt
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -107,30 +92,47 @@ jobs:
         id: version
         run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
-      - name: Create manifest
+      - name: Calculate checksums and create manifest
         run: |
           VERSION=${{ steps.version.outputs.version }}
+
+          # Calculate checksums for all binaries
+          LINUX_X64=$(sha256sum dist/linux-x64/clawblox | cut -d' ' -f1)
+          LINUX_ARM64=$(sha256sum dist/linux-arm64/clawblox | cut -d' ' -f1)
+          DARWIN_X64=$(sha256sum dist/darwin-x64/clawblox | cut -d' ' -f1)
+          DARWIN_ARM64=$(sha256sum dist/darwin-arm64/clawblox | cut -d' ' -f1)
+          WIN32_X64=$(sha256sum dist/win32-x64/clawblox.exe | cut -d' ' -f1)
+          WIN32_ARM64=$(sha256sum dist/win32-arm64/clawblox.exe | cut -d' ' -f1)
+
+          echo "Checksums:"
+          echo "  linux-x64: $LINUX_X64"
+          echo "  linux-arm64: $LINUX_ARM64"
+          echo "  darwin-x64: $DARWIN_X64"
+          echo "  darwin-arm64: $DARWIN_ARM64"
+          echo "  win32-x64: $WIN32_X64"
+          echo "  win32-arm64: $WIN32_ARM64"
+
           cat > dist/manifest.json << EOF
           {
             "version": "$VERSION",
             "platforms": {
               "linux-x64": {
-                "checksum": "$(cat dist/linux-x64/checksum.txt)"
+                "checksum": "$LINUX_X64"
               },
               "linux-arm64": {
-                "checksum": "$(cat dist/linux-arm64/checksum.txt)"
+                "checksum": "$LINUX_ARM64"
               },
               "darwin-x64": {
-                "checksum": "$(cat dist/darwin-x64/checksum.txt)"
+                "checksum": "$DARWIN_X64"
               },
               "darwin-arm64": {
-                "checksum": "$(cat dist/darwin-arm64/checksum.txt)"
+                "checksum": "$DARWIN_ARM64"
               },
               "win32-x64": {
-                "checksum": "$(cat dist/win32-x64/checksum.txt)"
+                "checksum": "$WIN32_X64"
               },
               "win32-arm64": {
-                "checksum": "$(cat dist/win32-arm64/checksum.txt)"
+                "checksum": "$WIN32_ARM64"
               }
             }
           }
