@@ -55,6 +55,12 @@ enum Commands {
         #[arg(short, long, default_value = "8080")]
         port: u16,
     },
+    /// Install clawblox to system PATH
+    Install {
+        /// Target version (ignored, for compatibility)
+        #[arg(default_value = "latest")]
+        target: String,
+    },
 }
 
 fn main() {
@@ -63,6 +69,80 @@ fn main() {
     match cli.command {
         Commands::Init { name } => init_project(name),
         Commands::Run { path, port } => run_game(path, port),
+        Commands::Install { target: _ } => install_cli(),
+    }
+}
+
+// =============================================================================
+// Install Command
+// =============================================================================
+
+fn install_cli() {
+    let current_exe = std::env::current_exe().expect("Failed to get current executable path");
+
+    #[cfg(unix)]
+    {
+        let install_dir = PathBuf::from("/usr/local/bin");
+        let install_path = install_dir.join("clawblox");
+
+        // Try /usr/local/bin first, fall back to ~/.local/bin
+        let (install_dir, install_path) = if install_dir.exists() &&
+            std::fs::metadata(&install_dir).map(|m| !m.permissions().readonly()).unwrap_or(false) {
+            (install_dir, install_path)
+        } else {
+            let home = home::home_dir().expect("Failed to get home directory");
+            let local_bin = home.join(".local/bin");
+            std::fs::create_dir_all(&local_bin).expect("Failed to create ~/.local/bin");
+            (local_bin.clone(), local_bin.join("clawblox"))
+        };
+
+        // Copy binary
+        std::fs::copy(&current_exe, &install_path).expect("Failed to copy binary");
+
+        // Make executable
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&install_path, std::fs::Permissions::from_mode(0o755))
+            .expect("Failed to set permissions");
+
+        println!("Installed to: {}", install_path.display());
+
+        // Check if in PATH
+        let path_env = std::env::var("PATH").unwrap_or_default();
+        if !path_env.split(':').any(|p| PathBuf::from(p) == install_dir) {
+            println!();
+            println!("Add to your shell profile:");
+            println!("  export PATH=\"{}:$PATH\"", install_dir.display());
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let home = home::home_dir().expect("Failed to get home directory");
+        let install_dir = home.join(".clawblox").join("bin");
+        std::fs::create_dir_all(&install_dir).expect("Failed to create install directory");
+
+        let install_path = install_dir.join("clawblox.exe");
+        std::fs::copy(&current_exe, &install_path).expect("Failed to copy binary");
+
+        println!("Installed to: {}", install_path.display());
+
+        // Add to user PATH via registry
+        let path_env = std::env::var("PATH").unwrap_or_default();
+        let install_dir_str = install_dir.to_string_lossy();
+        if !path_env.split(';').any(|p| p == install_dir_str) {
+            println!();
+            println!("Adding to user PATH...");
+            let _ = std::process::Command::new("powershell")
+                .args([
+                    "-Command",
+                    &format!(
+                        "[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + ';{}', 'User')",
+                        install_dir_str
+                    ),
+                ])
+                .output();
+            println!("Restart your terminal to use 'clawblox' command.");
+        }
     }
 }
 
