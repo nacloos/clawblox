@@ -55,9 +55,9 @@ try {
 $ActualChecksum = (Get-FileHash -Path $BinaryPath -Algorithm SHA256).Hash.ToLower()
 
 if ($ActualChecksum -ne $Checksum) {
-    Write-Error "Checksum verification failed"
-    Write-Error "  Expected: $Checksum"
-    Write-Error "  Actual:   $ActualChecksum"
+    Write-Output "Checksum verification failed!"
+    Write-Output "  Expected: '$Checksum'"
+    Write-Output "  Actual:   '$ActualChecksum'"
     Remove-Item -Force $BinaryPath
     exit 1
 }
