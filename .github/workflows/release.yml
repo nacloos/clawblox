@@ -161,18 +161,18 @@ jobs:
           VERSION=${{ steps.version.outputs.version }}
 
           # Upload versioned release
-          rclone copy dist/linux-x64/clawblox r2:clawblox-releases/$VERSION/linux-x64/
-          rclone copy dist/linux-arm64/clawblox r2:clawblox-releases/$VERSION/linux-arm64/
-          rclone copy dist/darwin-x64/clawblox r2:clawblox-releases/$VERSION/darwin-x64/
-          rclone copy dist/darwin-arm64/clawblox r2:clawblox-releases/$VERSION/darwin-arm64/
-          rclone copy dist/win32-x64/clawblox.exe r2:clawblox-releases/$VERSION/win32-x64/
-          rclone copy dist/win32-arm64/clawblox.exe r2:clawblox-releases/$VERSION/win32-arm64/
-          rclone copy dist/manifest.json r2:clawblox-releases/$VERSION/
+          rclone copy dist/linux-x64/clawblox r2:clawblox-releases/$VERSION/linux-x64/ --s3-no-check-bucket
+          rclone copy dist/linux-arm64/clawblox r2:clawblox-releases/$VERSION/linux-arm64/ --s3-no-check-bucket
+          rclone copy dist/darwin-x64/clawblox r2:clawblox-releases/$VERSION/darwin-x64/ --s3-no-check-bucket
+          rclone copy dist/darwin-arm64/clawblox r2:clawblox-releases/$VERSION/darwin-arm64/ --s3-no-check-bucket
+          rclone copy dist/win32-x64/clawblox.exe r2:clawblox-releases/$VERSION/win32-x64/ --s3-no-check-bucket
+          rclone copy dist/win32-arm64/clawblox.exe r2:clawblox-releases/$VERSION/win32-arm64/ --s3-no-check-bucket
+          rclone copy dist/manifest.json r2:clawblox-releases/$VERSION/ --s3-no-check-bucket
 
           # Update latest pointer
           echo -n "$VERSION" > latest.txt
-          rclone copy latest.txt r2:clawblox-releases/ --include "latest.txt"
-          rclone moveto r2:clawblox-releases/latest.txt r2:clawblox-releases/latest
+          rclone copy latest.txt r2:clawblox-releases/ --s3-no-check-bucket
+          rclone moveto r2:clawblox-releases/latest.txt r2:clawblox-releases/latest --s3-no-check-bucket
 
       - name: Verify upload
         run: |
