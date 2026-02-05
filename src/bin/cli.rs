@@ -79,50 +79,58 @@ fn main() {
 
 fn install_cli() {
     let current_exe = std::env::current_exe().expect("Failed to get current executable path");
+    let version = env!("CARGO_PKG_VERSION");
 
     #[cfg(unix)]
     {
-        let install_dir = PathBuf::from("/usr/local/bin");
-        let install_path = install_dir.join("clawblox");
+        let home = home::home_dir().expect("Failed to get home directory");
 
-        // Try /usr/local/bin first, fall back to ~/.local/bin
-        let (install_dir, install_path) = if install_dir.exists() &&
-            std::fs::metadata(&install_dir).map(|m| !m.permissions().readonly()).unwrap_or(false) {
-            (install_dir, install_path)
-        } else {
-            let home = home::home_dir().expect("Failed to get home directory");
-            let local_bin = home.join(".local/bin");
-            std::fs::create_dir_all(&local_bin).expect("Failed to create ~/.local/bin");
-            (local_bin.clone(), local_bin.join("clawblox"))
-        };
-
-        // Copy binary
-        std::fs::copy(&current_exe, &install_path).expect("Failed to copy binary");
+        // Install to ~/.local/share/clawblox/versions/X.X.X
+        let versions_dir = home.join(".local/share/clawblox/versions");
+        std::fs::create_dir_all(&versions_dir).expect("Failed to create versions directory");
+        let version_path = versions_dir.join(version);
+        std::fs::copy(&current_exe, &version_path).expect("Failed to copy binary");
 
         // Make executable
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&install_path, std::fs::Permissions::from_mode(0o755))
+        std::fs::set_permissions(&version_path, std::fs::Permissions::from_mode(0o755))
             .expect("Failed to set permissions");
 
-        println!("Installed to: {}", install_path.display());
+        // Create symlink in ~/.local/bin
+        let bin_dir = home.join(".local/bin");
+        std::fs::create_dir_all(&bin_dir).expect("Failed to create ~/.local/bin");
+        let symlink_path = bin_dir.join("clawblox");
+
+        // Remove old symlink if exists
+        let _ = std::fs::remove_file(&symlink_path);
+        std::os::unix::fs::symlink(&version_path, &symlink_path).expect("Failed to create symlink");
+
+        println!("Installed to: {}", symlink_path.display());
 
         // Check if in PATH
         let path_env = std::env::var("PATH").unwrap_or_default();
-        if !path_env.split(':').any(|p| PathBuf::from(p) == install_dir) {
+        if !path_env.split(':').any(|p| PathBuf::from(p) == bin_dir) {
             println!();
             println!("Add to your shell profile:");
-            println!("  export PATH=\"{}:$PATH\"", install_dir.display());
+            println!("  export PATH=\"{}:$PATH\"", bin_dir.display());
         }
     }
 
     #[cfg(windows)]
     {
         let home = home::home_dir().expect("Failed to get home directory");
-        let install_dir = home.join(".clawblox").join("bin");
-        std::fs::create_dir_all(&install_dir).expect("Failed to create install directory");
 
+        // Install to ~/.clawblox/versions/X.X.X
+        let versions_dir = home.join(".clawblox").join("versions");
+        std::fs::create_dir_all(&versions_dir).expect("Failed to create versions directory");
+        let version_path = versions_dir.join(format!("{}.exe", version));
+        std::fs::copy(&current_exe, &version_path).expect("Failed to copy binary");
+
+        // Create launcher in ~/.clawblox/bin
+        let install_dir = home.join(".clawblox").join("bin");
+        std::fs::create_dir_all(&install_dir).expect("Failed to create bin directory");
         let install_path = install_dir.join("clawblox.exe");
-        std::fs::copy(&current_exe, &install_path).expect("Failed to copy binary");
+        std::fs::copy(&version_path, &install_path).expect("Failed to copy to bin");
 
         println!("Installed to: {}", install_path.display());
 
