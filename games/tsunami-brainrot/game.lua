@@ -32,18 +32,23 @@ local SPAWN_INTERVAL = 1.5    -- Seconds between spawns (faster for larger map)
 local CARRY_CAPACITY = 1      -- Starting carry capacity
 local SAVE_INTERVAL = 15      -- Seconds between autosaves (if dirty)
 
--- Speed upgrades
+-- Speed upgrades (15 levels, final levels very expensive)
 local SPEED_UPGRADES = {
-    {level = 1, cost = 0, speed = 16},
-    {level = 2, cost = 100, speed = 20},
-    {level = 3, cost = 300, speed = 24},
-    {level = 4, cost = 700, speed = 28},
-    {level = 5, cost = 1500, speed = 32},
-    {level = 6, cost = 3000, speed = 36},
-    {level = 7, cost = 6000, speed = 40},
-    {level = 8, cost = 12000, speed = 45},
-    {level = 9, cost = 25000, speed = 50},
-    {level = 10, cost = 50000, speed = 60},
+    {level = 1,  cost = 0,         speed = 16},
+    {level = 2,  cost = 100,       speed = 22},
+    {level = 3,  cost = 300,       speed = 30},
+    {level = 4,  cost = 700,       speed = 40},
+    {level = 5,  cost = 1500,      speed = 52},
+    {level = 6,  cost = 3500,      speed = 66},
+    {level = 7,  cost = 8000,      speed = 82},
+    {level = 8,  cost = 18000,     speed = 100},
+    {level = 9,  cost = 40000,     speed = 120},
+    {level = 10, cost = 90000,     speed = 140},
+    {level = 11, cost = 200000,    speed = 158},
+    {level = 12, cost = 450000,    speed = 175},
+    {level = 13, cost = 1000000,   speed = 188},
+    {level = 14, cost = 2500000,   speed = 196},
+    {level = 15, cost = 5000000,   speed = 200},
 }
 
 local ZONES = {
@@ -393,10 +398,13 @@ local function updatePlayerAttributes(player)
 
     -- Placed brainrots details
     local placedInfo = {}
-    for i, placed in ipairs(data.placedBrainrots) do
+    for _, placed in ipairs(data.placedBrainrots) do
         table.insert(placedInfo, {
-            index = i, value = placed.value, incomeRate = placed.incomeRate,
-            zone = placed.part:GetAttribute("Zone"), displayName = placed.displayName
+            index = placed.slot,  -- Use slot number, not array index
+            value = placed.value,
+            incomeRate = placed.incomeRate,
+            zone = placed.part:GetAttribute("Zone"),
+            displayName = placed.displayName
         })
     end
     player:SetAttribute("PlacedBrainrots", HttpService:JSONEncode(placedInfo))
@@ -658,7 +666,8 @@ local function loadPlayerData(player)
     if #data.placedBrainrots > 0 then
         for i, placed in ipairs(data.placedBrainrots) do
             if placed.part and placed.part.Parent then
-                placeBrainrotOnBase(player, placed.part, i, placed.incomeRate or (placed.value or 0) / 10)
+                local slotIndex = placed.slot or i  -- Use stored slot, fallback to index
+                placeBrainrotOnBase(player, placed.part, slotIndex, placed.incomeRate or (placed.value or 0) / 10)
             end
         end
     end
@@ -680,13 +689,15 @@ local function loadPlayerData(player)
             for i, brainrotData in ipairs(savedData.placedBrainrots) do
                 local zone = getZoneByName(brainrotData.zone)
                 if zone then
+                    local slotIndex = brainrotData.slot or i  -- Use saved slot, fallback to sequential
                     local part = createBrainrotFromData(brainrotData, zone)
-                    placeBrainrotOnBase(player, part, i, brainrotData.incomeRate)
+                    placeBrainrotOnBase(player, part, slotIndex, brainrotData.incomeRate)
                     table.insert(data.placedBrainrots, {
                         part = part,
                         value = brainrotData.value,
                         incomeRate = brainrotData.incomeRate,
-                        displayName = brainrotData.displayName
+                        displayName = brainrotData.displayName,
+                        slot = slotIndex  -- Store the slot
                     })
                 else
                     warn("[DataStore] Unknown zone '" .. tostring(brainrotData.zone) .. "' for brainrot, skipping")
@@ -716,7 +727,8 @@ local function savePlayerData(player)
             incomeRate = placed.incomeRate,
             zone = placed.part:GetAttribute("Zone"),
             modelUrl = placed.part:GetAttribute("ModelUrl"),
-            displayName = placed.displayName
+            displayName = placed.displayName,
+            slot = placed.slot  -- Persist slot number
         })
     end
 
@@ -1076,28 +1088,40 @@ local function depositBrainrots(player)
         return false
     end
 
-    -- Check if base is full
-    if #data.placedBrainrots >= BASE_MAX_BRAINROTS then
+    -- Find all available slots (1 to BASE_MAX_BRAINROTS)
+    local usedSlots = {}
+    for _, placed in ipairs(data.placedBrainrots) do
+        usedSlots[placed.slot] = true
+    end
+
+    local availableSlotList = {}
+    for s = 1, BASE_MAX_BRAINROTS do
+        if not usedSlots[s] then
+            table.insert(availableSlotList, s)
+        end
+    end
+
+    if #availableSlotList == 0 then
         print("[Deposit] " .. player.Name .. " base is full! (" .. #data.placedBrainrots .. "/" .. BASE_MAX_BRAINROTS .. ")")
         return false
     end
 
-    -- Calculate how many slots are available
-    local availableSlots = BASE_MAX_BRAINROTS - #data.placedBrainrots
-    local depositCount = math.min(#data.carriedBrainrots, availableSlots)
+    -- Calculate how many we can deposit
+    local depositCount = math.min(#data.carriedBrainrots, #availableSlotList)
 
-    -- Place brainrots on base floor (only up to available slots)
+    -- Place brainrots on base floor using available slots
     for i = 1, depositCount do
         local carried = data.carriedBrainrots[i]
         local incomeRate = carried.value / 10  -- e.g., value 10 = 1$/sec
-        local slotIndex = #data.placedBrainrots + 1
+        local slotIndex = availableSlotList[i]  -- Use first available slot
         placeBrainrotOnBase(player, carried.part, slotIndex, incomeRate)
 
         table.insert(data.placedBrainrots, {
             part = carried.part,
             value = carried.value,
             incomeRate = incomeRate,
-            displayName = carried.displayName
+            displayName = carried.displayName,
+            slot = slotIndex  -- Store permanent slot number
         })
     end
 
@@ -1122,17 +1146,31 @@ local function depositBrainrots(player)
     return true
 end
 
-local function destroyBrainrot(player, index)
+local function destroyBrainrot(player, slotIndex)
     local data = getPlayerData(player)
-    if not data or not data.placedBrainrots[index] then
+    if not data then return false end
+
+    -- Find brainrot by slot number
+    local foundIdx = nil
+    for i, placed in ipairs(data.placedBrainrots) do
+        if placed.slot == slotIndex then
+            foundIdx = i
+            break
+        end
+    end
+
+    if not foundIdx then
+        warn("[Destroy] No brainrot at slot " .. slotIndex)
         return false
     end
-    local placed = data.placedBrainrots[index]
+
+    local placed = data.placedBrainrots[foundIdx]
     if placed.part then placed.part:Destroy() end
-    table.remove(data.placedBrainrots, index)
+    table.remove(data.placedBrainrots, foundIdx)
+
     updatePlayerAttributes(player)
     markDirty(player)
-    print("[Destroy] " .. player.Name .. " destroyed brainrot at index " .. index .. " (base: " .. #data.placedBrainrots .. "/" .. BASE_MAX_BRAINROTS .. ")")
+    print("[Destroy] " .. player.Name .. " destroyed brainrot at slot " .. slotIndex .. " (base: " .. #data.placedBrainrots .. "/" .. BASE_MAX_BRAINROTS .. ")")
     return true
 end
 
