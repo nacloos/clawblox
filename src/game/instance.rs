@@ -70,6 +70,10 @@ pub struct GameInstance {
     /// When the instance became empty (for garbage collection)
     /// None if instance has players, Some(Instant) when last player left
     pub empty_since: Option<Instant>,
+    /// How Lua errors are handled (Continue = log and keep going, Halt = stop on first error)
+    pub error_mode: ErrorMode,
+    /// Set when error_mode is Halt and a Lua error occurs; prevents further ticking
+    pub halted_error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -77,6 +81,15 @@ pub enum GameStatus {
     Waiting,
     Playing,
     Finished,
+}
+
+/// Controls how Lua errors are handled by a GameInstance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ErrorMode {
+    /// Log errors and continue (production server behavior)
+    Continue,
+    /// Stop the instance on first Lua error (CLI dev mode)
+    Halt,
 }
 
 /// An action queued by a player
@@ -113,7 +126,7 @@ impl GameInstance {
     /// * `game_id` - The game definition ID this instance belongs to
     /// * `async_bridge` - Optional async bridge for DataStoreService support
     pub fn new(game_id: Uuid, async_bridge: Option<Arc<AsyncBridge>>) -> Self {
-        Self::new_with_config(game_id, DEFAULT_MAX_PLAYERS, async_bridge)
+        Self::new_with_config(game_id, DEFAULT_MAX_PLAYERS, async_bridge, ErrorMode::Continue)
     }
 
     /// Creates a new game instance with configuration
@@ -122,7 +135,13 @@ impl GameInstance {
     /// * `game_id` - The game definition ID this instance belongs to
     /// * `max_players` - Maximum number of players allowed
     /// * `async_bridge` - Optional async bridge for DataStoreService support
-    pub fn new_with_config(game_id: Uuid, max_players: u32, async_bridge: Option<Arc<AsyncBridge>>) -> Self {
+    /// * `error_mode` - How Lua errors are handled (Continue or Halt)
+    pub fn new_with_config(
+        game_id: Uuid,
+        max_players: u32,
+        async_bridge: Option<Arc<AsyncBridge>>,
+        error_mode: ErrorMode,
+    ) -> Self {
         let (action_sender, action_receiver) = crossbeam_channel::unbounded();
         let instance_id = Uuid::new_v4();
 
@@ -146,6 +165,8 @@ impl GameInstance {
             afk_timeout: Duration::from_secs(DEFAULT_AFK_TIMEOUT_SECS),
             max_players,
             empty_since: Some(Instant::now()), // Starts empty
+            error_mode,
+            halted_error: None,
         }
     }
 
@@ -175,7 +196,7 @@ impl GameInstance {
         script: &str,
         async_bridge: Option<Arc<AsyncBridge>>,
     ) -> Self {
-        Self::new_with_script_and_config(game_id, script, DEFAULT_MAX_PLAYERS, async_bridge)
+        Self::new_with_script_and_config(game_id, script, DEFAULT_MAX_PLAYERS, async_bridge, ErrorMode::Continue)
     }
 
     /// Creates a new game instance with a Lua script and configuration
@@ -190,8 +211,9 @@ impl GameInstance {
         script: &str,
         max_players: u32,
         async_bridge: Option<Arc<AsyncBridge>>,
+        error_mode: ErrorMode,
     ) -> Self {
-        let mut instance = Self::new_with_config(game_id, max_players, async_bridge);
+        let mut instance = Self::new_with_config(game_id, max_players, async_bridge, error_mode);
         instance.load_script(script);
         instance
     }
@@ -200,15 +222,27 @@ impl GameInstance {
     pub fn load_script(&mut self, source: &str) {
         match LuaRuntime::with_config(self.game_id, self.max_players, self.async_bridge.clone()) {
             Ok(mut runtime) => {
+                // Set error mode on Lua VM so fire_as_coroutines/resume can read it
+                runtime.lua().set_app_data(self.error_mode);
+
                 if let Err(e) = runtime.load_script(source) {
-                    eprintln!("[Lua Error] Failed to load script: {}", e);
+                    self.handle_lua_error("Failed to load script", &e);
                 } else {
                     self.lua_runtime = Some(runtime);
                 }
             }
             Err(e) => {
-                eprintln!("[Lua Error] Failed to create runtime: {}", e);
+                self.handle_lua_error("Failed to create runtime", &e);
             }
+        }
+    }
+
+    /// Logs a Lua error and, in Halt mode, stores it to stop further ticking.
+    fn handle_lua_error(&mut self, context: &str, err: &mlua::Error) {
+        eprintln!("[Lua Error] {}: {}", context, err);
+        if self.error_mode == ErrorMode::Halt {
+            eprintln!("[Halted] Instance stopped due to Lua error. Fix the script and restart.");
+            self.halted_error = Some(format!("{}: {}", context, err));
         }
     }
 
@@ -242,7 +276,7 @@ impl GameInstance {
             self.player_hrp_ids.insert(agent_id, hrp_id);
 
             if let Err(e) = runtime.fire_player_added(&player) {
-                eprintln!("[Lua Error] Failed to fire PlayerAdded: {}", e);
+                self.handle_lua_error("Failed to fire PlayerAdded", &e);
             }
         }
 
@@ -267,13 +301,20 @@ impl GameInstance {
                 counts.remove(&agent_id);
             }
 
-            if let Some(runtime) = &self.lua_runtime {
-                if let Some(player) = runtime.players().get_player_by_user_id(user_id) {
-                    if let Err(e) = runtime.fire_player_removing(&player) {
-                        eprintln!("[Lua Error] Failed to fire PlayerRemoving: {}", e);
-                    }
-                }
+            // Fire PlayerRemoving and remove player from Lua
+            // Split borrow: capture error first, then handle it after releasing runtime ref
+            let lua_err = if let Some(runtime) = &self.lua_runtime {
+                let err = runtime
+                    .players()
+                    .get_player_by_user_id(user_id)
+                    .and_then(|player| runtime.fire_player_removing(&player).err());
                 runtime.remove_player(user_id);
+                err
+            } else {
+                None
+            };
+            if let Some(e) = lua_err {
+                self.handle_lua_error("Failed to fire PlayerRemoving", &e);
             }
 
             // Track when instance becomes empty for garbage collection
@@ -302,6 +343,11 @@ impl GameInstance {
 
     /// Main game loop tick - called at 60 Hz
     pub fn tick(&mut self) {
+        // In Halt mode, stop ticking once an error has occurred
+        if self.halted_error.is_some() {
+            return;
+        }
+
         let dt = 1.0 / 60.0;
 
         // Process kick requests from Lua scripts (e.g., Player:Kick())
@@ -327,7 +373,10 @@ impl GameInstance {
         // Do this before syncing MoveTo targets so movement can apply in the same tick.
         if let Some(runtime) = &self.lua_runtime {
             if let Err(e) = runtime.process_agent_inputs() {
-                eprintln!("[Lua Error] Failed to process agent inputs: {}", e);
+                self.handle_lua_error("Failed to process agent inputs", &e);
+                if self.halted_error.is_some() {
+                    return;
+                }
             }
         }
 
@@ -354,7 +403,10 @@ impl GameInstance {
         // Run Lua Heartbeat
         if let Some(runtime) = &self.lua_runtime {
             if let Err(e) = runtime.tick(dt) {
-                eprintln!("[Lua Error] Tick error: {}", e);
+                self.handle_lua_error("Tick error", &e);
+                if self.halted_error.is_some() {
+                    return;
+                }
             }
         }
 

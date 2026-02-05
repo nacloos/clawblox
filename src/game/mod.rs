@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use async_bridge::AsyncBridge;
-use instance::{GameAction, GameInstance, GameStatus, MapInfo, PlayerObservation, SpectatorObservation};
+use instance::{ErrorMode, GameAction, GameInstance, GameStatus, MapInfo, PlayerObservation, SpectatorObservation};
 
 /// Handle to the game manager state
 pub type GameManagerHandle = Arc<GameManagerState>;
@@ -43,10 +43,12 @@ pub struct GameManagerState {
     pub map_cache: DashMap<Uuid, MapInfo>,
     /// Shared async bridge for database operations
     pub async_bridge: Option<Arc<AsyncBridge>>,
+    /// Error mode for new instances (Halt for CLI dev, Continue for production)
+    pub error_mode: ErrorMode,
 }
 
 impl GameManagerState {
-    pub fn new(async_bridge: Option<Arc<AsyncBridge>>) -> Self {
+    pub fn new(async_bridge: Option<Arc<AsyncBridge>>, error_mode: ErrorMode) -> Self {
         Self {
             instances: DashMap::new(),
             game_instances: DashMap::new(),
@@ -55,6 +57,7 @@ impl GameManagerState {
             spectator_cache: DashMap::new(),
             map_cache: DashMap::new(),
             async_bridge,
+            error_mode,
         }
     }
 }
@@ -65,15 +68,15 @@ pub struct GameManager {
 }
 
 impl GameManager {
-    pub fn new(tick_rate: u64, pool: Arc<PgPool>) -> (Self, GameManagerHandle) {
+    pub fn new(tick_rate: u64, pool: Arc<PgPool>, error_mode: ErrorMode) -> (Self, GameManagerHandle) {
         let async_bridge = Arc::new(AsyncBridge::new(pool));
-        let state = Arc::new(GameManagerState::new(Some(async_bridge)));
+        let state = Arc::new(GameManagerState::new(Some(async_bridge), error_mode));
         let handle = Arc::clone(&state);
         (Self { state, tick_rate }, handle)
     }
 
-    pub fn new_without_db(tick_rate: u64) -> (Self, GameManagerHandle) {
-        let state = Arc::new(GameManagerState::new(None));
+    pub fn new_without_db(tick_rate: u64, error_mode: ErrorMode) -> (Self, GameManagerHandle) {
+        let state = Arc::new(GameManagerState::new(None, error_mode));
         let handle = Arc::clone(&state);
         (Self { state, tick_rate }, handle)
     }
@@ -132,6 +135,16 @@ impl GameManager {
                     }
                 });
 
+            // In Halt mode, exit the process if any instance halted
+            if self.state.error_mode == ErrorMode::Halt {
+                for (_, handle) in &instances {
+                    let instance = handle.read();
+                    if instance.halted_error.is_some() {
+                        std::process::exit(1);
+                    }
+                }
+            }
+
             // Periodic cleanup
             tick_counter += 1;
             if tick_counter % CLEANUP_INTERVAL_TICKS == 0 {
@@ -172,8 +185,9 @@ fn create_instance(
             code,
             max_players,
             state.async_bridge.clone(),
+            state.error_mode,
         ),
-        None => GameInstance::new_with_config(game_id, max_players, state.async_bridge.clone()),
+        None => GameInstance::new_with_config(game_id, max_players, state.async_bridge.clone(), state.error_mode),
     };
 
     let instance_id = instance.instance_id;

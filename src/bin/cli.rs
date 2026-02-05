@@ -30,7 +30,7 @@ use libc;
 use clawblox::config::WorldConfig;
 use clawblox::game::{
     self, find_or_create_instance,
-    instance::{PlayerObservation, SpectatorObservation},
+    instance::{ErrorMode, PlayerObservation, SpectatorObservation},
     GameManager, GameManagerHandle,
 };
 
@@ -520,8 +520,8 @@ fn run_game(path: PathBuf, port: u16) {
     println!("Starting {} (max {} players)", config.name, config.max_players);
     println!("Script: {}", config.scripts.main);
 
-    // Create game manager without database
-    let (game_manager, game_handle) = GameManager::new_without_db(60);
+    // Create game manager without database (Halt mode: stop on first Lua error)
+    let (game_manager, game_handle) = GameManager::new_without_db(60, ErrorMode::Halt);
 
     // Use a random game_id for this session
     let game_id = Uuid::new_v4();

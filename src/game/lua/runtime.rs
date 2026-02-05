@@ -3,6 +3,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use uuid::Uuid;
 
+use crate::game::instance::ErrorMode;
+
 use super::instance::{AttributeValue, Instance, InstanceData};
 use super::services::{
     register_raycast_params, AgentInput, AgentInputService, DataStoreService, HttpService,
@@ -316,10 +318,15 @@ impl LuaRuntime {
 
     /// Resumes all pending coroutines and removes completed ones.
     fn resume_pending_coroutines(&self) -> Result<()> {
-        let mut pending = self.pending_coroutines.lock().unwrap();
+        // Drain all keys upfront so we don't hold a mutable borrow during iteration
+        let keys: Vec<RegistryKey> = {
+            let mut pending = self.pending_coroutines.lock().unwrap();
+            pending.drain(..).collect()
+        };
+
         let mut still_pending = Vec::new();
 
-        for key in pending.drain(..) {
+        for key in keys {
             // Get the thread from the registry
             let thread: Thread = match self.lua.registry_value(&key) {
                 Ok(t) => t,
@@ -349,13 +356,25 @@ impl LuaRuntime {
                     }
                 }
                 Err(e) => {
-                    // Thread errored
-                    eprintln!("[LuaRuntime] Coroutine error: {}", e);
+                    // Thread errored — in Halt mode, propagate immediately
+                    let error_mode = self
+                        .lua
+                        .app_data_ref::<ErrorMode>()
+                        .map(|m| *m)
+                        .unwrap_or(ErrorMode::Continue);
                     let _ = self.lua.remove_registry_value(key);
+                    if error_mode == ErrorMode::Halt {
+                        // Put remaining keys back before returning
+                        let mut pending = self.pending_coroutines.lock().unwrap();
+                        *pending = still_pending;
+                        return Err(e);
+                    }
+                    eprintln!("[LuaRuntime] Coroutine error: {}", e);
                 }
             }
         }
 
+        let mut pending = self.pending_coroutines.lock().unwrap();
         *pending = still_pending;
         Ok(())
     }
