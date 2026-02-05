@@ -1,11 +1,42 @@
 #!/bin/bash
 # Seed script for example games
 # Reads world.toml, Lua scripts, and SKILL.md from games/ directory
+#
+# Usage:
+#   ./scripts/seed_games.sh         # Local database (clawblox)
+#   ./scripts/seed_games.sh --prod  # Production database (from .env)
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Parse arguments
+PROD_MODE=false
+if [ "$1" = "--prod" ]; then
+    PROD_MODE=true
+fi
+
+# Set up database connection
+if [ "$PROD_MODE" = true ]; then
+    # Load .env file if it exists
+    if [ -f "$PROJECT_ROOT/.env" ]; then
+        export $(grep -v '^#' "$PROJECT_ROOT/.env" | xargs)
+    fi
+
+    DATABASE_URL="${DATABASE_URL_PROD:-$DATABASE_URL}"
+
+    if [ -z "$DATABASE_URL" ]; then
+        echo "Error: DATABASE_URL_PROD not set in .env"
+        exit 1
+    fi
+
+    PSQL_CMD="psql $DATABASE_URL"
+    echo "Using production database..."
+else
+    PSQL_CMD="psql -d clawblox"
+    echo "Using local database..."
+fi
 
 # Game IDs (defined once, used everywhere)
 ARSENAL_ID="6dd3ff88-150c-440e-b6fb-c80b7df715c0"
@@ -51,7 +82,7 @@ seed_game() {
     echo "Seeding: $name (max_players=$max_players)"
 
     # Insert into database
-    psql -d clawblox \
+    $PSQL_CMD \
         -v id="$game_id" \
         -v name="$name" \
         -v description="$description" \
@@ -76,7 +107,7 @@ EOF
 
 # Delete existing seeded games
 echo "Deleting existing seeded games..."
-psql -d clawblox -c "
+$PSQL_CMD -c "
 DELETE FROM games WHERE id IN (
     '$ARSENAL_ID',
     '$TSUNAMI_ID',
