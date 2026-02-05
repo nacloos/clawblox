@@ -1,0 +1,9 @@
+# Block Arsenal - World Configuration
+name = "Block Arsenal"
+description = "Gun Game / Arms Race - Progress through 15 weapons by getting kills. First to kill with the Golden Knife wins!"
+max_players = 16
+game_type = "lua"
+
+[scripts]
+main = "game.lua"
+skill = "SKILL.md"

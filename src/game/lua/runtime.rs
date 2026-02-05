@@ -32,9 +32,13 @@ const DEFAULT_PLAYER_MODEL_URL: &str = "/static/models/player.glb";
 
 impl GameDataModel {
     pub fn new(game_id: Uuid, async_bridge: Option<Arc<AsyncBridge>>) -> Self {
+        Self::with_config(game_id, 100, async_bridge)
+    }
+
+    pub fn with_config(game_id: Uuid, max_players: u32, async_bridge: Option<Arc<AsyncBridge>>) -> Self {
         Self {
             workspace: WorkspaceService::new(),
-            players: PlayersService::new(),
+            players: PlayersService::with_max_players(max_players),
             run_service: RunService::new(true),
             agent_input_service: AgentInputService::new(),
             data_store_service: DataStoreService::new(game_id, async_bridge),
@@ -50,8 +54,12 @@ pub struct Game {
 
 impl Game {
     pub fn new(game_id: Uuid, async_bridge: Option<Arc<AsyncBridge>>) -> Self {
+        Self::with_config(game_id, 100, async_bridge)
+    }
+
+    pub fn with_config(game_id: Uuid, max_players: u32, async_bridge: Option<Arc<AsyncBridge>>) -> Self {
         Self {
-            data_model: Arc::new(Mutex::new(GameDataModel::new(game_id, async_bridge))),
+            data_model: Arc::new(Mutex::new(GameDataModel::with_config(game_id, max_players, async_bridge))),
         }
     }
 
@@ -140,6 +148,16 @@ impl LuaRuntime {
     /// * `async_bridge` - Optional bridge for async database operations. If None, DataStore
     ///                    operations will return errors.
     pub fn new(game_id: Uuid, async_bridge: Option<Arc<AsyncBridge>>) -> Result<Self> {
+        Self::with_config(game_id, 100, async_bridge)
+    }
+
+    /// Creates a new LuaRuntime with configuration options.
+    ///
+    /// # Arguments
+    /// * `game_id` - The unique identifier for this game instance
+    /// * `max_players` - Maximum number of players (exposed as Players.MaxPlayers in Lua)
+    /// * `async_bridge` - Optional bridge for async database operations.
+    pub fn with_config(game_id: Uuid, max_players: u32, async_bridge: Option<Arc<AsyncBridge>>) -> Result<Self> {
         let lua = Lua::new();
 
         register_all_types(&lua)?;
@@ -148,7 +166,7 @@ impl LuaRuntime {
 
         register_raycast_params(&lua)?;
 
-        let game = Game::new(game_id, async_bridge);
+        let game = Game::with_config(game_id, max_players, async_bridge);
         lua.globals().set("game", game.clone())?;
         // Store game reference for internal use (e.g., Player:Kick())
         lua.globals().set("__clawblox_game", game.clone())?;

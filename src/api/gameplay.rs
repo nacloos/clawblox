@@ -91,10 +91,8 @@ async fn spectate(
     State(state): State<GameplayState>,
     Path(game_id): Path<Uuid>,
 ) -> Result<Json<SpectatorObservation>, (StatusCode, String)> {
-    // First verify game exists in database and get script
-    let db_game: (Uuid, Option<String>) = sqlx::query_as(
-        "SELECT id, script_code FROM games WHERE id = $1"
-    )
+    // First verify game exists in database and get script + max_players
+    let db_game: Game = sqlx::query_as("SELECT * FROM games WHERE id = $1")
         .bind(game_id)
         .fetch_optional(&state.pool)
         .await
@@ -103,10 +101,11 @@ async fn spectate(
 
     // Auto-start the game instance if not running (for spectating)
     if !game::is_instance_running(&state.game_manager, game_id) {
-        game::get_or_create_instance_with_script(
+        game::find_or_create_instance(
             &state.game_manager,
             game_id,
-            db_game.1.as_deref(),
+            db_game.max_players as u32,
+            db_game.script_code.as_deref(),
         );
     }
 
@@ -297,9 +296,9 @@ async fn get_leaderboard(
 async fn handle_spectate_ws(socket: WebSocket, state: GameplayState, game_id: Uuid) {
     let (mut sender, mut receiver) = socket.split();
 
-    // First verify game exists in database and get script
-    let db_game: Option<(Uuid, Option<String>)> =
-        sqlx::query_as("SELECT id, script_code FROM games WHERE id = $1")
+    // First verify game exists in database and get script + max_players
+    let db_game: Option<Game> =
+        sqlx::query_as("SELECT * FROM games WHERE id = $1")
             .bind(game_id)
             .fetch_optional(&state.pool)
             .await
@@ -317,7 +316,12 @@ async fn handle_spectate_ws(socket: WebSocket, state: GameplayState, game_id: Uu
 
     // Auto-start the game instance if not running
     if !game::is_instance_running(&state.game_manager, game_id) {
-        game::get_or_create_instance_with_script(&state.game_manager, game_id, db_game.1.as_deref());
+        game::find_or_create_instance(
+            &state.game_manager,
+            game_id,
+            db_game.max_players as u32,
+            db_game.script_code.as_deref(),
+        );
     }
 
     // Send updates at ~30 fps (every 33ms)

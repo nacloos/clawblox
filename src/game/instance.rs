@@ -22,11 +22,17 @@ const DEFAULT_AFK_TIMEOUT_SECS: u64 = 300;
 /// How often to check for AFK players (in ticks, 60 = 1 second)
 const AFK_CHECK_INTERVAL_TICKS: u64 = 60;
 
+/// Default max players when not specified
+const DEFAULT_MAX_PLAYERS: u32 = 8;
+
 /// A game instance that runs Lua scripts with Rapier physics.
 /// This is the Roblox-like architecture where:
 /// - Lua controls game logic via Workspace, Parts, etc.
 /// - Rapier handles physics simulation for non-anchored parts
 pub struct GameInstance {
+    /// Unique identifier for this specific instance (different from game_id)
+    pub instance_id: Uuid,
+    /// The game definition this instance belongs to
     pub game_id: Uuid,
     pub lua_runtime: Option<LuaRuntime>,
     pub physics: PhysicsWorld,
@@ -47,6 +53,11 @@ pub struct GameInstance {
     player_last_activity: HashMap<Uuid, Instant>,
     /// AFK timeout duration (players idle longer than this are kicked)
     afk_timeout: Duration,
+    /// Maximum number of players allowed in this instance
+    pub max_players: u32,
+    /// When the instance became empty (for garbage collection)
+    /// None if instance has players, Some(Instant) when last player left
+    pub empty_since: Option<Instant>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -87,12 +98,24 @@ impl GameInstance {
     /// Creates a new game instance without a script
     ///
     /// # Arguments
-    /// * `game_id` - Unique identifier for this game instance
+    /// * `game_id` - The game definition ID this instance belongs to
     /// * `async_bridge` - Optional async bridge for DataStoreService support
     pub fn new(game_id: Uuid, async_bridge: Option<Arc<AsyncBridge>>) -> Self {
+        Self::new_with_config(game_id, DEFAULT_MAX_PLAYERS, async_bridge)
+    }
+
+    /// Creates a new game instance with configuration
+    ///
+    /// # Arguments
+    /// * `game_id` - The game definition ID this instance belongs to
+    /// * `max_players` - Maximum number of players allowed
+    /// * `async_bridge` - Optional async bridge for DataStoreService support
+    pub fn new_with_config(game_id: Uuid, max_players: u32, async_bridge: Option<Arc<AsyncBridge>>) -> Self {
         let (action_sender, action_receiver) = crossbeam_channel::unbounded();
+        let instance_id = Uuid::new_v4();
 
         Self {
+            instance_id,
             game_id,
             lua_runtime: None,
             physics: PhysicsWorld::new(),
@@ -109,7 +132,19 @@ impl GameInstance {
             async_bridge,
             player_last_activity: HashMap::new(),
             afk_timeout: Duration::from_secs(DEFAULT_AFK_TIMEOUT_SECS),
+            max_players,
+            empty_since: Some(Instant::now()), // Starts empty
         }
+    }
+
+    /// Returns true if this instance has capacity for more players
+    pub fn has_capacity(&self) -> bool {
+        self.players.len() < self.max_players as usize
+    }
+
+    /// Returns the number of available slots
+    pub fn available_slots(&self) -> usize {
+        (self.max_players as usize).saturating_sub(self.players.len())
     }
 
     /// Returns milliseconds since game instance was created
@@ -120,7 +155,7 @@ impl GameInstance {
     /// Creates a new game instance with a Lua script
     ///
     /// # Arguments
-    /// * `game_id` - Unique identifier for this game instance
+    /// * `game_id` - The game definition ID this instance belongs to
     /// * `script` - Lua script source code to execute
     /// * `async_bridge` - Optional async bridge for DataStoreService support
     pub fn new_with_script(
@@ -128,14 +163,30 @@ impl GameInstance {
         script: &str,
         async_bridge: Option<Arc<AsyncBridge>>,
     ) -> Self {
-        let mut instance = Self::new(game_id, async_bridge);
+        Self::new_with_script_and_config(game_id, script, DEFAULT_MAX_PLAYERS, async_bridge)
+    }
+
+    /// Creates a new game instance with a Lua script and configuration
+    ///
+    /// # Arguments
+    /// * `game_id` - The game definition ID this instance belongs to
+    /// * `script` - Lua script source code to execute
+    /// * `max_players` - Maximum number of players allowed
+    /// * `async_bridge` - Optional async bridge for DataStoreService support
+    pub fn new_with_script_and_config(
+        game_id: Uuid,
+        script: &str,
+        max_players: u32,
+        async_bridge: Option<Arc<AsyncBridge>>,
+    ) -> Self {
+        let mut instance = Self::new_with_config(game_id, max_players, async_bridge);
         instance.load_script(script);
         instance
     }
 
     /// Loads and executes a Lua script
     pub fn load_script(&mut self, source: &str) {
-        match LuaRuntime::new(self.game_id, self.async_bridge.clone()) {
+        match LuaRuntime::with_config(self.game_id, self.max_players, self.async_bridge.clone()) {
             Ok(mut runtime) => {
                 if let Err(e) = runtime.load_script(source) {
                     eprintln!("[Lua Error] Failed to load script: {}", e);
@@ -150,10 +201,14 @@ impl GameInstance {
     }
 
     /// Adds a player to the game
+    /// Returns false if player is already in game (does NOT check capacity - use has_capacity() first)
     pub fn add_player(&mut self, agent_id: Uuid, name: &str) -> bool {
         if self.players.contains_key(&agent_id) {
             return false;
         }
+
+        // Clear empty_since since we now have a player
+        self.empty_since = None;
 
         // Use a stable user_id derived from agent_id so DataStore keys persist across restarts.
         let user_id = Self::user_id_from_agent_id(agent_id);
@@ -208,6 +263,12 @@ impl GameInstance {
                 }
                 runtime.remove_player(user_id);
             }
+
+            // Track when instance becomes empty for garbage collection
+            if self.players.is_empty() {
+                self.empty_since = Some(Instant::now());
+            }
+
             true
         } else {
             false

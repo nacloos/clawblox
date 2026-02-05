@@ -1,6 +1,6 @@
 mod api;
-mod db;
-mod game;
+
+use clawblox::{db, game};
 
 use axum::Router;
 use std::net::SocketAddr;
@@ -17,7 +17,19 @@ async fn main() {
         .expect("Failed to connect to database");
     let pool = std::sync::Arc::new(pool);
 
+    // Clean up orphaned instances from previous server session
+    if let Err(e) = db::reconcile_instances(&pool).await {
+        eprintln!("[Startup] Warning: Failed to reconcile instances: {}", e);
+    }
+
     let (game_manager, game_handle) = GameManager::new(60, pool.clone());
+
+    // Clone handle for background sync task
+    let sync_handle = game_handle.clone();
+    let sync_pool = pool.clone();
+    tokio::spawn(async move {
+        db::sync_instances_to_db(sync_pool, sync_handle).await;
+    });
 
     thread::spawn(move || {
         game_manager.run();

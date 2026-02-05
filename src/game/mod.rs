@@ -15,29 +15,39 @@ use uuid::Uuid;
 use async_bridge::AsyncBridge;
 use instance::{GameAction, GameInstance, GameStatus, PlayerObservation, SpectatorObservation};
 
-/// Handle to the game manager - now uses DashMap for per-game locks
+/// Handle to the game manager state
 pub type GameManagerHandle = Arc<GameManagerState>;
 
-/// Per-game lock wrapper - uses parking_lot for better performance under contention
+/// Per-instance lock wrapper
 pub type GameInstanceHandle = Arc<RwLock<GameInstance>>;
 
+/// Default timeout before an empty instance is destroyed (60 seconds)
+const EMPTY_INSTANCE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Cleanup interval in ticks (60 ticks = 1 second at 60 Hz)
+const CLEANUP_INTERVAL_TICKS: u64 = 60;
+
 pub struct GameManagerState {
-    /// Each game has its own RwLock for fine-grained locking
-    pub games: DashMap<Uuid, GameInstanceHandle>,
-    /// Cached observations, keyed by (game_id, agent_id)
-    /// Updated once per tick, read lock-free by HTTP /observe
+    /// Running instances, keyed by instance_id
+    pub instances: DashMap<Uuid, GameInstanceHandle>,
+    /// Maps game_id to list of active instance_ids
+    pub game_instances: DashMap<Uuid, Vec<Uuid>>,
+    /// Maps (agent_id, game_id) to instance_id for routing
+    pub player_instances: DashMap<(Uuid, Uuid), Uuid>,
+    /// Cached observations, keyed by (instance_id, agent_id)
     pub observation_cache: DashMap<(Uuid, Uuid), PlayerObservation>,
-    /// Cached spectator observations, keyed by game_id
-    /// Updated once per tick, read lock-free by WebSocket spectator
+    /// Cached spectator observations, keyed by instance_id
     pub spectator_cache: DashMap<Uuid, SpectatorObservation>,
-    /// Shared async bridge for database operations (DataStoreService)
+    /// Shared async bridge for database operations
     pub async_bridge: Option<Arc<AsyncBridge>>,
 }
 
 impl GameManagerState {
     pub fn new(async_bridge: Option<Arc<AsyncBridge>>) -> Self {
         Self {
-            games: DashMap::new(),
+            instances: DashMap::new(),
+            game_instances: DashMap::new(),
+            player_instances: DashMap::new(),
             observation_cache: DashMap::new(),
             spectator_cache: DashMap::new(),
             async_bridge,
@@ -51,67 +61,66 @@ pub struct GameManager {
 }
 
 impl GameManager {
-    /// Creates a new GameManager with database pool for DataStoreService support.
-    ///
-    /// # Arguments
-    /// * `tick_rate` - Game loop ticks per second
-    /// * `pool` - Database connection pool for async operations
     pub fn new(tick_rate: u64, pool: Arc<PgPool>) -> (Self, GameManagerHandle) {
         let async_bridge = Arc::new(AsyncBridge::new(pool));
         let state = Arc::new(GameManagerState::new(Some(async_bridge)));
         let handle = Arc::clone(&state);
-
         (Self { state, tick_rate }, handle)
     }
 
-    /// Creates a new GameManager without database support (for testing).
     pub fn new_without_db(tick_rate: u64) -> (Self, GameManagerHandle) {
         let state = Arc::new(GameManagerState::new(None));
         let handle = Arc::clone(&state);
-
         (Self { state, tick_rate }, handle)
     }
 
     pub fn run(self) {
         let tick_duration = Duration::from_millis(1000 / self.tick_rate);
+        let mut tick_counter: u64 = 0;
 
         loop {
             let start = Instant::now();
 
-            // Iterate over games without holding global lock
-            // Each game is locked individually during its tick
-            for entry in self.state.games.iter() {
-                let game_id = *entry.key();
-                let game_handle = entry.value().clone();
-                let mut game = game_handle.write();
-                if game.status == GameStatus::Playing {
-                    // Snapshot player IDs before tick (to detect kicked players)
+            for entry in self.state.instances.iter() {
+                let instance_id = *entry.key();
+                let instance_handle = entry.value().clone();
+                let mut instance = instance_handle.write();
+                let game_id = instance.game_id;
+
+                if instance.status == GameStatus::Playing {
                     let players_before: std::collections::HashSet<Uuid> =
-                        game.players.keys().copied().collect();
+                        instance.players.keys().copied().collect();
 
-                    game.tick();
+                    instance.tick();
 
-                    // Get current player IDs after tick
                     let players_after: std::collections::HashSet<Uuid> =
-                        game.players.keys().copied().collect();
+                        instance.players.keys().copied().collect();
 
-                    // Clean up observation cache for players who were kicked during tick
+                    // Clean up kicked players
                     for agent_id in players_before.difference(&players_after) {
-                        self.state.observation_cache.remove(&(game_id, *agent_id));
+                        self.state.observation_cache.remove(&(instance_id, *agent_id));
+                        self.state.player_instances.remove(&(*agent_id, game_id));
                     }
 
-                    // Cache observations for all players after tick
-                    // This allows /observe HTTP requests to read without lock
-                    for &agent_id in game.players.keys() {
-                        if let Some(obs) = game.get_player_observation(agent_id) {
-                            self.state.observation_cache.insert((game_id, agent_id), obs);
+                    // Update observation cache
+                    for &agent_id in instance.players.keys() {
+                        if let Some(obs) = instance.get_player_observation(agent_id) {
+                            self.state.observation_cache.insert((instance_id, agent_id), obs);
                         }
                     }
 
-                    // Cache spectator observation after tick
-                    // This allows WebSocket spectator to read without lock
-                    let spectator_obs = game.get_spectator_observation();
-                    self.state.spectator_cache.insert(game_id, spectator_obs);
+                    // Update spectator cache
+                    let spectator_obs = instance.get_spectator_observation();
+                    self.state.spectator_cache.insert(instance_id, spectator_obs);
+                }
+            }
+
+            // Periodic cleanup
+            tick_counter += 1;
+            if tick_counter % CLEANUP_INTERVAL_TICKS == 0 {
+                let destroyed = cleanup_empty_instances(&self.state);
+                if destroyed > 0 {
+                    eprintln!("[Cleanup] Destroyed {} empty instances", destroyed);
                 }
             }
 
@@ -123,91 +132,185 @@ impl GameManager {
     }
 }
 
-pub fn create_game(state: &GameManagerHandle) -> Uuid {
-    let game_id = Uuid::new_v4();
-    let game = GameInstance::new(game_id, state.async_bridge.clone());
+// =============================================================================
+// Instance Management
+// =============================================================================
 
-    // Cache initial spectator observation before inserting game
-    let spectator_obs = game.get_spectator_observation();
-    state.spectator_cache.insert(game_id, spectator_obs);
-
-    let game_handle = Arc::new(RwLock::new(game));
-    state.games.insert(game_id, game_handle);
-
-    game_id
+#[derive(Debug, Clone)]
+pub struct FindInstanceResult {
+    pub instance_id: Uuid,
+    pub created: bool,
 }
 
-/// Gets an existing running instance or creates a new one for the given game ID.
-/// Returns true if a new instance was created, false if using existing.
-pub fn get_or_create_instance(state: &GameManagerHandle, game_id: Uuid) -> bool {
-    get_or_create_instance_with_script(state, game_id, None)
-}
-
-/// Gets an existing running instance or creates a new one with an optional Lua script.
-/// Returns true if a new instance was created, false if using existing.
-pub fn get_or_create_instance_with_script(
+/// Creates a new instance for a game
+fn create_instance(
     state: &GameManagerHandle,
     game_id: Uuid,
+    max_players: u32,
     script: Option<&str>,
-) -> bool {
-    if state.games.contains_key(&game_id) {
-        return false;
-    }
-
-    let game = match script {
-        Some(code) => GameInstance::new_with_script(game_id, code, state.async_bridge.clone()),
-        None => GameInstance::new(game_id, state.async_bridge.clone()),
+) -> Uuid {
+    let instance = match script {
+        Some(code) => GameInstance::new_with_script_and_config(
+            game_id,
+            code,
+            max_players,
+            state.async_bridge.clone(),
+        ),
+        None => GameInstance::new_with_config(game_id, max_players, state.async_bridge.clone()),
     };
 
-    // Cache initial spectator observation before inserting game
-    let spectator_obs = game.get_spectator_observation();
-    state.spectator_cache.insert(game_id, spectator_obs);
+    let instance_id = instance.instance_id;
 
-    let game_handle = Arc::new(RwLock::new(game));
-    state.games.insert(game_id, game_handle);
-    true
+    // Cache initial spectator observation
+    let spectator_obs = instance.get_spectator_observation();
+    state.spectator_cache.insert(instance_id, spectator_obs);
+
+    let instance_handle = Arc::new(RwLock::new(instance));
+    state.instances.insert(instance_id, instance_handle);
+
+    // Track this instance under the game
+    state
+        .game_instances
+        .entry(game_id)
+        .or_insert_with(Vec::new)
+        .push(instance_id);
+
+    eprintln!(
+        "[Instance] Created {} for game {} (max_players={})",
+        instance_id, game_id, max_players
+    );
+
+    instance_id
 }
 
-/// Checks if a game instance is currently running in memory.
+/// Finds an instance with capacity or creates a new one
+pub fn find_or_create_instance(
+    state: &GameManagerHandle,
+    game_id: Uuid,
+    max_players: u32,
+    script: Option<&str>,
+) -> FindInstanceResult {
+    // Check existing instances for capacity
+    if let Some(instance_ids) = state.game_instances.get(&game_id) {
+        for &instance_id in instance_ids.value() {
+            if let Some(handle) = state.instances.get(&instance_id) {
+                let instance = handle.read();
+                if instance.has_capacity() {
+                    return FindInstanceResult {
+                        instance_id,
+                        created: false,
+                    };
+                }
+            }
+        }
+    }
+
+    // Create new instance
+    let instance_id = create_instance(state, game_id, max_players, script);
+    FindInstanceResult {
+        instance_id,
+        created: true,
+    }
+}
+
+/// Checks if any instance is running for this game
 pub fn is_instance_running(state: &GameManagerHandle, game_id: Uuid) -> bool {
-    state.games.contains_key(&game_id)
+    state
+        .game_instances
+        .get(&game_id)
+        .map(|ids| !ids.is_empty())
+        .unwrap_or(false)
 }
 
-pub fn join_game(state: &GameManagerHandle, game_id: Uuid, agent_id: Uuid, agent_name: &str) -> Result<(), String> {
-    let game_handle = state
-        .games
-        .get(&game_id)
-        .ok_or_else(|| "Game not found".to_string())?;
+/// Gets the instance_id a player is in for a specific game
+pub fn get_player_instance(
+    state: &GameManagerHandle,
+    agent_id: Uuid,
+    game_id: Uuid,
+) -> Option<Uuid> {
+    state
+        .player_instances
+        .get(&(agent_id, game_id))
+        .map(|r| *r.value())
+}
 
-    let mut game = game_handle.write();
-    if !game.add_player(agent_id, agent_name) {
-        return Err("Already in game".to_string());
+// =============================================================================
+// Player Management
+// =============================================================================
+
+/// Joins a player to an instance (with capacity check)
+pub fn join_instance(
+    state: &GameManagerHandle,
+    instance_id: Uuid,
+    game_id: Uuid,
+    agent_id: Uuid,
+    agent_name: &str,
+) -> Result<(), String> {
+    let instance_handle = state
+        .instances
+        .get(&instance_id)
+        .ok_or_else(|| "Instance not found".to_string())?;
+
+    let mut instance = instance_handle.write();
+
+    if !instance.has_capacity() {
+        return Err("Instance is full".to_string());
     }
 
-    // Initialize cached observation so player can observe before first tick
-    if let Some(obs) = game.get_player_observation(agent_id) {
-        state.observation_cache.insert((game_id, agent_id), obs);
+    if !instance.add_player(agent_id, agent_name) {
+        return Err("Already in instance".to_string());
+    }
+
+    // Track player's instance
+    state.player_instances.insert((agent_id, game_id), instance_id);
+
+    // Initialize observation cache
+    if let Some(obs) = instance.get_player_observation(agent_id) {
+        state.observation_cache.insert((instance_id, agent_id), obs);
     }
 
     Ok(())
 }
 
-pub fn leave_game(state: &GameManagerHandle, game_id: Uuid, agent_id: Uuid) -> Result<(), String> {
-    let game_handle = state
-        .games
-        .get(&game_id)
-        .ok_or_else(|| "Game not found".to_string())?;
+/// Leaves a player from an instance
+pub fn leave_instance(
+    state: &GameManagerHandle,
+    instance_id: Uuid,
+    agent_id: Uuid,
+) -> Result<(), String> {
+    let instance_handle = state
+        .instances
+        .get(&instance_id)
+        .ok_or_else(|| "Instance not found".to_string())?;
 
-    let mut game = game_handle.write();
-    if !game.remove_player(agent_id) {
-        return Err("Not in game".to_string());
-    }
+    let game_id = {
+        let mut instance = instance_handle.write();
+        if !instance.remove_player(agent_id) {
+            return Err("Not in instance".to_string());
+        }
+        instance.game_id
+    };
 
-    // Clean up cached observation
-    state.observation_cache.remove(&(game_id, agent_id));
+    state.player_instances.remove(&(agent_id, game_id));
+    state.observation_cache.remove(&(instance_id, agent_id));
 
     Ok(())
 }
+
+/// Leaves a player from their instance in a game (lookup by game_id)
+pub fn leave_game(
+    state: &GameManagerHandle,
+    game_id: Uuid,
+    agent_id: Uuid,
+) -> Result<(), String> {
+    let instance_id = get_player_instance(state, agent_id, game_id)
+        .ok_or_else(|| "Not in any instance of this game".to_string())?;
+    leave_instance(state, instance_id, agent_id)
+}
+
+// =============================================================================
+// Actions & Input
+// =============================================================================
 
 pub fn queue_action(
     state: &GameManagerHandle,
@@ -215,21 +318,23 @@ pub fn queue_action(
     agent_id: Uuid,
     action: GameAction,
 ) -> Result<(), String> {
-    let game_handle = state
-        .games
-        .get(&game_id)
-        .ok_or_else(|| "Game not found".to_string())?;
+    let instance_id = get_player_instance(state, agent_id, game_id)
+        .ok_or_else(|| "Not in any instance of this game".to_string())?;
 
-    let game = game_handle.read();
-    if !game.players.contains_key(&agent_id) {
-        return Err("Not in game".to_string());
+    let instance_handle = state
+        .instances
+        .get(&instance_id)
+        .ok_or_else(|| "Instance not found".to_string())?;
+
+    let instance = instance_handle.read();
+    if !instance.players.contains_key(&agent_id) {
+        return Err("Not in instance".to_string());
     }
 
-    game.queue_action(agent_id, action);
+    instance.queue_action(agent_id, action);
     Ok(())
 }
 
-/// Queue an agent input for processing by the Lua AgentInputService
 pub fn queue_input(
     state: &GameManagerHandle,
     game_id: Uuid,
@@ -237,101 +342,92 @@ pub fn queue_input(
     input_type: String,
     data: serde_json::Value,
 ) -> Result<(), String> {
-    let game_handle = state
-        .games
-        .get(&game_id)
-        .ok_or_else(|| "Game not found".to_string())?;
+    let instance_id = get_player_instance(state, agent_id, game_id)
+        .ok_or_else(|| "Not in any instance of this game".to_string())?;
 
-    let mut game = game_handle.write();
-    let user_id = game
+    let instance_handle = state
+        .instances
+        .get(&instance_id)
+        .ok_or_else(|| "Instance not found".to_string())?;
+
+    let mut instance = instance_handle.write();
+    let user_id = instance
         .players
         .get(&agent_id)
-        .ok_or_else(|| "Not in game".to_string())?;
+        .ok_or_else(|| "Not in instance".to_string())?;
 
-    game.queue_agent_input(*user_id, input_type, data);
-
-    // Update activity timestamp for AFK tracking
-    game.record_player_activity(agent_id);
+    instance.queue_agent_input(*user_id, input_type, data);
+    instance.record_player_activity(agent_id);
 
     Ok(())
 }
+
+// =============================================================================
+// Observations
+// =============================================================================
 
 pub fn get_observation(
     state: &GameManagerHandle,
     game_id: Uuid,
     agent_id: Uuid,
 ) -> Result<PlayerObservation, String> {
-    // Read from cache (lock-free) instead of acquiring game lock
-    // Cache is populated by game tick loop
+    let instance_id = get_player_instance(state, agent_id, game_id)
+        .ok_or_else(|| "Not in any instance of this game".to_string())?;
+
     state
         .observation_cache
-        .get(&(game_id, agent_id))
+        .get(&(instance_id, agent_id))
         .map(|r| r.clone())
-        .ok_or_else(|| "Not in game".to_string())
+        .ok_or_else(|| "Not in instance".to_string())
 }
 
 pub fn get_spectator_observation(
     state: &GameManagerHandle,
     game_id: Uuid,
 ) -> Result<SpectatorObservation, String> {
-    // Read from cache (lock-free) instead of acquiring game lock
-    // Cache is populated by game tick loop
-    state
-        .spectator_cache
+    let instance_ids = state
+        .game_instances
         .get(&game_id)
-        .map(|r| r.clone())
-        .ok_or_else(|| "Game not found".to_string())
-}
+        .ok_or_else(|| "No instances for this game".to_string())?;
 
-pub fn list_games(state: &GameManagerHandle) -> Vec<GameInfo> {
-    state
-        .games
-        .iter()
-        .map(|entry| {
-            let id = *entry.key();
-            let game = entry.value().read();
-            GameInfo {
-                id,
-                status: match game.status {
-                    GameStatus::Waiting => "waiting".to_string(),
-                    GameStatus::Playing => "playing".to_string(),
-                    GameStatus::Finished => "finished".to_string(),
-                },
-                player_count: game.players.len(),
-                tick: game.tick,
+    // Find most populated instance
+    let mut best_instance_id = None;
+    let mut max_players = 0;
+
+    for &instance_id in instance_ids.value() {
+        if let Some(handle) = state.instances.get(&instance_id) {
+            let instance = handle.read();
+            let count = instance.players.len();
+            if count >= max_players {
+                max_players = count;
+                best_instance_id = Some(instance_id);
             }
-        })
-        .collect()
-}
-
-pub fn get_game_info(state: &GameManagerHandle, game_id: Uuid) -> Option<GameInfo> {
-    state.games.get(&game_id).map(|entry| {
-        let game = entry.value().read();
-        GameInfo {
-            id: game_id,
-            status: match game.status {
-                GameStatus::Waiting => "waiting".to_string(),
-                GameStatus::Playing => "playing".to_string(),
-                GameStatus::Finished => "finished".to_string(),
-            },
-            player_count: game.players.len(),
-            tick: game.tick,
-        }
-    })
-}
-
-pub fn matchmake(state: &GameManagerHandle) -> (Uuid, bool) {
-    // Look for an existing waiting game
-    for entry in state.games.iter() {
-        let game = entry.value().read();
-        if game.status == GameStatus::Waiting {
-            return (*entry.key(), false);
         }
     }
 
-    let game_id = create_game(state);
-    (game_id, true)
+    let instance_id = best_instance_id.ok_or_else(|| "No valid instances found".to_string())?;
+
+    state
+        .spectator_cache
+        .get(&instance_id)
+        .map(|r| r.clone())
+        .ok_or_else(|| "Instance not found in cache".to_string())
 }
+
+pub fn get_spectator_observation_for_instance(
+    state: &GameManagerHandle,
+    instance_id: Uuid,
+) -> Result<SpectatorObservation, String> {
+    state
+        .spectator_cache
+        .get(&instance_id)
+        .map(|r| r.clone())
+        .ok_or_else(|| "Instance not found".to_string())
+}
+
+// =============================================================================
+// Info & Listing
+// =============================================================================
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct GameInfo {
@@ -339,4 +435,167 @@ pub struct GameInfo {
     pub status: String,
     pub player_count: usize,
     pub tick: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InstanceInfo {
+    pub instance_id: Uuid,
+    pub game_id: Uuid,
+    pub status: String,
+    pub player_count: usize,
+    pub max_players: usize,
+    pub tick: u64,
+}
+
+pub fn list_instances(state: &GameManagerHandle) -> Vec<InstanceInfo> {
+    state
+        .instances
+        .iter()
+        .map(|entry| {
+            let instance_id = *entry.key();
+            let instance = entry.value().read();
+            InstanceInfo {
+                instance_id,
+                game_id: instance.game_id,
+                status: match instance.status {
+                    GameStatus::Waiting => "waiting".to_string(),
+                    GameStatus::Playing => "playing".to_string(),
+                    GameStatus::Finished => "finished".to_string(),
+                },
+                player_count: instance.players.len(),
+                max_players: instance.max_players as usize,
+                tick: instance.tick,
+            }
+        })
+        .collect()
+}
+
+pub fn list_games(state: &GameManagerHandle) -> Vec<GameInfo> {
+    let mut game_infos: std::collections::HashMap<Uuid, GameInfo> = std::collections::HashMap::new();
+
+    for entry in state.instances.iter() {
+        let instance = entry.value().read();
+        let game_id = instance.game_id;
+
+        let info = game_infos.entry(game_id).or_insert_with(|| GameInfo {
+            id: game_id,
+            status: "waiting".to_string(),
+            player_count: 0,
+            tick: 0,
+        });
+
+        info.player_count += instance.players.len();
+        info.tick = info.tick.max(instance.tick);
+        if instance.status == GameStatus::Playing {
+            info.status = "playing".to_string();
+        }
+    }
+
+    game_infos.into_values().collect()
+}
+
+pub fn get_game_info(state: &GameManagerHandle, game_id: Uuid) -> Option<GameInfo> {
+    let instance_ids = state.game_instances.get(&game_id)?;
+
+    let mut total_players = 0;
+    let mut max_tick = 0;
+    let mut any_playing = false;
+
+    for &instance_id in instance_ids.value() {
+        if let Some(handle) = state.instances.get(&instance_id) {
+            let instance = handle.read();
+            total_players += instance.players.len();
+            max_tick = max_tick.max(instance.tick);
+            if instance.status == GameStatus::Playing {
+                any_playing = true;
+            }
+        }
+    }
+
+    Some(GameInfo {
+        id: game_id,
+        status: if any_playing { "playing" } else { "waiting" }.to_string(),
+        player_count: total_players,
+        tick: max_tick,
+    })
+}
+
+// =============================================================================
+// Instance Lifecycle
+// =============================================================================
+
+pub fn destroy_instance(state: &GameManagerHandle, instance_id: Uuid) -> bool {
+    let game_id = state
+        .instances
+        .get(&instance_id)
+        .map(|h| h.read().game_id);
+
+    if state.instances.remove(&instance_id).is_none() {
+        return false;
+    }
+
+    state.spectator_cache.remove(&instance_id);
+
+    // Clean up observation cache
+    let obs_keys: Vec<_> = state
+        .observation_cache
+        .iter()
+        .filter(|e| e.key().0 == instance_id)
+        .map(|e| *e.key())
+        .collect();
+    for key in obs_keys {
+        state.observation_cache.remove(&key);
+    }
+
+    if let Some(game_id) = game_id {
+        // Remove from game_instances
+        if let Some(mut ids) = state.game_instances.get_mut(&game_id) {
+            ids.retain(|&id| id != instance_id);
+        }
+
+        // Clean up player_instances
+        let player_keys: Vec<_> = state
+            .player_instances
+            .iter()
+            .filter(|e| *e.value() == instance_id)
+            .map(|e| *e.key())
+            .collect();
+        for key in player_keys {
+            state.player_instances.remove(&key);
+        }
+    }
+
+    eprintln!("[Instance] Destroyed {}", instance_id);
+    true
+}
+
+pub fn cleanup_empty_instances(state: &GameManagerHandle) -> usize {
+    cleanup_empty_instances_with_timeout(state, EMPTY_INSTANCE_TIMEOUT)
+}
+
+pub fn cleanup_empty_instances_with_timeout(
+    state: &GameManagerHandle,
+    timeout: Duration,
+) -> usize {
+    let now = Instant::now();
+    let mut to_destroy = Vec::new();
+
+    for entry in state.instances.iter() {
+        let instance_id = *entry.key();
+        let instance = entry.value().read();
+
+        if instance.players.is_empty() {
+            if let Some(empty_since) = instance.empty_since {
+                if now.duration_since(empty_since) > timeout {
+                    to_destroy.push(instance_id);
+                }
+            }
+        }
+    }
+
+    let count = to_destroy.len();
+    for instance_id in to_destroy {
+        destroy_instance(state, instance_id);
+    }
+    count
 }

@@ -15,10 +15,14 @@ pub struct PlayersServiceData {
 
 impl PlayersServiceData {
     pub fn new() -> Self {
+        Self::with_max_players(100)
+    }
+
+    pub fn with_max_players(max_players: u32) -> Self {
         Self {
             players: Vec::new(),
             local_player: None,
-            max_players: 100,
+            max_players,
             player_added: create_signal("PlayerAdded"),
             player_removing: create_signal("PlayerRemoving"),
         }
@@ -33,10 +37,14 @@ pub struct PlayersService {
 
 impl PlayersService {
     pub fn new() -> Self {
+        Self::with_max_players(100)
+    }
+
+    pub fn with_max_players(max_players: u32) -> Self {
         let instance = Instance::new(ClassName::Players, "Players");
         Self {
             instance,
-            data: Arc::new(Mutex::new(PlayersServiceData::new())),
+            data: Arc::new(Mutex::new(PlayersServiceData::with_max_players(max_players))),
         }
     }
 

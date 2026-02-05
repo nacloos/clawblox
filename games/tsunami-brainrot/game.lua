@@ -629,11 +629,6 @@ local function loadPlayerData(player)
             end
         end
     end
-    if userBaseIndex[player.UserId] == nil then
-        player:Kick("Server full (8 players max).")
-        return false
-    end
-
     -- Set defaults FIRST so player can receive inputs while DB loads
     local data = {
         money = 0,

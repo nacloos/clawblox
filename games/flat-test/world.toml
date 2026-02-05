@@ -1,0 +1,9 @@
+# Flat Test - World Configuration
+name = "Flat Test"
+description = "Simple flat terrain for movement testing. No obstacles or game mechanics."
+max_players = 8
+game_type = "lua"
+
+[scripts]
+main = "game.lua"
+skill = "SKILL.md"

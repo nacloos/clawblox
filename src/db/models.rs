@@ -42,4 +42,15 @@ pub struct GamePlayer {
     pub joined_at: DateTime<Utc>,
     pub score: i32,
     pub status: String,
+    pub instance_id: Option<Uuid>,
+}
+
+/// Represents a running instance of a game (supports multiple instances per game)
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct DbGameInstance {
+    pub id: Uuid,
+    pub game_id: Uuid,
+    pub status: String,
+    pub player_count: i32,
+    pub created_at: DateTime<Utc>,
 }

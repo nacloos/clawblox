@@ -1,0 +1,9 @@
+# Tsunami Brainrot - World Configuration
+name = "Escape Tsunami For Brainrots"
+description = "Collect brainrots, deposit for money, buy speed upgrades."
+max_players = 8
+game_type = "lua"
+
+[scripts]
+main = "game.lua"
+skill = "SKILL.md"

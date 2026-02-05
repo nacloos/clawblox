@@ -1,6 +1,6 @@
 #!/bin/bash
 # Seed script for example games
-# Reads Lua scripts from games/ directory instead of embedding them
+# Reads world.toml, Lua scripts, and SKILL.md from games/ directory
 
 set -e
 
@@ -12,17 +12,70 @@ ARSENAL_ID="6dd3ff88-150c-440e-b6fb-c80b7df715c0"
 TSUNAMI_ID="0a62727e-b45e-4175-be9f-1070244f8885"
 FLATTEST_ID="26c869ee-da7b-48a4-a198-3daa870ef652"
 
-# Read the game scripts and skill definitions
-ARSENAL_SCRIPT=$(cat "$PROJECT_ROOT/games/arsenal/game.lua")
-ARSENAL_SKILL=$(cat "$PROJECT_ROOT/games/arsenal/SKILL.md")
+# Function to extract value from TOML file
+get_toml_value() {
+    local file="$1"
+    local key="$2"
+    local default="$3"
+    # Simple grep-based extraction (handles basic cases)
+    local value=$(grep "^${key} *= *" "$file" 2>/dev/null | sed 's/.*= *//' | tr -d '"' | tr -d "'")
+    if [ -z "$value" ]; then
+        echo "$default"
+    else
+        echo "$value"
+    fi
+}
 
-TSUNAMI_SCRIPT=$(cat "$PROJECT_ROOT/games/tsunami-brainrot/game.lua")
-TSUNAMI_SKILL=$(cat "$PROJECT_ROOT/games/tsunami-brainrot/SKILL.md")
+# Function to seed a game from its directory
+seed_game() {
+    local game_dir="$1"
+    local game_id="$2"
 
-FLATTEST_SCRIPT=$(cat "$PROJECT_ROOT/games/flat-test/game.lua")
-FLATTEST_SKILL=$(cat "$PROJECT_ROOT/games/flat-test/SKILL.md")
+    local world_toml="$game_dir/world.toml"
+
+    if [ ! -f "$world_toml" ]; then
+        echo "Warning: $world_toml not found, skipping"
+        return 1
+    fi
+
+    # Read config from world.toml
+    local name=$(get_toml_value "$world_toml" "name" "Unknown Game")
+    local description=$(get_toml_value "$world_toml" "description" "")
+    local max_players=$(get_toml_value "$world_toml" "max_players" "8")
+    local game_type=$(get_toml_value "$world_toml" "game_type" "lua")
+
+    # Read script files
+    local script=$(cat "$game_dir/game.lua")
+    local skill=$(cat "$game_dir/SKILL.md" 2>/dev/null || echo "")
+
+    echo "Seeding: $name (max_players=$max_players)"
+
+    # Insert into database
+    psql -d clawblox \
+        -v id="$game_id" \
+        -v name="$name" \
+        -v description="$description" \
+        -v game_type="$game_type" \
+        -v max_players="$max_players" \
+        -v script="$script" \
+        -v skill="$skill" \
+        <<'EOF'
+INSERT INTO games (id, name, description, game_type, status, max_players, script_code, skill_md)
+VALUES (
+    :'id',
+    :'name',
+    :'description',
+    :'game_type',
+    'waiting',
+    :max_players,
+    :'script',
+    :'skill'
+);
+EOF
+}
 
 # Delete existing seeded games
+echo "Deleting existing seeded games..."
 psql -d clawblox -c "
 DELETE FROM games WHERE id IN (
     '$ARSENAL_ID',
@@ -31,46 +84,9 @@ DELETE FROM games WHERE id IN (
 );
 "
 
-# Insert Block Arsenal game using psql variable binding (handles escaping)
-psql -d clawblox -v script="$ARSENAL_SCRIPT" -v skill="$ARSENAL_SKILL" -v id="$ARSENAL_ID" <<'EOF'
-INSERT INTO games (id, name, description, game_type, status, script_code, skill_md)
-VALUES (
-    :'id',
-    'Block Arsenal',
-    'Gun Game / Arms Race - Progress through 15 weapons by getting kills. First to kill with the Golden Knife wins!',
-    'lua',
-    'waiting',
-    :'script',
-    :'skill'
-);
-EOF
-
-# Insert Tsunami Brainrot game
-psql -d clawblox -v script="$TSUNAMI_SCRIPT" -v skill="$TSUNAMI_SKILL" -v id="$TSUNAMI_ID" <<'EOF'
-INSERT INTO games (id, name, description, game_type, status, script_code, skill_md)
-VALUES (
-    :'id',
-    'Escape Tsunami For Brainrots',
-    'Collect brainrots, deposit for money, buy speed upgrades..',
-    'lua',
-    'waiting',
-    :'script',
-    :'skill'
-);
-EOF
-
-# Insert Flat Test game
-psql -d clawblox -v script="$FLATTEST_SCRIPT" -v skill="$FLATTEST_SKILL" -v id="$FLATTEST_ID" <<'EOF'
-INSERT INTO games (id, name, description, game_type, status, script_code, skill_md)
-VALUES (
-    :'id',
-    'Flat Test',
-    'Simple flat terrain for movement testing. No obstacles or game mechanics.',
-    'lua',
-    'waiting',
-    :'script',
-    :'skill'
-);
-EOF
+# Seed each game
+seed_game "$PROJECT_ROOT/games/arsenal" "$ARSENAL_ID"
+seed_game "$PROJECT_ROOT/games/tsunami-brainrot" "$TSUNAMI_ID"
+seed_game "$PROJECT_ROOT/games/flat-test" "$FLATTEST_ID"
 
 echo "Games seeded successfully!"
