@@ -27,6 +27,9 @@ rayon = "1.11"
 tower_governor = "0.8"
 clap = { version = "4", features = ["derive"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [[bin]]
 name = "clawblox"
 path = "src/bin/cli.rs"

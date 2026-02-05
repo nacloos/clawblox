@@ -16,13 +16,16 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tokio::time::interval;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
+
+#[cfg(unix)]
+use libc;
 
 use clawblox::config::WorldConfig;
 use clawblox::game::{
@@ -362,10 +365,129 @@ clawblox run --port 9000
 }
 
 // =============================================================================
+// PID File Management
+// =============================================================================
+
+fn pid_dir() -> PathBuf {
+    let home = home::home_dir().expect("Failed to get home directory");
+    home.join(".local/share/clawblox/run")
+}
+
+fn pid_path(port: u16) -> PathBuf {
+    pid_dir().join(format!("port-{}.pid", port))
+}
+
+fn read_pid_file(path: &Path) -> Option<u32> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+}
+
+fn write_pid_file(path: &Path) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, std::process::id().to_string());
+}
+
+fn delete_pid_file(path: &Path) {
+    let _ = std::fs::remove_file(path);
+}
+
+#[cfg(unix)]
+fn is_process_alive(pid: u32) -> bool {
+    // signal 0 checks if process exists without sending a signal
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+#[cfg(windows)]
+fn is_process_alive(pid: u32) -> bool {
+    std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+        .output()
+        .map(|o| {
+            let out = String::from_utf8_lossy(&o.stdout);
+            out.contains(&pid.to_string())
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn kill_process(pid: u32) {
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+    }
+}
+
+#[cfg(windows)]
+fn kill_process(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .output();
+}
+
+/// If a previous clawblox process is running on this port, kill it and wait for it to exit.
+fn kill_previous_instance(port: u16) {
+    let path = pid_path(port);
+    if let Some(old_pid) = read_pid_file(&path) {
+        if is_process_alive(old_pid) {
+            eprintln!(
+                "Stopping previous clawblox instance (PID {}) on port {}...",
+                old_pid, port
+            );
+            kill_process(old_pid);
+            // Wait up to 2 seconds for the process to exit
+            for _ in 0..20 {
+                if !is_process_alive(old_pid) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            if is_process_alive(old_pid) {
+                eprintln!(
+                    "Warning: Previous process (PID {}) did not exit in time",
+                    old_pid
+                );
+            }
+        }
+        // Remove stale PID file
+        delete_pid_file(&path);
+    }
+}
+
+/// Wait for SIGINT (Ctrl+C) or SIGTERM (Unix only).
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+}
+
+// =============================================================================
 // Run Command
 // =============================================================================
 
 fn run_game(path: PathBuf, port: u16) {
+    // Kill any previous clawblox instance on this port
+    kill_previous_instance(port);
+
     let path = std::fs::canonicalize(&path).unwrap_or_else(|_| {
         eprintln!("Error: Path '{}' does not exist", path.display());
         std::process::exit(1);
@@ -390,6 +512,10 @@ fn run_game(path: PathBuf, port: u16) {
         .skill
         .as_ref()
         .and_then(|skill_file| std::fs::read_to_string(path.join(skill_file)).ok());
+
+    // Write PID file for this port
+    let pid_file = pid_path(port);
+    write_pid_file(&pid_file);
 
     println!("Starting {} (max {} players)", config.name, config.max_players);
     println!("Script: {}", config.scripts.main);
@@ -448,8 +574,31 @@ fn run_game(path: PathBuf, port: u16) {
         println!("  GET  /observe      - Player observation (requires X-Session header)");
         println!("  GET  /skill.md     - Game skill definition");
 
-        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-        axum::serve(listener, app).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap_or_else(|e| {
+            // PID file was already cleaned, port is in use by something else
+            delete_pid_file(&pid_file);
+            eprintln!(
+                "Error: Port {} is already in use. Try --port <PORT>",
+                port
+            );
+            eprintln!("Details: {}", e);
+            std::process::exit(1);
+        });
+
+        let pid_file_clone = pid_file.clone();
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                shutdown_signal().await;
+                eprintln!("\nShutting down...");
+                delete_pid_file(&pid_file_clone);
+            })
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("Server error: {}", e);
+            });
+
+        // Also clean up here in case shutdown_signal didn't fire
+        delete_pid_file(&pid_file);
     });
 }
 

@@ -329,6 +329,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "home",
+ "libc",
  "mlua",
  "nalgebra",
  "parking_lot",
