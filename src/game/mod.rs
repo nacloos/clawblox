@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use async_bridge::AsyncBridge;
-use instance::{ErrorMode, GameAction, GameInstance, GameStatus, MapInfo, PlayerObservation, SpectatorObservation};
+use instance::{ErrorMode, GameInstance, GameStatus, MapInfo, PlayerObservation, SpectatorObservation};
 
 /// Handle to the game manager state
 pub type GameManagerHandle = Arc<GameManagerState>;
@@ -337,31 +337,8 @@ pub fn leave_game(
 }
 
 // =============================================================================
-// Actions & Input
+// Input
 // =============================================================================
-
-pub fn queue_action(
-    state: &GameManagerHandle,
-    game_id: Uuid,
-    agent_id: Uuid,
-    action: GameAction,
-) -> Result<(), String> {
-    let instance_id = get_player_instance(state, agent_id, game_id)
-        .ok_or_else(|| "Not in any instance of this game".to_string())?;
-
-    let instance_handle = state
-        .instances
-        .get(&instance_id)
-        .ok_or_else(|| "Instance not found".to_string())?;
-
-    let instance = instance_handle.read();
-    if !instance.players.contains_key(&agent_id) {
-        return Err("Not in instance".to_string());
-    }
-
-    instance.queue_action(agent_id, action);
-    Ok(())
-}
 
 pub fn queue_input(
     state: &GameManagerHandle,

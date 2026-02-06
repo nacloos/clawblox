@@ -1,4 +1,3 @@
-use crossbeam_channel::{Receiver, Sender};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -54,8 +53,6 @@ pub struct GameInstance {
     pub player_names: HashMap<Uuid, String>, // agent_id -> player name
     observation_log_counts: Mutex<HashMap<Uuid, u8>>,
     humanoid_warn_counts: Mutex<HashMap<Uuid, u8>>,
-    pub action_receiver: Receiver<QueuedAction>,
-    pub action_sender: Sender<QueuedAction>,
     pub status: GameStatus,
     /// Time when the game instance was created (for server_time_ms calculation)
     start_time: Instant,
@@ -92,22 +89,6 @@ pub enum ErrorMode {
     Halt,
 }
 
-/// An action queued by a player
-#[derive(Debug, Clone)]
-pub struct QueuedAction {
-    pub agent_id: Uuid,
-    pub action: GameAction,
-}
-
-/// Available actions players can take
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum GameAction {
-    Goto { position: [f32; 3] },
-    Shoot { position: [f32; 3] },
-    Interact { target_id: u32 },
-    Wait,
-}
 
 impl GameInstance {
     /// Derive a stable numeric user_id from an agent UUID (fits Lua safe integer range < 2^53).
@@ -142,7 +123,6 @@ impl GameInstance {
         async_bridge: Option<Arc<AsyncBridge>>,
         error_mode: ErrorMode,
     ) -> Self {
-        let (action_sender, action_receiver) = crossbeam_channel::unbounded();
         let instance_id = Uuid::new_v4();
 
         Self {
@@ -156,8 +136,6 @@ impl GameInstance {
             player_names: HashMap::new(),
             observation_log_counts: Mutex::new(HashMap::new()),
             humanoid_warn_counts: Mutex::new(HashMap::new()),
-            action_receiver,
-            action_sender,
             status: GameStatus::Playing,
             start_time: Instant::now(),
             async_bridge,
@@ -328,11 +306,6 @@ impl GameInstance {
         }
     }
 
-    /// Queues an action for processing in the next tick
-    pub fn queue_action(&self, agent_id: Uuid, action: GameAction) {
-        let _ = self.action_sender.send(QueuedAction { agent_id, action });
-    }
-
     /// Queues an agent input for the AgentInputService in Lua
     pub fn queue_agent_input(&self, user_id: u64, input_type: String, data: serde_json::Value) {
         if let Some(runtime) = &self.lua_runtime {
@@ -356,11 +329,6 @@ impl GameInstance {
         // Check for AFK players periodically (every second)
         if self.tick % AFK_CHECK_INTERVAL_TICKS == 0 {
             self.check_afk_players();
-        }
-
-        // Process queued actions
-        while let Ok(queued) = self.action_receiver.try_recv() {
-            self.process_action(queued);
         }
 
         // Sync Lua workspace gravity to physics
@@ -797,30 +765,7 @@ impl GameInstance {
         }
     }
 
-    /// Processes a queued action from a player
-    fn process_action(&mut self, queued: QueuedAction) {
-        let Some(&_user_id) = self.players.get(&queued.agent_id) else {
-            return;
-        };
 
-        // Update activity timestamp for AFK tracking
-        self.player_last_activity.insert(queued.agent_id, Instant::now());
-
-        match queued.action {
-            GameAction::Goto { position } => {
-                if let Some(&hrp_id) = self.player_hrp_ids.get(&queued.agent_id) {
-                    self.physics.set_character_target(hrp_id, Some(position));
-                }
-            }
-            GameAction::Shoot { position: _ } => {
-                // TODO: Implement shooting via Lua
-            }
-            GameAction::Interact { target_id: _ } => {
-                // TODO: Implement interaction via Lua
-            }
-            GameAction::Wait => {}
-        }
-    }
 
     /// Updates character controller movement towards targets.
     /// Uses Rapier's kinematic character controller for full 3D translation.
@@ -1731,8 +1676,8 @@ mod tests {
         let initial_pos = instance.physics.get_character_position(hrp_id).unwrap();
         println!("Initial player position: {:?}", initial_pos);
 
-        // Queue a Goto action
-        instance.queue_action(agent_id, GameAction::Goto { position: [10.0, 5.0, 10.0] });
+        // Set movement target directly via physics
+        instance.physics.set_character_target(hrp_id, Some([10.0, 5.0, 10.0]));
 
         // Run 120 ticks (2 seconds at 60 Hz)
         for _ in 0..120 {
@@ -2233,10 +2178,10 @@ mod tests {
         // Sleep almost to timeout
         std::thread::sleep(Duration::from_millis(150));
 
-        // Queue an action to reset activity timer (before timeout)
-        instance.queue_action(agent_id, GameAction::Goto { position: [5.0, 0.0, 5.0] });
+        // Record activity to reset AFK timer (before timeout)
+        instance.record_player_activity(agent_id);
 
-        // Process the action immediately (this resets the AFK timer)
+        // Process a tick
         instance.tick();
 
         // Sleep less than the full timeout again
@@ -2294,9 +2239,9 @@ mod tests {
         assert!(default_speed.is_some(), "Should be able to get humanoid walk speed");
         assert_eq!(default_speed.unwrap(), 16.0, "Default walk speed should be 16.0");
 
-        // Get initial position and queue movement
+        // Get initial position and set movement target
         let initial_pos = instance.physics.get_character_position(hrp_id).unwrap();
-        instance.queue_action(agent_id, GameAction::Goto { position: [50.0, initial_pos[1], 0.0] });
+        instance.physics.set_character_target(hrp_id, Some([50.0, initial_pos[1], 0.0]));
 
         // Run 60 ticks (1 second at default speed)
         for _ in 0..60 {
@@ -2320,7 +2265,7 @@ mod tests {
 
         // Reset position and move again
         let start_pos = instance.physics.get_character_position(hrp_id).unwrap();
-        instance.queue_action(agent_id, GameAction::Goto { position: [start_pos[0] + 50.0, start_pos[1], start_pos[2]] });
+        instance.physics.set_character_target(hrp_id, Some([start_pos[0] + 50.0, start_pos[1], start_pos[2]]));
 
         // Run another 60 ticks (1 second at double speed)
         for _ in 0..60 {

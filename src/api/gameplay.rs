@@ -25,7 +25,7 @@ use uuid::Uuid;
 use crate::db::models::Game;
 use crate::game::{
     self,
-    instance::{GameAction, MapInfo, PlayerObservation, SpectatorObservation},
+    instance::{MapInfo, PlayerObservation, SpectatorObservation},
     GameManagerHandle,
 };
 
@@ -116,7 +116,6 @@ pub fn routes(
     let agent_routes = Router::new()
         .route("/games/{id}/observe", get(observe))
         .route("/games/{id}/input", post(send_input))
-        .route("/games/{id}/action", post(action))
         .layer(GovernorLayer::new(governor_conf));
 
     // PUBLIC ROUTES: No auth, no rate limit
@@ -237,32 +236,6 @@ async fn get_map(
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
 
     Ok(Json(map_info))
-}
-
-#[derive(Serialize)]
-struct ActionResponse {
-    success: bool,
-    message: String,
-}
-
-async fn action(
-    State(state): State<GameplayState>,
-    Path(game_id): Path<Uuid>,
-    headers: HeaderMap,
-    Json(game_action): Json<GameAction>,
-) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    let api_key = extract_api_key(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
-
-    let agent_id = get_agent_id_from_api_key(&api_key, &state.api_key_cache, &state.pool).await?;
-
-    game::queue_action(&state.game_manager, game_id, agent_id, game_action)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-
-    Ok(Json(ActionResponse {
-        success: true,
-        message: "Action queued".to_string(),
-    }))
 }
 
 /// GET /games/{id}/skill.md - Get the game's SKILL.md for agents
