@@ -51,7 +51,7 @@ struct Cli {
 enum Commands {
     /// Initialize a new game project
     Init {
-        /// Name for the new project (creates directory)
+        /// Name for the new project (creates subdirectory). Omit to init in current directory.
         name: Option<String>,
     },
     /// Run a game locally without database
@@ -65,6 +65,29 @@ enum Commands {
         /// Run as daemon (internal use only)
         #[arg(long, hide = true)]
         daemon: bool,
+    },
+    /// Log in or register an account on clawblox.com
+    Login {
+        /// Your name (registers a new account)
+        name: Option<String>,
+        /// Use an existing API key instead of registering
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Server URL
+        #[arg(long, default_value = "https://clawblox.com")]
+        server: String,
+    },
+    /// Deploy a game to clawblox.com
+    Deploy {
+        /// Path to game directory
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// API key (overrides stored credentials)
+        #[arg(long, env = "CLAWBLOX_API_KEY")]
+        api_key: Option<String>,
+        /// Server URL (overrides stored credentials)
+        #[arg(long)]
+        server: Option<String>,
     },
     /// Install clawblox to system PATH
     Install {
@@ -80,6 +103,16 @@ fn main() {
     match cli.command {
         Commands::Init { name } => init_project(name),
         Commands::Run { path, port, daemon } => run_game(path, port, daemon),
+        Commands::Login {
+            name,
+            api_key,
+            server,
+        } => login(name, api_key, server),
+        Commands::Deploy {
+            path,
+            api_key,
+            server,
+        } => deploy_game(path, api_key, server),
         Commands::Install { target: _ } => install_cli(),
     }
 }
@@ -182,13 +215,29 @@ fn write_embedded_dir(dir: &Dir, target: &Path) {
 }
 
 fn init_project(name: Option<String>) {
-    let project_name = name.unwrap_or_else(|| "my-game".to_string());
-    let project_dir = PathBuf::from(&project_name);
-
-    if project_dir.exists() {
-        eprintln!("Error: Directory '{}' already exists", project_name);
-        std::process::exit(1);
-    }
+    let (project_name, project_dir) = match name {
+        Some(n) => {
+            let dir = PathBuf::from(&n);
+            if dir.exists() {
+                eprintln!("Error: Directory '{}' already exists", n);
+                std::process::exit(1);
+            }
+            (n, dir)
+        }
+        None => {
+            let cwd = std::env::current_dir().expect("Failed to get current directory");
+            let dir_name = cwd
+                .file_name()
+                .expect("Failed to get directory name")
+                .to_string_lossy()
+                .to_string();
+            if cwd.join("world.toml").exists() {
+                eprintln!("Error: world.toml already exists in current directory");
+                std::process::exit(1);
+            }
+            (dir_name, cwd)
+        }
+    };
 
     std::fs::create_dir_all(&project_dir).expect("Failed to create project directory");
 
@@ -348,10 +397,262 @@ Move to a position on the map.
     std::fs::create_dir_all(project_dir.join("static/models"))
         .expect("Failed to create static/models directory");
 
+    // Create .gitignore
+    let gitignore = ".clawblox/\n.clawblox.log\n";
+    let gitignore_path = project_dir.join(".gitignore");
+    if !gitignore_path.exists() {
+        std::fs::write(&gitignore_path, gitignore).expect("Failed to create .gitignore");
+    }
+
     println!("Created new game project: {}", project_name);
     println!();
-    println!("  cd {}", project_name);
+    if project_dir != std::env::current_dir().unwrap_or_default() {
+        println!("  cd {}", project_name);
+    }
     println!("  clawblox run");
+}
+
+// =============================================================================
+// Credentials
+// =============================================================================
+
+#[derive(Serialize, Deserialize)]
+struct Credentials {
+    api_key: String,
+    server: String,
+}
+
+fn credentials_path() -> PathBuf {
+    let home = home::home_dir().expect("Failed to get home directory");
+    home.join(".clawblox/credentials.toml")
+}
+
+fn load_credentials() -> Option<Credentials> {
+    let path = credentials_path();
+    let content = std::fs::read_to_string(&path).ok()?;
+    toml::from_str(&content).ok()
+}
+
+fn save_credentials(creds: &Credentials) {
+    let path = credentials_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("Failed to create ~/.clawblox directory");
+    }
+    let content = toml::to_string_pretty(creds).expect("Failed to serialize credentials");
+    std::fs::write(&path, content).expect("Failed to write credentials file");
+}
+
+// =============================================================================
+// Login Command
+// =============================================================================
+
+fn login(name: Option<String>, api_key: Option<String>, server: String) {
+    if let Some(key) = api_key {
+        save_credentials(&Credentials {
+            api_key: key,
+            server: server.clone(),
+        });
+        println!("API key saved to {}", credentials_path().display());
+        return;
+    }
+
+    let name = name.unwrap_or_else(|| {
+        eprintln!("Error: Provide a name to register, or use --api-key to store an existing key");
+        eprintln!("  clawblox login my-name");
+        eprintln!("  clawblox login --api-key clawblox_xxx");
+        std::process::exit(1);
+    });
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let client = reqwest::Client::new();
+        let url = format!("{}/api/v1/agents/register", server);
+
+        let resp = client
+            .post(&url)
+            .json(&serde_json::json!({
+                "name": name,
+                "description": format!("{}'s game developer account", name),
+            }))
+            .send()
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("Error connecting to {}: {}", server, e);
+                std::process::exit(1);
+            });
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            eprintln!("Registration failed ({}): {}", status, body);
+            std::process::exit(1);
+        }
+
+        let body: serde_json::Value = resp.json().await.unwrap_or_else(|e| {
+            eprintln!("Error parsing response: {}", e);
+            std::process::exit(1);
+        });
+
+        let key = body["agent"]["api_key"]
+            .as_str()
+            .expect("Missing api_key in response");
+        let claim_url = body["agent"]["claim_url"]
+            .as_str()
+            .expect("Missing claim_url in response");
+
+        save_credentials(&Credentials {
+            api_key: key.to_string(),
+            server: server.clone(),
+        });
+
+        println!("Registered as: {}", name);
+        println!("API key saved to {}", credentials_path().display());
+        println!();
+        println!("Claim your account: {}", claim_url);
+        if let Some(code) = body["agent"]["verification_code"].as_str() {
+            println!("Verification code: {}", code);
+        }
+    });
+}
+
+// =============================================================================
+// Deploy Command
+// =============================================================================
+
+fn deploy_game(path: PathBuf, api_key_override: Option<String>, server_override: Option<String>) {
+    let path = std::fs::canonicalize(&path).unwrap_or_else(|_| {
+        eprintln!("Error: Path '{}' does not exist", path.display());
+        std::process::exit(1);
+    });
+
+    // Resolve credentials: flag > env > stored
+    let stored = load_credentials();
+    let api_key = api_key_override
+        .or_else(|| stored.as_ref().map(|c| c.api_key.clone()))
+        .unwrap_or_else(|| {
+            eprintln!("Error: No API key found. Run `clawblox login` first, or pass --api-key");
+            std::process::exit(1);
+        });
+    let server = server_override
+        .or_else(|| stored.as_ref().map(|c| c.server.clone()))
+        .unwrap_or_else(|| "https://clawblox.com".to_string());
+
+    // Load world config
+    let config = WorldConfig::from_game_dir(&path).unwrap_or_else(|e| {
+        eprintln!("Error loading world.toml: {}", e);
+        std::process::exit(1);
+    });
+
+    // Read Lua script
+    let script_path = path.join(&config.scripts.main);
+    let script_code = std::fs::read_to_string(&script_path).unwrap_or_else(|e| {
+        eprintln!("Error reading {}: {}", script_path.display(), e);
+        std::process::exit(1);
+    });
+
+    // Read SKILL.md if configured
+    let skill_md = config
+        .scripts
+        .skill
+        .as_ref()
+        .and_then(|skill_file| {
+            let p = path.join(skill_file);
+            match std::fs::read_to_string(&p) {
+                Ok(content) => Some(content),
+                Err(e) => {
+                    eprintln!("Warning: Could not read {}: {}", p.display(), e);
+                    None
+                }
+            }
+        });
+
+    // Check for existing game_id
+    let game_id_path = path.join(".clawblox/game_id");
+    let existing_game_id = std::fs::read_to_string(&game_id_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<Uuid>().ok());
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let client = reqwest::Client::new();
+
+        let game_id = if let Some(id) = existing_game_id {
+            // Update existing game
+            println!("Updating game {}...", id);
+            let url = format!("{}/api/v1/games/{}", server, id);
+            let resp = client
+                .put(&url)
+                .header("Authorization", format!("Bearer {}", api_key))
+                .json(&serde_json::json!({
+                    "name": config.name,
+                    "description": config.description,
+                    "game_type": config.game_type,
+                    "script_code": script_code,
+                    "skill_md": skill_md,
+                    "max_players": config.max_players as i32,
+                }))
+                .send()
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error connecting to {}: {}", server, e);
+                    std::process::exit(1);
+                });
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                eprintln!("Update failed ({}): {}", status, body);
+                std::process::exit(1);
+            }
+
+            id
+        } else {
+            // Create new game
+            println!("Creating new game...");
+            let url = format!("{}/api/v1/games", server);
+            let resp = client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", api_key))
+                .json(&serde_json::json!({
+                    "name": config.name,
+                    "description": config.description.unwrap_or_default(),
+                    "game_type": config.game_type,
+                    "script_code": script_code,
+                    "skill_md": skill_md,
+                    "max_players": config.max_players as i32,
+                }))
+                .send()
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error connecting to {}: {}", server, e);
+                    std::process::exit(1);
+                });
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                eprintln!("Deploy failed ({}): {}", status, body);
+                std::process::exit(1);
+            }
+
+            let body: serde_json::Value = resp.json().await.unwrap_or_else(|e| {
+                eprintln!("Error parsing response: {}", e);
+                std::process::exit(1);
+            });
+
+            let id_str = body["game_id"]
+                .as_str()
+                .expect("Missing game_id in response");
+            id_str.parse::<Uuid>().expect("Invalid game_id in response")
+        };
+
+        // Save game_id for future deploys
+        let clawblox_dir = path.join(".clawblox");
+        std::fs::create_dir_all(&clawblox_dir).expect("Failed to create .clawblox directory");
+        std::fs::write(game_id_path, game_id.to_string()).expect("Failed to save game_id");
+
+        println!("Game deployed: {}/game/{}", server, game_id);
+    });
 }
 
 // =============================================================================

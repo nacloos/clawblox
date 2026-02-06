@@ -26,7 +26,8 @@ flate2 = "1.1"
 include_dir = "0.7"
 rayon = "1.11"
 tower_governor = "0.8"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
