@@ -10,6 +10,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y pkg-config libssl-dev g++ && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY docs ./docs
 RUN cargo build --release
 
 FROM debian:bookworm-slim
