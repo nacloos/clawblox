@@ -393,9 +393,9 @@ Move to a position on the map.
     // Copy engine docs into project
     write_embedded_dir(&DOCS_DIR, &project_dir.join("docs"));
 
-    // Create static/models/ directory for GLB files
-    std::fs::create_dir_all(project_dir.join("static/models"))
-        .expect("Failed to create static/models directory");
+    // Create assets/ directory for game assets (GLB models, images, audio)
+    std::fs::create_dir_all(project_dir.join("assets"))
+        .expect("Failed to create assets directory");
 
     // Create .gitignore
     let gitignore = ".clawblox/\n.clawblox.log\n";
@@ -651,6 +651,57 @@ fn deploy_game(path: PathBuf, api_key_override: Option<String>, server_override:
         std::fs::create_dir_all(&clawblox_dir).expect("Failed to create .clawblox directory");
         std::fs::write(game_id_path, game_id.to_string()).expect("Failed to save game_id");
 
+        // Upload assets if assets/ directory exists and has files
+        let assets_dir = path.join("assets");
+        if assets_dir.is_dir() {
+            let entries: Vec<_> = std::fs::read_dir(&assets_dir)
+                .map(|rd| rd.filter_map(|e| e.ok()).collect())
+                .unwrap_or_default();
+
+            if !entries.is_empty() {
+                println!("Uploading assets...");
+
+                let enc = GzEncoder::new(Vec::new(), Compression::default());
+                let mut tar_builder = tar::Builder::new(enc);
+                tar_builder.append_dir_all(".", &assets_dir).unwrap_or_else(|e| {
+                    eprintln!("Error creating asset archive: {}", e);
+                    std::process::exit(1);
+                });
+                let enc = tar_builder.into_inner().unwrap_or_else(|e| {
+                    eprintln!("Error finalizing tar: {}", e);
+                    std::process::exit(1);
+                });
+                let targz_bytes = enc.finish().unwrap_or_else(|e| {
+                    eprintln!("Error finalizing gzip: {}", e);
+                    std::process::exit(1);
+                });
+
+                let url = format!("{}/api/v1/games/{}/assets", server, game_id);
+                let resp = client
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {}", api_key))
+                    .header("Content-Type", "application/gzip")
+                    .body(targz_bytes)
+                    .send()
+                    .await
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error uploading assets: {}", e);
+                        std::process::exit(1);
+                    });
+
+                if resp.status().is_success() {
+                    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                    let count = body["uploaded"].as_u64().unwrap_or(0);
+                    let version = body["version"].as_i64().unwrap_or(0);
+                    println!("Uploaded {} asset(s) (v{})", count, version);
+                } else {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    eprintln!("Warning: Asset upload failed ({}): {}", status, body);
+                }
+            }
+        }
+
         println!("Game deployed: {}/game/{}", server, game_id);
     });
 }
@@ -883,6 +934,7 @@ fn run_game(path: PathBuf, port: u16, daemon: bool) {
             .route("/input", post(local_input))
             .route("/observe", get(local_observe))
             .route("/skill.md", get(local_skill))
+            .nest_service("/assets", ServeDir::new(path.join("assets")))
             .nest_service("/static", ServeDir::new(path.join("static")))
             .with_state(state)
             .layer(cors);
@@ -1066,6 +1118,17 @@ async fn local_observe(
     Ok(Json(observation))
 }
 
+/// Resolve asset:// URLs to local /assets/ paths for local development.
+fn resolve_local_assets(obs: &mut SpectatorObservation) {
+    for entity in &mut obs.entities {
+        if let Some(ref mut url) = entity.model_url {
+            if let Some(path) = url.strip_prefix("asset://") {
+                *url = format!("/assets/{}", path);
+            }
+        }
+    }
+}
+
 async fn local_spectate(
     State(state): State<LocalState>,
 ) -> Result<Json<SpectatorObservation>, (axum::http::StatusCode, String)> {
@@ -1073,9 +1136,11 @@ async fn local_spectate(
         return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
     }
 
-    let observation =
+    let mut observation =
         game::get_spectator_observation_for_instance(&state.game_handle, state.instance_id)
             .map_err(|e| (axum::http::StatusCode::NOT_FOUND, e))?;
+
+    resolve_local_assets(&mut observation);
 
     Ok(Json(observation))
 }
@@ -1139,6 +1204,9 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState) {
 
                 match observation {
                     Ok(obs) => {
+                        let mut obs = obs;
+                        resolve_local_assets(&mut obs);
+
                         if obs.tick != last_tick {
                             last_tick = obs.tick;
                             same_tick_count = 0;

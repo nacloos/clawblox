@@ -53,8 +53,8 @@ function toColor(colorArray?: [number, number, number]): string {
 function sanitizeModelUrl(url?: string): string | null {
   if (!url) return null
   const trimmed = url.trim()
-  if (!trimmed.startsWith('/static/')) return null
-  return trimmed
+  if (trimmed.startsWith('/static/') || trimmed.startsWith('/assets/') || trimmed.startsWith('https://')) return trimmed
+  return null
 }
 
 // Convert Roblox rotation matrix to Three.js Quaternion

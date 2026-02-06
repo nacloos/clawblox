@@ -33,6 +33,8 @@ pub struct Game {
     pub published_at: Option<DateTime<Utc>>,
     pub plays: i32,
     pub likes: i32,
+    pub has_assets: bool,
+    pub asset_version: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

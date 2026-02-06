@@ -65,6 +65,7 @@ pub struct GameplayState {
     pub pool: PgPool,
     pub game_manager: GameManagerHandle,
     pub api_key_cache: ApiKeyCache,
+    pub r2_public_url: Option<String>,
 }
 
 /// Gets agent_id from API key, checking cache first, then DB (and caching result)
@@ -92,8 +93,13 @@ async fn get_agent_id_from_api_key(
     Ok(agent.0)
 }
 
-pub fn routes(pool: PgPool, game_manager: GameManagerHandle, api_key_cache: ApiKeyCache) -> Router {
-    let state = GameplayState { pool, game_manager, api_key_cache };
+pub fn routes(
+    pool: PgPool,
+    game_manager: GameManagerHandle,
+    api_key_cache: ApiKeyCache,
+    r2_public_url: Option<String>,
+) -> Router {
+    let state = GameplayState { pool, game_manager, api_key_cache, r2_public_url };
 
     // Rate limit: 10 requests/second per agent, burst of 20
     // per_millisecond(100) = 1 token every 100ms = 10 tokens/second
@@ -145,6 +151,31 @@ async fn observe(
     Ok(Json(observation))
 }
 
+/// Resolve asset:// URLs in a SpectatorObservation to actual CDN URLs.
+/// - Production: asset://path -> {r2_public_url}/games/{game_id}/v{version}/path
+/// - /static/ and https:// URLs pass through unchanged
+fn resolve_observation_assets(
+    obs: &mut SpectatorObservation,
+    r2_public_url: &str,
+    game_id: Uuid,
+    asset_version: i32,
+) {
+    for entity in &mut obs.entities {
+        if let Some(ref mut url) = entity.model_url {
+            if let Some(path) = url.strip_prefix("asset://") {
+                *url = format!(
+                    "{}/games/{}/v{}/{}",
+                    r2_public_url.trim_end_matches('/'),
+                    game_id,
+                    asset_version,
+                    path
+                );
+            }
+            // /static/ and https:// pass through unchanged
+        }
+    }
+}
+
 async fn spectate(
     State(state): State<GameplayState>,
     Path(game_id): Path<Uuid>,
@@ -167,8 +198,14 @@ async fn spectate(
         );
     }
 
-    let observation = game::get_spectator_observation(&state.game_manager, game_id)
+    let mut observation = game::get_spectator_observation(&state.game_manager, game_id)
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
+
+    if db_game.has_assets {
+        if let Some(ref r2_url) = state.r2_public_url {
+            resolve_observation_assets(&mut observation, r2_url, game_id, db_game.asset_version);
+        }
+    }
 
     Ok(Json(observation))
 }
@@ -411,6 +448,16 @@ async fn handle_spectate_ws(socket: WebSocket, state: GameplayState, game_id: Uu
         );
     }
 
+    // Capture asset info for URL resolution
+    let asset_info = if db_game.has_assets {
+        state
+            .r2_public_url
+            .as_ref()
+            .map(|url| (url.clone(), db_game.asset_version))
+    } else {
+        None
+    };
+
     // Send updates at ~30 fps (every 33ms)
     let mut tick_interval = interval(Duration::from_millis(33));
     let mut last_tick: u64 = 0;
@@ -437,6 +484,11 @@ async fn handle_spectate_ws(socket: WebSocket, state: GameplayState, game_id: Uu
 
                 match observation {
                     Ok(obs) => {
+                        let mut obs = obs;
+                        if let Some((ref r2_url, version)) = asset_info {
+                            resolve_observation_assets(&mut obs, r2_url, game_id, version);
+                        }
+
                         if obs.tick != last_tick {
                             // New tick - send immediately
                             last_tick = obs.tick;

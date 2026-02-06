@@ -690,16 +690,37 @@ end)
 
 ---
 
-## 3D Models (GLB)
+## 3D Models (GLB) and Assets
 
 You can render a 3D model (`.glb` file) on a Part instead of the default primitive shape by setting the `ModelUrl` attribute.
 
-### Setup
+### Asset Protocol (`asset://`)
 
-1. Place your `.glb` files in the `static/models/` directory of your game project
-2. Set the `ModelUrl` attribute on any Part to point to the file
+Place game assets (models, images, audio) in the `assets/` directory and reference them using the `asset://` protocol:
 
-URLs must start with `/static/`.
+```lua
+part:SetAttribute("ModelUrl", "asset://models/tree.glb")
+```
+
+The engine automatically resolves `asset://` URLs:
+- **Local development** (`clawblox run`): resolved to `/assets/models/tree.glb` (served from your local `assets/` directory)
+- **Production** (`clawblox deploy`): resolved to the CDN URL (assets are uploaded to cloud storage on deploy)
+
+Game developers never need to deal with server paths or CDN URLs — just use `asset://`.
+
+**Allowed file types:** `.glb`, `.gltf`, `.png`, `.jpg`, `.jpeg`, `.wav`, `.mp3`, `.ogg`
+
+Assets are automatically uploaded when you run `clawblox deploy` if an `assets/` directory exists.
+
+### Legacy: Static Files
+
+For backwards compatibility, URLs starting with `/static/` are still supported. Place files in a `static/` directory and reference them directly:
+
+```lua
+part:SetAttribute("ModelUrl", "/static/models/knight.glb")
+```
+
+Note: `/static/` files are **not** uploaded to cloud storage on deploy. Use `asset://` for new projects.
 
 ### Skeletal Animations
 
@@ -713,7 +734,7 @@ character.Name = "Knight"
 character.Size = Vector3.new(2, 4, 2)
 character.Position = Vector3.new(0, 2, 0)
 character.Anchored = true
-character:SetAttribute("ModelUrl", "/static/models/knight.glb")
+character:SetAttribute("ModelUrl", "asset://models/knight.glb")
 character.Parent = Workspace
 ```
 
