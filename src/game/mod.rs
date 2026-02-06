@@ -138,16 +138,6 @@ impl GameManager {
                     }
                 });
 
-            // In Halt mode, exit the process if any instance halted
-            if self.state.error_mode == ErrorMode::Halt {
-                for (_, handle) in &instances {
-                    let instance = handle.read();
-                    if instance.halted_error.is_some() {
-                        std::process::exit(1);
-                    }
-                }
-            }
-
             // Periodic cleanup
             tick_counter += 1;
             if tick_counter % CLEANUP_INTERVAL_TICKS == 0 && !self.state.disable_gc {
@@ -287,6 +277,10 @@ pub fn join_instance(
 
     let mut instance = instance_handle.write();
 
+    if let Some(ref err) = instance.halted_error {
+        return Err(format!("Game halted: {}", err));
+    }
+
     if !instance.has_capacity() {
         return Err("Instance is full".to_string());
     }
@@ -385,6 +379,11 @@ pub fn queue_input(
         .ok_or_else(|| "Instance not found".to_string())?;
 
     let mut instance = instance_handle.write();
+
+    if let Some(ref err) = instance.halted_error {
+        return Err(format!("Game halted: {}", err));
+    }
+
     let user_id = instance
         .players
         .get(&agent_id)
