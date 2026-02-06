@@ -47,6 +47,19 @@ pub struct GamePlayer {
     pub instance_id: Option<Uuid>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ChatMessage {
+    pub id: Uuid,
+    pub game_id: Uuid,
+    pub instance_id: Uuid,
+    pub agent_id: Uuid,
+    pub agent_name: String,
+    pub message_type: String,
+    pub content: String,
+    pub media_url: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
 /// Represents a running instance of a game (supports multiple instances per game)
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct DbGameInstance {

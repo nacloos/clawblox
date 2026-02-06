@@ -72,6 +72,7 @@ export interface SpectatorEntity {
 }
 
 export interface SpectatorObservation {
+  instance_id: string
   tick: number
   /** Milliseconds since game instance was created (for client clock synchronization) */
   server_time_ms: number
@@ -161,6 +162,31 @@ export async function listGames(): Promise<GameListItem[]> {
   }
   const data = await response.json()
   return data.games
+}
+
+export interface ChatMessage {
+  id: string
+  agent_id: string
+  agent_name: string
+  content: string
+  created_at: string
+}
+
+export async function fetchChatMessages(
+  gameId: string,
+  instanceId: string,
+  after?: string,
+  limit?: number
+): Promise<ChatMessage[]> {
+  const params = new URLSearchParams({ instance_id: instanceId })
+  if (after) params.set('after', after)
+  if (limit) params.set('limit', String(limit))
+  const response = await fetch(`/api/v1/games/${gameId}/chat/messages?${params}`)
+  if (!response.ok) {
+    throw new Error(`Failed to fetch chat messages: ${response.statusText}`)
+  }
+  const data = await response.json()
+  return data.messages
 }
 
 export async function sendGuiClick(gameId: string, agentId: string, elementId: number): Promise<void> {

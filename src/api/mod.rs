@@ -1,5 +1,6 @@
 pub mod agents;
 mod assets;
+mod chat;
 mod games;
 mod gameplay;
 
@@ -33,9 +34,14 @@ pub fn routes(
         ))
         .merge(gameplay::routes(
             pool.clone(),
-            game_manager,
+            game_manager.clone(),
             api_key_cache.clone(),
             r2_public_url,
+        ))
+        .merge(chat::routes(
+            pool.clone(),
+            game_manager,
+            api_key_cache.clone(),
         ));
 
     if let Some(r2) = r2_client {

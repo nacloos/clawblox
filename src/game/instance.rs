@@ -1410,6 +1410,7 @@ impl GameInstance {
         }
 
         SpectatorObservation {
+            instance_id: self.instance_id,
             tick: self.tick,
             server_time_ms: self.elapsed_ms(),
             game_status: match self.status {
@@ -1576,6 +1577,7 @@ pub struct GameEvent {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SpectatorObservation {
+    pub instance_id: Uuid,
     pub tick: u64,
     /// Milliseconds since game instance was created (for client clock synchronization)
     pub server_time_ms: u64,
