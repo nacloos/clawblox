@@ -27,12 +27,17 @@ use uuid::Uuid;
 #[cfg(unix)]
 use libc;
 
+use include_dir::{include_dir, Dir};
+use tower_http::services::ServeDir;
+
 use clawblox::config::WorldConfig;
 use clawblox::game::{
     self, find_or_create_instance,
     instance::{ErrorMode, PlayerObservation, SpectatorObservation},
     GameManager, GameManagerHandle,
 };
+
+static DOCS_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/docs");
 
 #[derive(Parser)]
 #[command(name = "clawblox")]
@@ -57,6 +62,9 @@ enum Commands {
         /// Port to run the server on
         #[arg(short, long, default_value = "8080")]
         port: u16,
+        /// Run as daemon (internal use only)
+        #[arg(long, hide = true)]
+        daemon: bool,
     },
     /// Install clawblox to system PATH
     Install {
@@ -71,7 +79,7 @@ fn main() {
 
     match cli.command {
         Commands::Init { name } => init_project(name),
-        Commands::Run { path, port } => run_game(path, port),
+        Commands::Run { path, port, daemon } => run_game(path, port, daemon),
         Commands::Install { target: _ } => install_cli(),
     }
 }
@@ -160,6 +168,18 @@ fn install_cli() {
 // =============================================================================
 // Init Command
 // =============================================================================
+
+fn write_embedded_dir(dir: &Dir, target: &Path) {
+    std::fs::create_dir_all(target).expect("Failed to create directory");
+    for file in dir.files() {
+        let dest = target.join(file.path().file_name().unwrap());
+        std::fs::write(&dest, file.contents()).expect("Failed to write file");
+    }
+    for subdir in dir.dirs() {
+        let subdir_name = subdir.path().file_name().unwrap();
+        write_embedded_dir(subdir, &target.join(subdir_name));
+    }
+}
 
 fn init_project(name: Option<String>) {
     let project_name = name.unwrap_or_else(|| "my-game".to_string());
@@ -321,42 +341,12 @@ Move to a position on the map.
     );
     std::fs::write(project_dir.join("SKILL.md"), skill_md).expect("Failed to create SKILL.md");
 
-    // Create docs/ folder with README
-    let docs_dir = project_dir.join("docs");
-    std::fs::create_dir_all(&docs_dir).expect("Failed to create docs directory");
+    // Copy engine docs into project
+    write_embedded_dir(&DOCS_DIR, &project_dir.join("docs"));
 
-    let docs_readme = format!(
-        r#"# {} Documentation
-
-## Overview
-
-This is a Clawblox game project.
-
-## Game Mechanics
-
-Describe your game mechanics here.
-
-## API Reference
-
-### Inputs
-
-| Type | Data | Description |
-|------|------|-------------|
-| MoveTo | `{{"position": [x, y, z]}}` | Move player to position |
-
-## Development
-
-```bash
-# Run locally
-clawblox run
-
-# Run on a specific port
-clawblox run --port 9000
-```
-"#,
-        project_name
-    );
-    std::fs::write(docs_dir.join("README.md"), docs_readme).expect("Failed to create docs/README.md");
+    // Create static/models/ directory for GLB files
+    std::fs::create_dir_all(project_dir.join("static/models"))
+        .expect("Failed to create static/models directory");
 
     println!("Created new game project: {}", project_name);
     println!();
@@ -381,13 +371,6 @@ fn read_pid_file(path: &Path) -> Option<u32> {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|s| s.trim().parse().ok())
-}
-
-fn write_pid_file(path: &Path) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(path, std::process::id().to_string());
 }
 
 fn delete_pid_file(path: &Path) {
@@ -484,14 +467,55 @@ async fn shutdown_signal() {
 // Run Command
 // =============================================================================
 
-fn run_game(path: PathBuf, port: u16) {
-    // Kill any previous clawblox instance on this port
-    kill_previous_instance(port);
+fn write_pid_file_for(path: &Path, pid: u32) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, pid.to_string());
+}
 
+fn run_game(path: PathBuf, port: u16, daemon: bool) {
     let path = std::fs::canonicalize(&path).unwrap_or_else(|_| {
         eprintln!("Error: Path '{}' does not exist", path.display());
         std::process::exit(1);
     });
+
+    if !daemon {
+        // Non-daemon mode: kill old instance, spawn child daemon, return immediately
+        kill_previous_instance(port);
+
+        let log_file_path = path.join(".clawblox.log");
+        let log_file = std::fs::File::create(&log_file_path).unwrap_or_else(|e| {
+            eprintln!("Error creating log file {}: {}", log_file_path.display(), e);
+            std::process::exit(1);
+        });
+        let log_file_stderr = log_file.try_clone().unwrap_or_else(|e| {
+            eprintln!("Error cloning log file handle: {}", e);
+            std::process::exit(1);
+        });
+
+        let exe = std::env::current_exe().expect("Failed to get current executable path");
+        let child = std::process::Command::new(exe)
+            .args(["run", &path.to_string_lossy(), "--port", &port.to_string(), "--daemon"])
+            .stdout(log_file)
+            .stderr(log_file_stderr)
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .unwrap_or_else(|e| {
+                eprintln!("Error spawning daemon: {}", e);
+                std::process::exit(1);
+            });
+
+        // Write the child PID to the PID file
+        let pid_file = pid_path(port);
+        write_pid_file_for(&pid_file, child.id());
+
+        println!("Server starting on http://localhost:{}", port);
+        println!("Logs: {}", log_file_path.display());
+        return;
+    }
+
+    // Daemon mode: run the server (parent already killed old instance and wrote PID file)
 
     // Load world config
     let config = WorldConfig::from_game_dir(&path).unwrap_or_else(|e| {
@@ -513,9 +537,7 @@ fn run_game(path: PathBuf, port: u16) {
         .as_ref()
         .and_then(|skill_file| std::fs::read_to_string(path.join(skill_file)).ok());
 
-    // Write PID file for this port
     let pid_file = pid_path(port);
-    write_pid_file(&pid_file);
 
     println!("Starting {} (max {} players)", config.name, config.max_players);
     println!("Script: {}", config.scripts.main);
@@ -545,6 +567,7 @@ fn run_game(path: PathBuf, port: u16) {
             game_handle,
             skill_md,
             sessions: Arc::new(DashMap::new()),
+            log_file: path.join(".clawblox.log"),
         };
 
         let cors = CorsLayer::new()
@@ -559,6 +582,7 @@ fn run_game(path: PathBuf, port: u16) {
             .route("/input", post(local_input))
             .route("/observe", get(local_observe))
             .route("/skill.md", get(local_skill))
+            .nest_service("/static", ServeDir::new(path.join("static")))
             .with_state(state)
             .layer(cors);
 
@@ -567,15 +591,12 @@ fn run_game(path: PathBuf, port: u16) {
         println!("Server running on http://localhost:{}", port);
         println!();
         println!("Endpoints:");
-        println!("  GET  /spectate     - Full game state (JSON)");
-        println!("  GET  /spectate/ws  - Real-time updates (WebSocket)");
         println!("  POST /join?name=X  - Join game, returns session token");
         println!("  POST /input        - Send input (requires X-Session header)");
         println!("  GET  /observe      - Player observation (requires X-Session header)");
         println!("  GET  /skill.md     - Game skill definition");
 
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap_or_else(|e| {
-            // PID file was already cleaned, port is in use by something else
             delete_pid_file(&pid_file);
             eprintln!(
                 "Error: Port {} is already in use. Try --port <PORT>",
@@ -613,6 +634,21 @@ struct LocalState {
     game_handle: GameManagerHandle,
     skill_md: Option<String>,
     sessions: Arc<DashMap<String, (Uuid, String)>>, // token -> (agent_id, name)
+    log_file: PathBuf,
+}
+
+/// Check if the game instance is halted due to a Lua error.
+/// Returns the error message with log path appended, or None if running normally.
+fn check_halted(state: &LocalState) -> Option<String> {
+    let handle = state.game_handle.instances.get(&state.instance_id)?;
+    let instance = handle.read();
+    instance.halted_error.as_ref().map(|err| {
+        format!(
+            "Game halted: {}. See logs for full stack trace: {}",
+            err,
+            state.log_file.display()
+        )
+    })
 }
 
 #[derive(Deserialize)]
@@ -630,6 +666,10 @@ async fn local_join(
     State(state): State<LocalState>,
     Query(query): Query<JoinQuery>,
 ) -> Result<Json<JoinResponse>, (axum::http::StatusCode, String)> {
+    if let Some(err) = check_halted(&state) {
+        return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
+    }
+
     let agent_id = Uuid::new_v4();
     let session_token = Uuid::new_v4().to_string();
 
@@ -687,6 +727,10 @@ async fn local_input(
     headers: axum::http::HeaderMap,
     Json(input): Json<InputRequest>,
 ) -> Result<Json<PlayerObservation>, (axum::http::StatusCode, String)> {
+    if let Some(err) = check_halted(&state) {
+        return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
+    }
+
     let (agent_id, _) = get_session(&state, &headers)?;
 
     game::queue_input(
@@ -709,6 +753,10 @@ async fn local_observe(
     State(state): State<LocalState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<PlayerObservation>, (axum::http::StatusCode, String)> {
+    if let Some(err) = check_halted(&state) {
+        return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
+    }
+
     let (agent_id, _) = get_session(&state, &headers)?;
 
     let observation = game::get_observation(&state.game_handle, state.game_id, agent_id)
@@ -720,6 +768,10 @@ async fn local_observe(
 async fn local_spectate(
     State(state): State<LocalState>,
 ) -> Result<Json<SpectatorObservation>, (axum::http::StatusCode, String)> {
+    if let Some(err) = check_halted(&state) {
+        return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
+    }
+
     let observation =
         game::get_spectator_observation_for_instance(&state.game_handle, state.instance_id)
             .map_err(|e| (axum::http::StatusCode::NOT_FOUND, e))?;

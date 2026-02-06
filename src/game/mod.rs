@@ -45,10 +45,12 @@ pub struct GameManagerState {
     pub async_bridge: Option<Arc<AsyncBridge>>,
     /// Error mode for new instances (Halt for CLI dev, Continue for production)
     pub error_mode: ErrorMode,
+    /// When true, skip garbage collection of empty instances (used by CLI)
+    pub disable_gc: bool,
 }
 
 impl GameManagerState {
-    pub fn new(async_bridge: Option<Arc<AsyncBridge>>, error_mode: ErrorMode) -> Self {
+    pub fn new(async_bridge: Option<Arc<AsyncBridge>>, error_mode: ErrorMode, disable_gc: bool) -> Self {
         Self {
             instances: DashMap::new(),
             game_instances: DashMap::new(),
@@ -58,6 +60,7 @@ impl GameManagerState {
             map_cache: DashMap::new(),
             async_bridge,
             error_mode,
+            disable_gc,
         }
     }
 }
@@ -70,13 +73,13 @@ pub struct GameManager {
 impl GameManager {
     pub fn new(tick_rate: u64, pool: Arc<PgPool>, error_mode: ErrorMode) -> (Self, GameManagerHandle) {
         let async_bridge = Arc::new(AsyncBridge::new(pool));
-        let state = Arc::new(GameManagerState::new(Some(async_bridge), error_mode));
+        let state = Arc::new(GameManagerState::new(Some(async_bridge), error_mode, false));
         let handle = Arc::clone(&state);
         (Self { state, tick_rate }, handle)
     }
 
     pub fn new_without_db(tick_rate: u64, error_mode: ErrorMode) -> (Self, GameManagerHandle) {
-        let state = Arc::new(GameManagerState::new(None, error_mode));
+        let state = Arc::new(GameManagerState::new(None, error_mode, true));
         let handle = Arc::clone(&state);
         (Self { state, tick_rate }, handle)
     }
@@ -147,7 +150,7 @@ impl GameManager {
 
             // Periodic cleanup
             tick_counter += 1;
-            if tick_counter % CLEANUP_INTERVAL_TICKS == 0 {
+            if tick_counter % CLEANUP_INTERVAL_TICKS == 0 && !self.state.disable_gc {
                 let destroyed = cleanup_empty_instances(&self.state);
                 if destroyed > 0 {
                     eprintln!("[Cleanup] Destroyed {} empty instances", destroyed);

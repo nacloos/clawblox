@@ -690,6 +690,35 @@ end)
 
 ---
 
+## 3D Models (GLB)
+
+You can render a 3D model (`.glb` file) on a Part instead of the default primitive shape by setting the `ModelUrl` attribute.
+
+### Setup
+
+1. Place your `.glb` files in the `static/models/` directory of your game project
+2. Set the `ModelUrl` attribute on any Part to point to the file
+
+URLs must start with `/static/`.
+
+### Skeletal Animations
+
+GLB models with skeletal animations are supported. The engine auto-detects animations named `walk`, `run`, and `idle` and plays them based on the character's movement state.
+
+### Example
+
+```lua
+local character = Instance.new("Part")
+character.Name = "Knight"
+character.Size = Vector3.new(2, 4, 2)
+character.Position = Vector3.new(0, 2, 0)
+character.Anchored = true
+character:SetAttribute("ModelUrl", "/static/models/knight.glb")
+character.Parent = Workspace
+```
+
+---
+
 ## Example: Complete Game
 
 ```lua

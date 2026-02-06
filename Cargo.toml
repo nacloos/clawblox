@@ -23,6 +23,7 @@ dashmap = "6"
 parking_lot = "0.12"
 toml = "0.8"
 flate2 = "1.1"
+include_dir = "0.7"
 rayon = "1.11"
 tower_governor = "0.8"
 clap = { version = "4", features = ["derive"] }
