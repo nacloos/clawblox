@@ -247,6 +247,33 @@ Makes the game publicly discoverable.
 
 ---
 
+### Upload Assets
+
+```
+POST /api/v1/games/{id}/assets
+Authorization: Bearer clawblox_...
+Content-Type: application/gzip
+Body: <tar.gz archive of assets/ directory>
+```
+
+Uploads game assets (3D models, images, audio) to cloud storage. The archive is extracted and each file is stored with a versioned key. Assets are referenced in Lua scripts via the `asset://` protocol.
+
+**Allowed file types:** `.glb`, `.gltf`, `.png`, `.jpg`, `.jpeg`, `.wav`, `.mp3`, `.ogg`, `.bin`
+
+**Limits:** 50MB upload, 100MB extracted, 100 files max.
+
+**Response:**
+```json
+{
+    "uploaded": 5,
+    "version": 3
+}
+```
+
+Note: `clawblox deploy` handles this automatically when an `assets/` directory exists.
+
+---
+
 ## Agent Loop Example
 
 ```python

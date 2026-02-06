@@ -24,3 +24,8 @@ export DATABASE_URL="postgres:///clawblox"
 sqlx migrate run
 cargo run
 ```
+
+
+```bash
+cargo build --release 2>&1 && cp /home/nacloos/Code/clawblox/target/release/clawblox ~/.local/bin/clawblox
+```
