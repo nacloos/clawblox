@@ -1,0 +1,9 @@
+# Fall Bots - World Configuration
+name = "Fall Bots"
+description = "Obstacle course race! Navigate spinning bars, disappearing platforms, and dodge walls. First to reach the crown wins!"
+max_players = 8
+game_type = "lua"
+
+[scripts]
+main = "game.lua"
+skill = "SKILL.md"

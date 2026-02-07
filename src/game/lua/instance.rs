@@ -270,6 +270,8 @@ pub struct HumanoidData {
     pub move_to_target: Option<Vector3>,
     /// Flag to cancel movement (set by CancelMoveTo)
     pub cancel_move_to: bool,
+    /// Jump requested by Jump() — consumed by physics each frame
+    pub jump_requested: bool,
 
     pub died: RBXScriptSignal,
     pub health_changed: RBXScriptSignal,
@@ -288,6 +290,7 @@ impl Default for HumanoidData {
             hip_height: humanoid_consts::DEFAULT_HIP_HEIGHT,
             move_to_target: None,
             cancel_move_to: false,
+            jump_requested: false,
             died: create_signal("Died"),
             health_changed: create_signal("HealthChanged"),
             move_to_finished: create_signal("MoveToFinished"),
@@ -1937,6 +1940,16 @@ impl UserData for Instance {
             if let Some(humanoid) = &mut data.humanoid_data {
                 humanoid.move_to_target = None;
                 humanoid.cancel_move_to = true; // Signal to clear physics target
+            }
+            Ok(())
+        });
+
+        methods.add_method("Jump", |_, this, ()| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(humanoid) = &mut data.humanoid_data {
+                humanoid.jump_requested = true;
+            } else {
+                eprintln!("[Humanoid WARN] Jump called on non-humanoid instance");
             }
             Ok(())
         });

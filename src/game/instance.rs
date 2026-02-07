@@ -534,11 +534,12 @@ impl GameInstance {
                     if !part_data.can_collide {
                         continue;
                     }
-                    // New part - add to physics
+                    // New part - add to physics with CFrame rotation
+                    let quat = part_data.cframe.to_quaternion();
                     self.physics.add_part(
                         lua_id,
                         [part_data.position.x, part_data.position.y, part_data.position.z],
-                        [0.0, 0.0, 0.0, 1.0], // TODO: extract rotation from CFrame
+                        quat,
                         [part_data.size.x, part_data.size.y, part_data.size.z],
                         part_data.anchored,
                         part_data.can_collide,
@@ -554,12 +555,14 @@ impl GameInstance {
                         }
                     }
                 } else if part_data.anchored {
-                    // Anchored part - update physics position from Lua
+                    // Anchored part - update physics position and rotation from Lua
                     if let Some(handle) = self.physics.get_handle(lua_id) {
                         self.physics.set_kinematic_position(
                             handle,
                             [part_data.position.x, part_data.position.y, part_data.position.z],
                         );
+                        let quat = part_data.cframe.to_quaternion();
+                        self.physics.set_kinematic_rotation(handle, quat);
                     }
                 }
             }
@@ -751,6 +754,14 @@ impl GameInstance {
                     } else if let Some(target) = humanoid.move_to_target.take() {
                         self.physics.set_character_target(hrp_id, Some([target.x, target.y, target.z]));
                     }
+                    // Sync jump request and jump power to physics
+                    if humanoid.jump_requested {
+                        humanoid.jump_requested = false;
+                        if let Some(state) = self.physics.get_character_state_mut(hrp_id) {
+                            state.jump_requested = true;
+                            state.jump_power = humanoid.jump_power;
+                        }
+                    }
                 }
             }
             if !found_humanoid {
@@ -778,22 +789,34 @@ impl GameInstance {
             .collect();
 
         for (agent_id, hrp_id) in agent_hrp_pairs {
-            // Get current position, target, and vertical velocity
-            let (current_pos, target, vertical_velocity, grounded) = {
+            // Get current position, target, vertical velocity, and jump state
+            let (current_pos, target, vertical_velocity, grounded, jump_requested, jump_power) = {
                 let Some(state) = self.physics.get_character_state(hrp_id) else {
                     continue;
                 };
                 let Some(pos) = self.physics.get_character_position(hrp_id) else {
                     continue;
                 };
-                (pos, state.target_position, state.vertical_velocity, state.grounded)
+                (pos, state.target_position, state.vertical_velocity, state.grounded, state.jump_requested, state.jump_power)
             };
 
             // Look up the humanoid's walk_speed from Lua instance data
             let walk_speed = self.get_humanoid_walk_speed(agent_id).unwrap_or(WALK_SPEED);
 
+            // Clear jump_requested flag after reading it
+            if jump_requested {
+                if let Some(state) = self.physics.get_character_state_mut(hrp_id) {
+                    state.jump_requested = false;
+                }
+            }
+
             let gravity = self.physics.gravity.y;
             let mut new_vertical_velocity = vertical_velocity + gravity * dt;
+
+            // Apply jump when grounded and jump was requested
+            if grounded && jump_requested {
+                new_vertical_velocity = jump_power;
+            }
 
             // Calculate horizontal movement towards target
             let mut dx = 0.0f32;
