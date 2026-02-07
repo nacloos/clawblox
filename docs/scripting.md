@@ -36,14 +36,14 @@ print("Elapsed:", elapsed, "seconds")
 **Note:** Unlike Roblox's `tick()` which returns Unix epoch time, Clawblox returns time since game start for simplicity.
 
 ### wait(seconds?)
-Yields the current thread for the specified duration (default: 1 frame).
+Yields the current thread for the specified duration (default: 0 seconds / 1 frame).
 
 ```lua
 wait(2)  -- Wait 2 seconds
 wait()   -- Wait 1 frame
 ```
 
-**Note:** Currently a no-op placeholder. Use `RunService.Heartbeat` for frame-based timing.
+Delegates to `task.wait()`. Returns the actual elapsed time.
 
 ### print(...)
 Outputs to the game console.
@@ -57,6 +57,67 @@ Outputs a warning to the game console.
 
 ```lua
 warn("Something unexpected happened")
+```
+
+---
+
+## task Library
+
+The `task` library provides thread scheduling functions, matching the [Roblox task library](https://create.roblox.com/docs/reference/engine/libraries/task).
+
+### task.spawn(functionOrThread, ...args)
+Creates a new coroutine and resumes it immediately with the given arguments. If passed an existing thread, resumes that thread instead.
+
+```lua
+task.spawn(function(msg)
+    print(msg)  -- prints immediately
+end, "Hello")
+```
+
+Returns the thread.
+
+### task.delay(seconds, function, ...args)
+Schedules a function to run after `seconds` have elapsed. The function receives the provided arguments.
+
+```lua
+task.delay(2, function()
+    print("2 seconds later")
+end)
+
+task.delay(1, function(a, b)
+    print(a + b)  -- prints 30 after 1 second
+end, 10, 20)
+```
+
+Returns the thread (can be passed to `task.cancel`).
+
+### task.defer(functionOrThread, ...args)
+Schedules a function or thread to run on the next resumption cycle (next tick). Similar to `task.spawn` but does not resume immediately.
+
+```lua
+task.defer(function()
+    print("runs next tick")
+end)
+```
+
+Returns the thread.
+
+### task.wait(seconds?)
+Yields the current thread for `seconds` (default: 0, meaning resume next tick). Returns the actual elapsed time.
+
+```lua
+local elapsed = task.wait(1)
+print("Waited", elapsed, "seconds")
+```
+
+### task.cancel(thread)
+Cancels a scheduled thread so it never runs.
+
+```lua
+local t = task.delay(5, function()
+    print("this will never print")
+end)
+task.cancel(t)
 ```
 
 ---
@@ -625,6 +686,56 @@ connection:Disconnect()
 event:Once(function(...)
     -- fires once then auto-disconnects
 end)
+```
+
+---
+
+## 3D Models (GLB) and Assets
+
+You can render a 3D model (`.glb` file) on a Part instead of the default primitive shape by setting the `ModelUrl` attribute.
+
+### Asset Protocol (`asset://`)
+
+Place game assets (models, images, audio) in the `assets/` directory and reference them using the `asset://` protocol:
+
+```lua
+part:SetAttribute("ModelUrl", "asset://models/tree.glb")
+```
+
+The engine automatically resolves `asset://` URLs:
+- **Local development** (`clawblox run`): resolved to `/assets/models/tree.glb` (served from your local `assets/` directory)
+- **Production** (`clawblox deploy`): resolved to the CDN URL (assets are uploaded to cloud storage on deploy)
+
+Game developers never need to deal with server paths or CDN URLs — just use `asset://`.
+
+**Allowed file types:** `.glb`, `.gltf`, `.png`, `.jpg`, `.jpeg`, `.wav`, `.mp3`, `.ogg`
+
+Assets are automatically uploaded when you run `clawblox deploy` if an `assets/` directory exists.
+
+### Legacy: Static Files
+
+For backwards compatibility, URLs starting with `/static/` are still supported. Place files in a `static/` directory and reference them directly:
+
+```lua
+part:SetAttribute("ModelUrl", "/static/models/knight.glb")
+```
+
+Note: `/static/` files are **not** uploaded to cloud storage on deploy. Use `asset://` for new projects.
+
+### Skeletal Animations
+
+GLB models with skeletal animations are supported. The engine auto-detects animations named `walk`, `run`, and `idle` and plays them based on the character's movement state.
+
+### Example
+
+```lua
+local character = Instance.new("Part")
+character.Name = "Knight"
+character.Size = Vector3.new(2, 4, 2)
+character.Position = Vector3.new(0, 2, 0)
+character.Anchored = true
+character:SetAttribute("ModelUrl", "asset://models/knight.glb")
+character.Parent = Workspace
 ```
 
 ---

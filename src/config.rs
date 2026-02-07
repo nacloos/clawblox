@@ -16,7 +16,7 @@ pub struct ScriptsConfig {
 impl Default for ScriptsConfig {
     fn default() -> Self {
         Self {
-            main: "game.lua".to_string(),
+            main: "main.lua".to_string(),
             skill: Some("SKILL.md".to_string()),
         }
     }

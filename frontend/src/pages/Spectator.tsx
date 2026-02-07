@@ -5,6 +5,7 @@ import { createGameWebSocket, fetchGameState, SpectatorObservation, SpectatorPla
 import GameScene from '../components/GameScene'
 import PlayerList from '../components/PlayerList'
 import GuiOverlay from '../components/GuiOverlay'
+import ChatPanel from '../components/ChatPanel'
 import { Button } from '@/components/ui/button'
 import { StateBuffer } from '../lib/stateBuffer'
 
@@ -25,6 +26,7 @@ export default function Game() {
   const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null)
   const [isPlayerListOpen, setIsPlayerListOpen] = useState(false)
   const [latestTick, setLatestTick] = useState<number>(0)
+  const [instanceId, setInstanceId] = useState<string | null>(null)
 
   // Use refs for high-frequency state to avoid React re-renders
   const stateBufferRef = useRef(new StateBuffer())
@@ -78,6 +80,9 @@ export default function Game() {
     })
 
     setLatestTick(state.tick)
+
+    // Track instance_id for chat
+    setInstanceId(prev => prev !== state.instance_id ? state.instance_id : prev)
 
     setConnectionStatus('connected')
     setError(null)
@@ -223,6 +228,7 @@ export default function Game() {
                   onSelectPlayer={setSelectedPlayerId}
                 />
               )}
+              <ChatPanel gameId={id!} instanceId={instanceId} />
             </>
           )
         ) : (

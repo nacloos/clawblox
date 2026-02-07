@@ -1,0 +1,182 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            platform: linux-x64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            platform: linux-arm64
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            platform: darwin-x64
+          - target: aarch64-apple-darwin
+            os: macos-14
+            platform: darwin-arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            platform: win32-x64
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            platform: win32-arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (Linux)
+        if: runner.os == 'Linux'
+        run: cargo install cross --locked
+
+      - name: Build (Linux with cross)
+        if: runner.os == 'Linux'
+        run: cross build --release --target ${{ matrix.target }} --bin clawblox
+
+      - name: Build (macOS/Windows)
+        if: runner.os != 'Linux'
+        run: cargo build --release --target ${{ matrix.target }} --bin clawblox
+
+      - name: Prepare binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist/${{ matrix.platform }}
+          cp target/${{ matrix.target }}/release/clawblox dist/${{ matrix.platform }}/clawblox
+          chmod +x dist/${{ matrix.platform }}/clawblox
+
+      - name: Prepare binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/${{ matrix.platform }}
+          Copy-Item target/${{ matrix.target }}/release/clawblox.exe dist/${{ matrix.platform }}/clawblox.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/${{ matrix.platform }}
+
+  release:
+    name: Upload to R2
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Calculate checksums and create manifest
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+
+          # Calculate checksums for all binaries
+          LINUX_X64=$(sha256sum dist/linux-x64/clawblox | cut -d' ' -f1)
+          LINUX_ARM64=$(sha256sum dist/linux-arm64/clawblox | cut -d' ' -f1)
+          DARWIN_X64=$(sha256sum dist/darwin-x64/clawblox | cut -d' ' -f1)
+          DARWIN_ARM64=$(sha256sum dist/darwin-arm64/clawblox | cut -d' ' -f1)
+          WIN32_X64=$(sha256sum dist/win32-x64/clawblox.exe | cut -d' ' -f1)
+          WIN32_ARM64=$(sha256sum dist/win32-arm64/clawblox.exe | cut -d' ' -f1)
+
+          echo "Checksums:"
+          echo "  linux-x64: $LINUX_X64"
+          echo "  linux-arm64: $LINUX_ARM64"
+          echo "  darwin-x64: $DARWIN_X64"
+          echo "  darwin-arm64: $DARWIN_ARM64"
+          echo "  win32-x64: $WIN32_X64"
+          echo "  win32-arm64: $WIN32_ARM64"
+
+          cat > dist/manifest.json << EOF
+          {
+            "version": "$VERSION",
+            "platforms": {
+              "linux-x64": {
+                "checksum": "$LINUX_X64"
+              },
+              "linux-arm64": {
+                "checksum": "$LINUX_ARM64"
+              },
+              "darwin-x64": {
+                "checksum": "$DARWIN_X64"
+              },
+              "darwin-arm64": {
+                "checksum": "$DARWIN_ARM64"
+              },
+              "win32-x64": {
+                "checksum": "$WIN32_X64"
+              },
+              "win32-arm64": {
+                "checksum": "$WIN32_ARM64"
+              }
+            }
+          }
+          EOF
+          cat dist/manifest.json
+
+      - name: Install rclone
+        run: |
+          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip rclone-current-linux-amd64.zip
+          sudo cp rclone-*-linux-amd64/rclone /usr/local/bin/
+
+      - name: Configure rclone
+        run: |
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf << EOF
+          [r2]
+          type = s3
+          provider = Cloudflare
+          access_key_id = ${{ secrets.R2_ACCESS_KEY_ID }}
+          secret_access_key = ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          endpoint = https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          acl = private
+          EOF
+
+      - name: Upload to R2
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+
+          # Upload versioned release
+          rclone copy dist/linux-x64/clawblox r2:clawblox-releases/$VERSION/linux-x64/ --s3-no-check-bucket
+          rclone copy dist/linux-arm64/clawblox r2:clawblox-releases/$VERSION/linux-arm64/ --s3-no-check-bucket
+          rclone copy dist/darwin-x64/clawblox r2:clawblox-releases/$VERSION/darwin-x64/ --s3-no-check-bucket
+          rclone copy dist/darwin-arm64/clawblox r2:clawblox-releases/$VERSION/darwin-arm64/ --s3-no-check-bucket
+          rclone copy dist/win32-x64/clawblox.exe r2:clawblox-releases/$VERSION/win32-x64/ --s3-no-check-bucket
+          rclone copy dist/win32-arm64/clawblox.exe r2:clawblox-releases/$VERSION/win32-arm64/ --s3-no-check-bucket
+          rclone copy dist/manifest.json r2:clawblox-releases/$VERSION/ --s3-no-check-bucket
+
+          # Update latest pointer
+          echo -n "$VERSION" > latest.txt
+          rclone copy latest.txt r2:clawblox-releases/ --s3-no-check-bucket
+          rclone moveto r2:clawblox-releases/latest.txt r2:clawblox-releases/latest --s3-no-check-bucket
+
+      - name: Verify upload
+        run: |
+          curl -fsSL https://releases.clawblox.com/latest
+          curl -fsSI https://releases.clawblox.com/${{ steps.version.outputs.version }}/manifest.json

@@ -1,4 +1,3 @@
-use crossbeam_channel::{Receiver, Sender};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -54,8 +53,6 @@ pub struct GameInstance {
     pub player_names: HashMap<Uuid, String>, // agent_id -> player name
     observation_log_counts: Mutex<HashMap<Uuid, u8>>,
     humanoid_warn_counts: Mutex<HashMap<Uuid, u8>>,
-    pub action_receiver: Receiver<QueuedAction>,
-    pub action_sender: Sender<QueuedAction>,
     pub status: GameStatus,
     /// Time when the game instance was created (for server_time_ms calculation)
     start_time: Instant,
@@ -70,6 +67,10 @@ pub struct GameInstance {
     /// When the instance became empty (for garbage collection)
     /// None if instance has players, Some(Instant) when last player left
     pub empty_since: Option<Instant>,
+    /// How Lua errors are handled (Continue = log and keep going, Halt = stop on first error)
+    pub error_mode: ErrorMode,
+    /// Set when error_mode is Halt and a Lua error occurs; prevents further ticking
+    pub halted_error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -79,22 +80,15 @@ pub enum GameStatus {
     Finished,
 }
 
-/// An action queued by a player
-#[derive(Debug, Clone)]
-pub struct QueuedAction {
-    pub agent_id: Uuid,
-    pub action: GameAction,
+/// Controls how Lua errors are handled by a GameInstance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ErrorMode {
+    /// Log errors and continue (production server behavior)
+    Continue,
+    /// Stop the instance on first Lua error (CLI dev mode)
+    Halt,
 }
 
-/// Available actions players can take
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum GameAction {
-    Goto { position: [f32; 3] },
-    Shoot { position: [f32; 3] },
-    Interact { target_id: u32 },
-    Wait,
-}
 
 impl GameInstance {
     /// Derive a stable numeric user_id from an agent UUID (fits Lua safe integer range < 2^53).
@@ -113,7 +107,7 @@ impl GameInstance {
     /// * `game_id` - The game definition ID this instance belongs to
     /// * `async_bridge` - Optional async bridge for DataStoreService support
     pub fn new(game_id: Uuid, async_bridge: Option<Arc<AsyncBridge>>) -> Self {
-        Self::new_with_config(game_id, DEFAULT_MAX_PLAYERS, async_bridge)
+        Self::new_with_config(game_id, DEFAULT_MAX_PLAYERS, async_bridge, ErrorMode::Continue)
     }
 
     /// Creates a new game instance with configuration
@@ -122,8 +116,13 @@ impl GameInstance {
     /// * `game_id` - The game definition ID this instance belongs to
     /// * `max_players` - Maximum number of players allowed
     /// * `async_bridge` - Optional async bridge for DataStoreService support
-    pub fn new_with_config(game_id: Uuid, max_players: u32, async_bridge: Option<Arc<AsyncBridge>>) -> Self {
-        let (action_sender, action_receiver) = crossbeam_channel::unbounded();
+    /// * `error_mode` - How Lua errors are handled (Continue or Halt)
+    pub fn new_with_config(
+        game_id: Uuid,
+        max_players: u32,
+        async_bridge: Option<Arc<AsyncBridge>>,
+        error_mode: ErrorMode,
+    ) -> Self {
         let instance_id = Uuid::new_v4();
 
         Self {
@@ -137,8 +136,6 @@ impl GameInstance {
             player_names: HashMap::new(),
             observation_log_counts: Mutex::new(HashMap::new()),
             humanoid_warn_counts: Mutex::new(HashMap::new()),
-            action_receiver,
-            action_sender,
             status: GameStatus::Playing,
             start_time: Instant::now(),
             async_bridge,
@@ -146,6 +143,8 @@ impl GameInstance {
             afk_timeout: Duration::from_secs(DEFAULT_AFK_TIMEOUT_SECS),
             max_players,
             empty_since: Some(Instant::now()), // Starts empty
+            error_mode,
+            halted_error: None,
         }
     }
 
@@ -175,7 +174,7 @@ impl GameInstance {
         script: &str,
         async_bridge: Option<Arc<AsyncBridge>>,
     ) -> Self {
-        Self::new_with_script_and_config(game_id, script, DEFAULT_MAX_PLAYERS, async_bridge)
+        Self::new_with_script_and_config(game_id, script, DEFAULT_MAX_PLAYERS, async_bridge, ErrorMode::Continue)
     }
 
     /// Creates a new game instance with a Lua script and configuration
@@ -190,8 +189,9 @@ impl GameInstance {
         script: &str,
         max_players: u32,
         async_bridge: Option<Arc<AsyncBridge>>,
+        error_mode: ErrorMode,
     ) -> Self {
-        let mut instance = Self::new_with_config(game_id, max_players, async_bridge);
+        let mut instance = Self::new_with_config(game_id, max_players, async_bridge, error_mode);
         instance.load_script(script);
         instance
     }
@@ -200,15 +200,27 @@ impl GameInstance {
     pub fn load_script(&mut self, source: &str) {
         match LuaRuntime::with_config(self.game_id, self.max_players, self.async_bridge.clone()) {
             Ok(mut runtime) => {
+                // Set error mode on Lua VM so fire_as_coroutines/resume can read it
+                runtime.lua().set_app_data(self.error_mode);
+
                 if let Err(e) = runtime.load_script(source) {
-                    eprintln!("[Lua Error] Failed to load script: {}", e);
+                    self.handle_lua_error("Failed to load script", &e);
                 } else {
                     self.lua_runtime = Some(runtime);
                 }
             }
             Err(e) => {
-                eprintln!("[Lua Error] Failed to create runtime: {}", e);
+                self.handle_lua_error("Failed to create runtime", &e);
             }
+        }
+    }
+
+    /// Logs a Lua error and, in Halt mode, stores it to stop further ticking.
+    fn handle_lua_error(&mut self, context: &str, err: &mlua::Error) {
+        eprintln!("[Lua Error] {}: {}", context, err);
+        if self.error_mode == ErrorMode::Halt {
+            eprintln!("[Halted] Instance stopped due to Lua error. Fix the script and restart.");
+            self.halted_error = Some(format!("{}: {}", context, err));
         }
     }
 
@@ -242,7 +254,7 @@ impl GameInstance {
             self.player_hrp_ids.insert(agent_id, hrp_id);
 
             if let Err(e) = runtime.fire_player_added(&player) {
-                eprintln!("[Lua Error] Failed to fire PlayerAdded: {}", e);
+                self.handle_lua_error("Failed to fire PlayerAdded", &e);
             }
         }
 
@@ -267,13 +279,20 @@ impl GameInstance {
                 counts.remove(&agent_id);
             }
 
-            if let Some(runtime) = &self.lua_runtime {
-                if let Some(player) = runtime.players().get_player_by_user_id(user_id) {
-                    if let Err(e) = runtime.fire_player_removing(&player) {
-                        eprintln!("[Lua Error] Failed to fire PlayerRemoving: {}", e);
-                    }
-                }
+            // Fire PlayerRemoving and remove player from Lua
+            // Split borrow: capture error first, then handle it after releasing runtime ref
+            let lua_err = if let Some(runtime) = &self.lua_runtime {
+                let err = runtime
+                    .players()
+                    .get_player_by_user_id(user_id)
+                    .and_then(|player| runtime.fire_player_removing(&player).err());
                 runtime.remove_player(user_id);
+                err
+            } else {
+                None
+            };
+            if let Some(e) = lua_err {
+                self.handle_lua_error("Failed to fire PlayerRemoving", &e);
             }
 
             // Track when instance becomes empty for garbage collection
@@ -287,11 +306,6 @@ impl GameInstance {
         }
     }
 
-    /// Queues an action for processing in the next tick
-    pub fn queue_action(&self, agent_id: Uuid, action: GameAction) {
-        let _ = self.action_sender.send(QueuedAction { agent_id, action });
-    }
-
     /// Queues an agent input for the AgentInputService in Lua
     pub fn queue_agent_input(&self, user_id: u64, input_type: String, data: serde_json::Value) {
         if let Some(runtime) = &self.lua_runtime {
@@ -302,6 +316,11 @@ impl GameInstance {
 
     /// Main game loop tick - called at 60 Hz
     pub fn tick(&mut self) {
+        // In Halt mode, stop ticking once an error has occurred
+        if self.halted_error.is_some() {
+            return;
+        }
+
         let dt = 1.0 / 60.0;
 
         // Process kick requests from Lua scripts (e.g., Player:Kick())
@@ -310,11 +329,6 @@ impl GameInstance {
         // Check for AFK players periodically (every second)
         if self.tick % AFK_CHECK_INTERVAL_TICKS == 0 {
             self.check_afk_players();
-        }
-
-        // Process queued actions
-        while let Ok(queued) = self.action_receiver.try_recv() {
-            self.process_action(queued);
         }
 
         // Sync Lua workspace gravity to physics
@@ -327,7 +341,10 @@ impl GameInstance {
         // Do this before syncing MoveTo targets so movement can apply in the same tick.
         if let Some(runtime) = &self.lua_runtime {
             if let Err(e) = runtime.process_agent_inputs() {
-                eprintln!("[Lua Error] Failed to process agent inputs: {}", e);
+                self.handle_lua_error("Failed to process agent inputs", &e);
+                if self.halted_error.is_some() {
+                    return;
+                }
             }
         }
 
@@ -354,7 +371,10 @@ impl GameInstance {
         // Run Lua Heartbeat
         if let Some(runtime) = &self.lua_runtime {
             if let Err(e) = runtime.tick(dt) {
-                eprintln!("[Lua Error] Tick error: {}", e);
+                self.handle_lua_error("Tick error", &e);
+                if self.halted_error.is_some() {
+                    return;
+                }
             }
         }
 
@@ -745,30 +765,7 @@ impl GameInstance {
         }
     }
 
-    /// Processes a queued action from a player
-    fn process_action(&mut self, queued: QueuedAction) {
-        let Some(&_user_id) = self.players.get(&queued.agent_id) else {
-            return;
-        };
 
-        // Update activity timestamp for AFK tracking
-        self.player_last_activity.insert(queued.agent_id, Instant::now());
-
-        match queued.action {
-            GameAction::Goto { position } => {
-                if let Some(&hrp_id) = self.player_hrp_ids.get(&queued.agent_id) {
-                    self.physics.set_character_target(hrp_id, Some(position));
-                }
-            }
-            GameAction::Shoot { position: _ } => {
-                // TODO: Implement shooting via Lua
-            }
-            GameAction::Interact { target_id: _ } => {
-                // TODO: Implement interaction via Lua
-            }
-            GameAction::Wait => {}
-        }
-    }
 
     /// Updates character controller movement towards targets.
     /// Uses Rapier's kinematic character controller for full 3D translation.
@@ -1358,6 +1355,7 @@ impl GameInstance {
         }
 
         SpectatorObservation {
+            instance_id: self.instance_id,
             tick: self.tick,
             server_time_ms: self.elapsed_ms(),
             game_status: match self.status {
@@ -1524,6 +1522,7 @@ pub struct GameEvent {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SpectatorObservation {
+    pub instance_id: Uuid,
     pub tick: u64,
     /// Milliseconds since game instance was created (for client clock synchronization)
     pub server_time_ms: u64,
@@ -1677,8 +1676,8 @@ mod tests {
         let initial_pos = instance.physics.get_character_position(hrp_id).unwrap();
         println!("Initial player position: {:?}", initial_pos);
 
-        // Queue a Goto action
-        instance.queue_action(agent_id, GameAction::Goto { position: [10.0, 5.0, 10.0] });
+        // Set movement target directly via physics
+        instance.physics.set_character_target(hrp_id, Some([10.0, 5.0, 10.0]));
 
         // Run 120 ticks (2 seconds at 60 Hz)
         for _ in 0..120 {
@@ -2179,10 +2178,10 @@ mod tests {
         // Sleep almost to timeout
         std::thread::sleep(Duration::from_millis(150));
 
-        // Queue an action to reset activity timer (before timeout)
-        instance.queue_action(agent_id, GameAction::Goto { position: [5.0, 0.0, 5.0] });
+        // Record activity to reset AFK timer (before timeout)
+        instance.record_player_activity(agent_id);
 
-        // Process the action immediately (this resets the AFK timer)
+        // Process a tick
         instance.tick();
 
         // Sleep less than the full timeout again
@@ -2240,9 +2239,9 @@ mod tests {
         assert!(default_speed.is_some(), "Should be able to get humanoid walk speed");
         assert_eq!(default_speed.unwrap(), 16.0, "Default walk speed should be 16.0");
 
-        // Get initial position and queue movement
+        // Get initial position and set movement target
         let initial_pos = instance.physics.get_character_position(hrp_id).unwrap();
-        instance.queue_action(agent_id, GameAction::Goto { position: [50.0, initial_pos[1], 0.0] });
+        instance.physics.set_character_target(hrp_id, Some([50.0, initial_pos[1], 0.0]));
 
         // Run 60 ticks (1 second at default speed)
         for _ in 0..60 {
@@ -2266,7 +2265,7 @@ mod tests {
 
         // Reset position and move again
         let start_pos = instance.physics.get_character_position(hrp_id).unwrap();
-        instance.queue_action(agent_id, GameAction::Goto { position: [start_pos[0] + 50.0, start_pos[1], start_pos[2]] });
+        instance.physics.set_character_target(hrp_id, Some([start_pos[0] + 50.0, start_pos[1], start_pos[2]]));
 
         // Run another 60 ticks (1 second at double speed)
         for _ in 0..60 {

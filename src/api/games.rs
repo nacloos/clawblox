@@ -29,7 +29,6 @@ pub fn routes(pool: PgPool, game_manager: GameManagerHandle, api_key_cache: ApiK
         .route("/games/{id}", get(get_game).put(update_game))
         .route("/games/{id}/join", post(join_game))
         .route("/games/{id}/leave", post(leave_game))
-        .route("/matchmake", post(matchmake))
         .with_state(state)
 }
 
@@ -445,65 +444,3 @@ async fn leave_game(
     }))
 }
 
-// =============================================================================
-// Matchmaking
-// =============================================================================
-
-#[derive(Serialize)]
-struct MatchmakeResponse {
-    game_id: Uuid,
-    instance_id: Uuid,
-    created: bool,
-}
-
-async fn matchmake(
-    State(state): State<GamesState>,
-    headers: HeaderMap,
-) -> Result<Json<MatchmakeResponse>, (StatusCode, String)> {
-    let api_key = extract_api_key(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
-
-    let _ = get_agent_id_from_api_key(&api_key, &state.api_key_cache, &state.pool).await?;
-
-    // Find a game with waiting status
-    let waiting_game: Option<Game> = sqlx::query_as(
-        "SELECT * FROM games WHERE status = 'waiting' ORDER BY created_at ASC LIMIT 1",
-    )
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    if let Some(db_game) = waiting_game {
-        let game_id = db_game.id;
-        let max_players = db_game.max_players as u32;
-
-        let result = game::find_or_create_instance(
-            &state.game_manager,
-            game_id,
-            max_players,
-            db_game.script_code.as_deref(),
-        );
-
-        return Ok(Json(MatchmakeResponse {
-            game_id,
-            instance_id: result.instance_id,
-            created: result.created,
-        }));
-    }
-
-    // No game found, create new one
-    let game_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO games (id, name, status) VALUES ($1, 'Matchmade Game', 'waiting')")
-        .bind(game_id)
-        .execute(&state.pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let result = game::find_or_create_instance(&state.game_manager, game_id, 8, None);
-
-    Ok(Json(MatchmakeResponse {
-        game_id,
-        instance_id: result.instance_id,
-        created: true,
-    }))
-}

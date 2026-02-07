@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use clawblox::game::{
     self,
-    instance::GameInstance,
+    instance::{ErrorMode, GameInstance},
     GameManager,
 };
 
@@ -22,7 +22,7 @@ use clawblox::game::{
 #[test]
 fn test_has_capacity_empty_instance() {
     let game_id = Uuid::new_v4();
-    let instance = GameInstance::new_with_config(game_id, 8, None);
+    let instance = GameInstance::new_with_config(game_id, 8, None, ErrorMode::Continue);
 
     assert!(instance.has_capacity());
     assert_eq!(instance.available_slots(), 8);
@@ -31,7 +31,7 @@ fn test_has_capacity_empty_instance() {
 #[test]
 fn test_has_capacity_partial_instance() {
     let game_id = Uuid::new_v4();
-    let mut instance = GameInstance::new_with_config(game_id, 8, None);
+    let mut instance = GameInstance::new_with_config(game_id, 8, None, ErrorMode::Continue);
 
     // Add 5 players
     for i in 0..5 {
@@ -46,7 +46,7 @@ fn test_has_capacity_partial_instance() {
 #[test]
 fn test_has_capacity_full_instance() {
     let game_id = Uuid::new_v4();
-    let mut instance = GameInstance::new_with_config(game_id, 8, None);
+    let mut instance = GameInstance::new_with_config(game_id, 8, None, ErrorMode::Continue);
 
     // Add 8 players (max)
     for i in 0..8 {
@@ -61,7 +61,7 @@ fn test_has_capacity_full_instance() {
 #[test]
 fn test_has_capacity_with_different_max() {
     let game_id = Uuid::new_v4();
-    let mut instance = GameInstance::new_with_config(game_id, 2, None);
+    let mut instance = GameInstance::new_with_config(game_id, 2, None, ErrorMode::Continue);
 
     assert!(instance.has_capacity());
 
@@ -80,7 +80,7 @@ fn test_has_capacity_with_different_max() {
 
 #[test]
 fn test_find_or_create_instance_creates_first_instance() {
-    let (_manager, handle) = GameManager::new_without_db(60);
+    let (_manager, handle) = GameManager::new_without_db(60, ErrorMode::Continue);
     let game_id = Uuid::new_v4();
 
     let result = game::find_or_create_instance(&handle, game_id, 8, None);
@@ -91,7 +91,7 @@ fn test_find_or_create_instance_creates_first_instance() {
 
 #[test]
 fn test_find_or_create_instance_reuses_existing_with_capacity() {
-    let (_manager, handle) = GameManager::new_without_db(60);
+    let (_manager, handle) = GameManager::new_without_db(60, ErrorMode::Continue);
     let game_id = Uuid::new_v4();
 
     // Create first instance
@@ -106,7 +106,7 @@ fn test_find_or_create_instance_reuses_existing_with_capacity() {
 
 #[test]
 fn test_find_or_create_instance_creates_new_when_full() {
-    let (_manager, handle) = GameManager::new_without_db(60);
+    let (_manager, handle) = GameManager::new_without_db(60, ErrorMode::Continue);
     let game_id = Uuid::new_v4();
 
     // Create first instance with max 2 players
@@ -131,7 +131,7 @@ fn test_find_or_create_instance_creates_new_when_full() {
 
 #[test]
 fn test_find_or_create_instance_different_games_separate() {
-    let (_manager, handle) = GameManager::new_without_db(60);
+    let (_manager, handle) = GameManager::new_without_db(60, ErrorMode::Continue);
     let game_id_a = Uuid::new_v4();
     let game_id_b = Uuid::new_v4();
 
@@ -153,7 +153,7 @@ fn test_find_or_create_instance_different_games_separate() {
 
 #[test]
 fn test_join_instance_success() {
-    let (_manager, handle) = GameManager::new_without_db(60);
+    let (_manager, handle) = GameManager::new_without_db(60, ErrorMode::Continue);
     let game_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
 
@@ -169,7 +169,7 @@ fn test_join_instance_success() {
 
 #[test]
 fn test_join_instance_fails_when_full() {
-    let (_manager, handle) = GameManager::new_without_db(60);
+    let (_manager, handle) = GameManager::new_without_db(60, ErrorMode::Continue);
     let game_id = Uuid::new_v4();
 
     let result = game::find_or_create_instance(&handle, game_id, 2, None);
@@ -189,7 +189,7 @@ fn test_join_instance_fails_when_full() {
 
 #[test]
 fn test_join_instance_fails_duplicate() {
-    let (_manager, handle) = GameManager::new_without_db(60);
+    let (_manager, handle) = GameManager::new_without_db(60, ErrorMode::Continue);
     let game_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
 
@@ -206,7 +206,7 @@ fn test_join_instance_fails_duplicate() {
 
 #[test]
 fn test_join_instance_nonexistent() {
-    let (_manager, handle) = GameManager::new_without_db(60);
+    let (_manager, handle) = GameManager::new_without_db(60, ErrorMode::Continue);
     let game_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
     let fake_instance_id = Uuid::new_v4();
@@ -222,7 +222,7 @@ fn test_join_instance_nonexistent() {
 
 #[test]
 fn test_leave_instance_success() {
-    let (_manager, handle) = GameManager::new_without_db(60);
+    let (_manager, handle) = GameManager::new_without_db(60, ErrorMode::Continue);
     let game_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
 
@@ -240,7 +240,7 @@ fn test_leave_instance_success() {
 
 #[test]
 fn test_leave_game_by_game_id() {
-    let (_manager, handle) = GameManager::new_without_db(60);
+    let (_manager, handle) = GameManager::new_without_db(60, ErrorMode::Continue);
     let game_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
 
@@ -262,7 +262,7 @@ fn test_leave_game_by_game_id() {
 
 #[test]
 fn test_cleanup_does_not_remove_instances_with_players() {
-    let (_manager, handle) = GameManager::new_without_db(60);
+    let (_manager, handle) = GameManager::new_without_db(60, ErrorMode::Continue);
     let game_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
 
@@ -277,7 +277,7 @@ fn test_cleanup_does_not_remove_instances_with_players() {
 
 #[test]
 fn test_cleanup_removes_empty_instances_after_timeout() {
-    let (_manager, handle) = GameManager::new_without_db(60);
+    let (_manager, handle) = GameManager::new_without_db(60, ErrorMode::Continue);
     let game_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
 
@@ -295,7 +295,7 @@ fn test_cleanup_removes_empty_instances_after_timeout() {
 
 #[test]
 fn test_cleanup_respects_timeout() {
-    let (_manager, handle) = GameManager::new_without_db(60);
+    let (_manager, handle) = GameManager::new_without_db(60, ErrorMode::Continue);
     let game_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
 
@@ -311,7 +311,7 @@ fn test_cleanup_respects_timeout() {
 
 #[test]
 fn test_destroy_instance_cleans_up_all_state() {
-    let (_manager, handle) = GameManager::new_without_db(60);
+    let (_manager, handle) = GameManager::new_without_db(60, ErrorMode::Continue);
     let game_id = Uuid::new_v4();
 
     let result = game::find_or_create_instance(&handle, game_id, 8, None);
@@ -337,7 +337,7 @@ fn test_destroy_instance_cleans_up_all_state() {
 
 #[test]
 fn test_integration_8_players_same_instance_9th_new_instance() {
-    let (_manager, handle) = GameManager::new_without_db(60);
+    let (_manager, handle) = GameManager::new_without_db(60, ErrorMode::Continue);
     let game_id = Uuid::new_v4();
 
     // Join 8 players - all should be in the same instance
@@ -388,7 +388,7 @@ fn test_integration_8_players_same_instance_9th_new_instance() {
 
 #[test]
 fn test_integration_player_in_multiple_games() {
-    let (_manager, handle) = GameManager::new_without_db(60);
+    let (_manager, handle) = GameManager::new_without_db(60, ErrorMode::Continue);
     let game_a = Uuid::new_v4();
     let game_b = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
@@ -413,7 +413,7 @@ fn test_integration_player_in_multiple_games() {
 
 #[test]
 fn test_integration_instance_destroyed_after_all_leave() {
-    let (_manager, handle) = GameManager::new_without_db(60);
+    let (_manager, handle) = GameManager::new_without_db(60, ErrorMode::Continue);
     let game_id = Uuid::new_v4();
 
     // Create instance and add players
@@ -440,7 +440,7 @@ fn test_integration_instance_destroyed_after_all_leave() {
 
 #[test]
 fn test_integration_spectate_returns_most_populated() {
-    let (_manager, handle) = GameManager::new_without_db(60);
+    let (_manager, handle) = GameManager::new_without_db(60, ErrorMode::Continue);
     let game_id = Uuid::new_v4();
 
     // Create first instance with 2 players

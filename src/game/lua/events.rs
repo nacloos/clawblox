@@ -3,6 +3,8 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::game::instance::ErrorMode;
+
 static CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
@@ -163,6 +165,13 @@ impl RBXScriptSignal {
 
             if let Some(callback) = callback_key {
                 if let Err(e) = callback.call::<()>(args.clone()) {
+                    let error_mode = lua
+                        .app_data_ref::<ErrorMode>()
+                        .map(|m| *m)
+                        .unwrap_or(ErrorMode::Continue);
+                    if error_mode == ErrorMode::Halt {
+                        return Err(e);
+                    }
                     eprintln!("[Lua Error] Callback error in signal '{}': {}", self.name, e);
                 }
                 if once {
@@ -223,7 +232,14 @@ impl RBXScriptSignal {
                             // Thread yielded - track it for later resumption
                             threads.push(thread);
                         } else {
-                            // Actual error
+                            // Actual error — in Halt mode, propagate immediately
+                            let error_mode = lua
+                                .app_data_ref::<ErrorMode>()
+                                .map(|m| *m)
+                                .unwrap_or(ErrorMode::Continue);
+                            if error_mode == ErrorMode::Halt {
+                                return Err(e);
+                            }
                             eprintln!(
                                 "[Lua Error] Callback error in signal '{}': {}",
                                 self.name, e

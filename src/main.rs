@@ -1,6 +1,7 @@
 mod api;
 
-use clawblox::{db, game};
+use clawblox::{db, game, r2};
+use game::instance::ErrorMode;
 
 use axum::Router;
 use std::net::SocketAddr;
@@ -22,7 +23,15 @@ async fn main() {
         eprintln!("[Startup] Warning: Failed to reconcile instances: {}", e);
     }
 
-    let (game_manager, game_handle) = GameManager::new(60, pool.clone());
+    // Initialize R2 asset storage (optional — asset uploads disabled if not configured)
+    let r2_client = r2::R2Client::from_env();
+    if r2_client.is_some() {
+        println!("R2 asset storage: enabled");
+    } else {
+        eprintln!("Warning: R2 not configured (R2_ACCOUNT_ID missing). Asset uploads disabled.");
+    }
+
+    let (game_manager, game_handle) = GameManager::new(60, pool.clone(), ErrorMode::Continue);
 
     // Clone handle for background sync task
     let sync_handle = game_handle.clone();
@@ -44,8 +53,14 @@ async fn main() {
         .not_found_service(ServeFile::new("frontend/dist/index.html"));
 
     let app = Router::new()
-        .nest("/api/v1", api::routes((*pool).clone(), game_handle))
+        .nest(
+            "/api/v1",
+            api::routes((*pool).clone(), game_handle, r2_client),
+        )
         .route_service("/skill.md", ServeFile::new("static/skill.md"))
+        .route_service("/install.sh", ServeFile::new("scripts/install.sh"))
+        .route_service("/install.ps1", ServeFile::new("scripts/install.ps1"))
+        .route_service("/install.cmd", ServeFile::new("scripts/install.cmd"))
         .nest_service("/static", ServeDir::new("static"))
         .fallback_service(frontend_dir)
         .layer(cors);

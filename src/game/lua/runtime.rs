@@ -3,6 +3,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use uuid::Uuid;
 
+use crate::game::instance::ErrorMode;
+
 use super::instance::{AttributeValue, Instance, InstanceData};
 use super::services::{
     register_raycast_params, AgentInput, AgentInputService, DataStoreService, HttpService,
@@ -138,6 +140,8 @@ pub struct LuaRuntime {
     /// Tracks yielded coroutines that need to be resumed (e.g., callbacks waiting on DataStore)
     /// Stored as RegistryKeys to prevent garbage collection
     pending_coroutines: Arc<Mutex<Vec<RegistryKey>>>,
+    /// Time when the runtime was created, used for task scheduling
+    start_time: Instant,
 }
 
 impl LuaRuntime {
@@ -173,12 +177,6 @@ impl LuaRuntime {
 
         lua.globals().set("Workspace", game.workspace())?;
         lua.globals().set("Players", game.players())?;
-
-        let wait_fn = lua.create_function(|_, seconds: Option<f64>| {
-            let _seconds = seconds.unwrap_or(0.0);
-            Ok(())
-        })?;
-        lua.globals().set("wait", wait_fn)?;
 
         let print_fn = lua.create_function(|_, args: MultiValue| {
             let msg: Vec<String> = args
@@ -231,10 +229,118 @@ impl LuaRuntime {
             })?;
         math_table.set("random", random_fn)?;
 
-        // Add tick() global - returns time since game start
+        // Time origin for tick() and task scheduling
         let start_time = Instant::now();
+
+        // Add tick() global - returns time since game start
         let tick_fn = lua.create_function(move |_, ()| Ok(start_time.elapsed().as_secs_f64()))?;
         lua.globals().set("tick", tick_fn)?;
+
+        // Internal tables for task scheduling (not accessible to game scripts)
+        // Maps thread -> resume_at_time (seconds since start)
+        let schedule_table = lua.create_table()?;
+        lua.globals().set("__clawblox_thread_schedule", schedule_table)?;
+        // Maps thread -> {args} for deferred/delayed threads
+        let args_table = lua.create_table()?;
+        lua.globals().set("__clawblox_thread_args", args_table)?;
+        // Maps thread -> true for cancelled threads
+        let cancelled_table = lua.create_table()?;
+        lua.globals().set("__clawblox_cancelled_threads", cancelled_table)?;
+
+        // --- task library ---
+        // Rust helper: __clawblox_schedule_wait(seconds) — schedules current thread to resume after delay
+        let schedule_wait_start = start_time;
+        let schedule_wait_fn = lua.create_function(move |lua, seconds: Option<f64>| {
+            let seconds = seconds.unwrap_or(0.0).max(0.0);
+            let now = schedule_wait_start.elapsed().as_secs_f64();
+            let resume_at = now + seconds;
+            let thread = lua.current_thread();
+            let schedule: mlua::Table = lua.globals().get("__clawblox_thread_schedule")?;
+            schedule.set(thread, resume_at)?;
+            Ok(())
+        })?;
+        lua.globals().set("__clawblox_schedule_wait", schedule_wait_fn)?;
+
+        // Rust helper: __clawblox_now() — returns elapsed seconds since start
+        let now_start = start_time;
+        let now_fn = lua.create_function(move |_, ()| {
+            Ok(now_start.elapsed().as_secs_f64())
+        })?;
+        lua.globals().set("__clawblox_now", now_fn)?;
+
+        // Register the task table via Lua code that calls Rust helpers
+        lua.load(r#"
+            task = {}
+
+            function task.spawn(func_or_thread, ...)
+                local thread
+                if type(func_or_thread) == "thread" then
+                    thread = func_or_thread
+                else
+                    thread = coroutine.create(func_or_thread)
+                end
+                -- Resume immediately with args
+                local ok, err = coroutine.resume(thread, ...)
+                if not ok then
+                    warn("task.spawn error: " .. tostring(err))
+                end
+                -- If still yielded, track for future resumption
+                if coroutine.status(thread) == "suspended" then
+                    __clawblox_track_thread(thread)
+                end
+                return thread
+            end
+
+            function task.delay(seconds, func, ...)
+                local thread = coroutine.create(func)
+                local schedule = __clawblox_thread_schedule
+                local args_tbl = __clawblox_thread_args
+                local now = __clawblox_now()
+                schedule[thread] = now + seconds
+                -- Pack args into a table
+                local packed = table.pack(...)
+                if packed.n > 0 then
+                    args_tbl[thread] = packed
+                end
+                __clawblox_track_thread(thread)
+                return thread
+            end
+
+            function task.defer(func_or_thread, ...)
+                local thread
+                if type(func_or_thread) == "thread" then
+                    thread = func_or_thread
+                else
+                    thread = coroutine.create(func_or_thread)
+                end
+                -- Store args if any
+                local packed = table.pack(...)
+                if packed.n > 0 then
+                    __clawblox_thread_args[thread] = packed
+                end
+                __clawblox_track_thread(thread)
+                return thread
+            end
+
+            function task.wait(seconds)
+                seconds = seconds or 0
+                local start = __clawblox_now()
+                __clawblox_schedule_wait(seconds)
+                coroutine.yield()
+                return __clawblox_now() - start
+            end
+
+            function task.cancel(thread)
+                __clawblox_cancelled_threads[thread] = true
+                __clawblox_thread_schedule[thread] = nil
+                __clawblox_thread_args[thread] = nil
+            end
+
+            -- Fix global wait() to use task.wait()
+            function wait(seconds)
+                return task.wait(seconds)
+            end
+        "#).exec()?;
 
         let table_table = lua.globals().get::<mlua::Table>("table")?;
 
@@ -284,11 +390,31 @@ impl LuaRuntime {
             game,
             script_loaded: false,
             pending_coroutines,
+            start_time,
         })
     }
 
     pub fn load_script(&mut self, source: &str) -> Result<()> {
-        self.lua.load(source).exec()?;
+        // Run script in its own coroutine so task.wait() works at the top level
+        let func = self.lua.load(source).into_function()?;
+        let thread = self.lua.create_thread(func)?;
+        match thread.resume::<()>(()) {
+            Ok(()) => {
+                if thread.status() == ThreadStatus::Resumable {
+                    let key = self.lua.create_registry_value(thread)?;
+                    self.pending_coroutines.lock().unwrap().push(key);
+                }
+            }
+            Err(e) => {
+                if thread.status() == ThreadStatus::Resumable {
+                    // Thread yielded through an error path (async operation)
+                    let key = self.lua.create_registry_value(thread)?;
+                    self.pending_coroutines.lock().unwrap().push(key);
+                } else {
+                    return Err(e);
+                }
+            }
+        }
         self.script_loaded = true;
         Ok(())
     }
@@ -315,11 +441,24 @@ impl LuaRuntime {
     }
 
     /// Resumes all pending coroutines and removes completed ones.
+    /// Checks cancelled threads, scheduled times, and thread args before resuming.
     fn resume_pending_coroutines(&self) -> Result<()> {
-        let mut pending = self.pending_coroutines.lock().unwrap();
+        let now = self.start_time.elapsed().as_secs_f64();
+
+        // Get internal tables
+        let schedule: mlua::Table = self.lua.globals().get("__clawblox_thread_schedule")?;
+        let args_table: mlua::Table = self.lua.globals().get("__clawblox_thread_args")?;
+        let cancelled: mlua::Table = self.lua.globals().get("__clawblox_cancelled_threads")?;
+
+        // Drain all keys upfront so we don't hold a mutable borrow during iteration
+        let keys: Vec<RegistryKey> = {
+            let mut pending = self.pending_coroutines.lock().unwrap();
+            pending.drain(..).collect()
+        };
+
         let mut still_pending = Vec::new();
 
-        for key in pending.drain(..) {
+        for key in keys {
             // Get the thread from the registry
             let thread: Thread = match self.lua.registry_value(&key) {
                 Ok(t) => t,
@@ -330,15 +469,63 @@ impl LuaRuntime {
                 }
             };
 
-            // Check if thread is still resumable
-            if thread.status() != ThreadStatus::Resumable {
-                // Thread finished or errored, clean up
+            // 1. Check if cancelled
+            let is_cancelled: bool = cancelled.get(thread.clone()).unwrap_or(false);
+            if is_cancelled {
+                cancelled.set(thread.clone(), Value::Nil)?;
+                schedule.set(thread.clone(), Value::Nil)?;
+                args_table.set(thread.clone(), Value::Nil)?;
                 let _ = self.lua.remove_registry_value(key);
                 continue;
             }
 
+            // Check if thread is still resumable
+            if thread.status() != ThreadStatus::Resumable {
+                schedule.set(thread.clone(), Value::Nil)?;
+                args_table.set(thread.clone(), Value::Nil)?;
+                let _ = self.lua.remove_registry_value(key);
+                continue;
+            }
+
+            // 2. Check schedule — if time hasn't elapsed, keep pending
+            let resume_at: Option<f64> = schedule.get(thread.clone())?;
+            if let Some(resume_at) = resume_at {
+                if now < resume_at {
+                    // Not ready yet, keep pending
+                    still_pending.push(key);
+                    continue;
+                }
+                // Time satisfied, clear schedule entry
+                schedule.set(thread.clone(), Value::Nil)?;
+            }
+
+            // 3. Determine resume args
+            let resume_args: MultiValue = {
+                let stored_args: Value = args_table.get(thread.clone())?;
+                match stored_args {
+                    Value::Table(tbl) => {
+                        args_table.set(thread.clone(), Value::Nil)?;
+                        let n: i64 = tbl.get("n").unwrap_or(0);
+                        let mut args = Vec::new();
+                        for i in 1..=n {
+                            let v: Value = tbl.get(i)?;
+                            args.push(v);
+                        }
+                        MultiValue::from_iter(args)
+                    }
+                    _ => {
+                        // For task.wait threads, pass elapsed time
+                        if resume_at.is_some() {
+                            MultiValue::from_iter([Value::Number(now)])
+                        } else {
+                            MultiValue::new()
+                        }
+                    }
+                }
+            };
+
             // Try to resume the thread
-            match thread.resume::<()>(()) {
+            match thread.resume::<()>(resume_args) {
                 Ok(()) => {
                     // Check if still yielded
                     if thread.status() == ThreadStatus::Resumable {
@@ -349,13 +536,25 @@ impl LuaRuntime {
                     }
                 }
                 Err(e) => {
-                    // Thread errored
-                    eprintln!("[LuaRuntime] Coroutine error: {}", e);
+                    // Thread errored — in Halt mode, propagate immediately
+                    let error_mode = self
+                        .lua
+                        .app_data_ref::<ErrorMode>()
+                        .map(|m| *m)
+                        .unwrap_or(ErrorMode::Continue);
                     let _ = self.lua.remove_registry_value(key);
+                    if error_mode == ErrorMode::Halt {
+                        // Put remaining keys back before returning
+                        let mut pending = self.pending_coroutines.lock().unwrap();
+                        *pending = still_pending;
+                        return Err(e);
+                    }
+                    eprintln!("[LuaRuntime] Coroutine error: {}", e);
                 }
             }
         }
 
+        let mut pending = self.pending_coroutines.lock().unwrap();
         *pending = still_pending;
         Ok(())
     }
@@ -652,5 +851,236 @@ mod tests {
 
         // Check character is in workspace
         assert!(char_inst.parent().is_some());
+    }
+
+    #[test]
+    fn test_task_spawn() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            _G.spawned = false
+            _G.spawnArg = nil
+            local thread = task.spawn(function(x)
+                _G.spawned = true
+                _G.spawnArg = x
+            end, 42)
+            -- task.spawn runs immediately, so these should already be set
+            assert(_G.spawned == true, "task.spawn should run immediately")
+            assert(_G.spawnArg == 42, "task.spawn should pass args")
+            assert(type(thread) == "thread", "task.spawn should return a thread")
+        "#,
+            )
+            .expect("task.spawn test failed");
+    }
+
+    #[test]
+    fn test_task_delay() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            _G.delayed = false
+            task.delay(0.05, function()
+                _G.delayed = true
+            end)
+        "#,
+            )
+            .expect("Failed to load script");
+
+        // Should not fire immediately
+        let delayed: bool = runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap()
+            .get("delayed")
+            .unwrap();
+        assert!(!delayed, "task.delay should not fire immediately");
+
+        // Wait for the delay to elapse
+        std::thread::sleep(std::time::Duration::from_millis(60));
+
+        // Tick to trigger resume
+        runtime.tick(1.0 / 60.0).expect("Failed to tick");
+
+        let delayed: bool = runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap()
+            .get("delayed")
+            .unwrap();
+        assert!(delayed, "task.delay callback should have fired after delay");
+    }
+
+    #[test]
+    fn test_task_delay_with_args() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            _G.delayedVal = nil
+            task.delay(0.05, function(a, b)
+                _G.delayedVal = a + b
+            end, 10, 20)
+        "#,
+            )
+            .expect("Failed to load script");
+
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        runtime.tick(1.0 / 60.0).expect("Failed to tick");
+
+        let val: i64 = runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap()
+            .get("delayedVal")
+            .unwrap();
+        assert_eq!(val, 30, "task.delay should forward args to callback");
+    }
+
+    #[test]
+    fn test_task_wait() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            _G.waitDone = false
+            task.spawn(function()
+                task.wait(0.05)
+                _G.waitDone = true
+            end)
+        "#,
+            )
+            .expect("Failed to load script");
+
+        // Should not be done immediately
+        let done: bool = runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap()
+            .get("waitDone")
+            .unwrap();
+        assert!(!done, "task.wait should yield");
+
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        runtime.tick(1.0 / 60.0).expect("Failed to tick");
+
+        let done: bool = runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap()
+            .get("waitDone")
+            .unwrap();
+        assert!(done, "task.wait should resume after delay");
+    }
+
+    #[test]
+    fn test_task_defer() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            _G.deferred = false
+            task.defer(function()
+                _G.deferred = true
+            end)
+        "#,
+            )
+            .expect("Failed to load script");
+
+        // Should not run during load_script
+        let deferred: bool = runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap()
+            .get("deferred")
+            .unwrap();
+        assert!(!deferred, "task.defer should not run immediately");
+
+        // Should run on next tick
+        runtime.tick(1.0 / 60.0).expect("Failed to tick");
+
+        let deferred: bool = runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap()
+            .get("deferred")
+            .unwrap();
+        assert!(deferred, "task.defer should run on next tick");
+    }
+
+    #[test]
+    fn test_task_cancel() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            _G.cancelled = false
+            local thread = task.delay(0.05, function()
+                _G.cancelled = true
+            end)
+            task.cancel(thread)
+        "#,
+            )
+            .expect("Failed to load script");
+
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        runtime.tick(1.0 / 60.0).expect("Failed to tick");
+
+        let cancelled: bool = runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap()
+            .get("cancelled")
+            .unwrap();
+        assert!(
+            !cancelled,
+            "task.cancel should prevent callback from running"
+        );
+    }
+
+    #[test]
+    fn test_global_wait_delegates_to_task_wait() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            _G.globalWaitDone = false
+            task.spawn(function()
+                wait(0.05)
+                _G.globalWaitDone = true
+            end)
+        "#,
+            )
+            .expect("Failed to load script");
+
+        let done: bool = runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap()
+            .get("globalWaitDone")
+            .unwrap();
+        assert!(!done, "global wait() should yield");
+
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        runtime.tick(1.0 / 60.0).expect("Failed to tick");
+
+        let done: bool = runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap()
+            .get("globalWaitDone")
+            .unwrap();
+        assert!(done, "global wait() should resume after delay");
     }
 }
