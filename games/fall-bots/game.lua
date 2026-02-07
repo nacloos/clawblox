@@ -93,6 +93,7 @@ local allObstacleParts = {} -- for cleanup
 
 local crownPart = nil
 
+
 --------------------------------------------------------------------------------
 -- HELPERS
 --------------------------------------------------------------------------------
@@ -178,16 +179,7 @@ local function createFloor()
         Vector3.new(0, -1, (SECTION_4_START + SECTION_4_END) / 2),
         COLOR_SECTION_4_FLOOR)
 
-    -- Side walls along entire course
-    local wallHeight = 20
-    createPart("Wall_Left",
-        Vector3.new(2, wallHeight, COURSE_LENGTH),
-        Vector3.new(-COURSE_WIDTH / 2 - 1, wallHeight / 2 - 1, COURSE_LENGTH / 2),
-        COLOR_WALL)
-    createPart("Wall_Right",
-        Vector3.new(2, wallHeight, COURSE_LENGTH),
-        Vector3.new(COURSE_WIDTH / 2 + 1, wallHeight / 2 - 1, COURSE_LENGTH / 2),
-        COLOR_WALL)
+    -- No side walls — players can fall off the edges
 
     -- Back wall (behind start)
     createPart("Wall_Back",
@@ -238,7 +230,7 @@ local function createGateCrashers()
 end
 
 local function createSpinningBars()
-    local speeds = {1.5, -2.0, 1.8, -1.3}
+    local speeds = {0.5, -0.67, 0.6, -0.43}
     local heights = {2, 5, 2, 4}
     local spacing = (SECTION_2_END - SECTION_2_START) / (SPIN_BAR_COUNT + 1)
 
@@ -305,7 +297,7 @@ local function createDisappearingPath()
 end
 
 local function createFinalDash()
-    local speeds = {1.2, -1.5, 1.0, -1.8}
+    local speeds = {0.4, -0.5, 0.33, -0.6}
     local spacing = (SECTION_4_END - SECTION_4_START - 20) / (PENDULUM_COUNT + 1)
 
     for i = 1, PENDULUM_COUNT do
@@ -414,42 +406,8 @@ local function checkObstacleCollisions()
                 end
             end
 
-            -- Section 2: Check spinning bar collisions
-            if section == 2 then
-                for _, bar in ipairs(spinningBars) do
-                    if bar.part and bar.part.Parent then
-                        local barPos = bar.part.Position
-                        local barSize = bar.part.Size
-                        -- Simple AABB-ish check accounting for rotation
-                        local dist = math.sqrt(
-                            (pos.X - barPos.X)^2 +
-                            (pos.Z - barPos.Z)^2
-                        )
-                        local dy = math.abs(pos.Y - barPos.Y)
-                        if dist < barSize.X / 2 + 2 and dy < barSize.Y / 2 + 2 then
-                            teleportPlayer(player, getCheckpointForSection(2))
-                            break
-                        end
-                    end
-                end
-            end
-
-            -- Section 4: Check pendulum wall collisions
-            if section == 4 then
-                for _, wall in ipairs(pendulumWalls) do
-                    if wall.part and wall.part.Parent then
-                        local wallPos = wall.part.Position
-                        local wallSize = wall.part.Size
-                        local dx = math.abs(pos.X - wallPos.X)
-                        local dy = math.abs(pos.Y - wallPos.Y)
-                        local dz = math.abs(pos.Z - wallPos.Z)
-                        if dx < wallSize.X / 2 + 1.5 and dy < wallSize.Y / 2 + 1.5 and dz < wallSize.Z / 2 + 1.5 then
-                            teleportPlayer(player, getCheckpointForSection(4))
-                            break
-                        end
-                    end
-                end
-            end
+            -- Spinning bars and pendulums push players off the course via physics.
+            -- No teleport on contact — only falling (checkPlayerFalls) respawns.
         end
     end
 end

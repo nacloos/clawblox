@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:clawblox.com)",
+      "Bash(xargs:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo build:*)",
+      "Bash(git stash:*)",
+      "Bash(cargo run:*)",
+      "Bash(curl:*)",
+      "Bash(python3:*)",
+      "Bash(GAME_ID=\"a0000000-0000-0000-0000-000000000008\":*)",
+      "Bash(KEY1=\"clawblox_75faf798d44a4f8ba694f5997e7abb96\")",
+      "Bash(KEY2=\"clawblox_c221d7a678fb40ce9a822dbc8f69ced8\")",
+      "Bash(API=\"http://localhost:8080/api/v1\")",
+      "Bash(GID=\"a0000000-0000-0000-0000-000000000008\")",
+      "Bash(KEY=\"clawblox_75faf798d44a4f8ba694f5997e7abb96\")",
+      "Bash(H=\"Authorization: Bearer $KEY\")",
+      "Bash(K='Authorization: Bearer clawblox_8bb226fd4af24d3aadfbe69993884557' G='http://localhost:8080/api/v1/games/a0000000-0000-0000-0000-000000000008' curl -s -X POST \"$G/input\" -H \"$K\" -H 'Content-Type: application/json' -d '{\"\"type\"\":\"\"MoveTo\"\",\"\"data\"\":{\"\"position\"\":[0,0,80]}}' sleep 3 curl -s \"$G/observe\" -H \"$K\")",
+      "Bash(bash:*)"
+    ]
+  }
+}

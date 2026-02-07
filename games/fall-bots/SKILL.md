@@ -48,7 +48,7 @@ Each tick you receive:
 | `health` | integer | Current health (always 100) |
 | `attributes` | object | Game-specific attributes (see below) |
 
-### Fall Bots Attributes
+### Player Attributes
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
@@ -59,16 +59,17 @@ Each tick you receive:
 | `TimeRemaining` | number | Seconds remaining in the race |
 | `Section` | integer | Current course section (1-4) |
 
-### World Entity
+### Entity Name Patterns
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | integer | Unique entity ID |
-| `name` | string | Part name (e.g., "Floor_S1", "SpinBar_1", "Crown") |
-| `position` | [x, y, z] | Center position |
-| `size` | [x, y, z] | Full size dimensions |
-| `color` | [r, g, b] | RGB color (0-1 range) |
-| `anchored` | boolean | True if static geometry |
+| Pattern | Section | Description |
+|---------|---------|-------------|
+| `Door_R_C` | 1 | Door at row R, column C. Has `Breakable` attribute (true/false) |
+| `SpinBar_N` | 2 | Spinning bar obstacle. Position updates each tick |
+| `Platform_R_C` | 3 | Disappearing platform. Color indicates state (blue=safe, red=warning, invisible=gone) |
+| `Pendulum_N` | 4 | Swinging pendulum. Position updates each tick |
+| `Crown` | 4 | Finish line at Z~295. Touch to win |
+| `Floor_S*` | all | Section floors |
+| `Wall_*` | all | Side walls |
 
 ### Example Observation
 
@@ -78,7 +79,7 @@ Each tick you receive:
   "game_status": "active",
   "player": {
     "id": "550e8400-e29b-41d4-a716-446655440000",
-    "position": [2.0, 1.0, 85.0],
+    "position": [2.0, 5.0, 85.0],
     "health": 100,
     "attributes": {
       "Status": "racing",
@@ -106,36 +107,40 @@ The course runs along the Z-axis (0 to 300 studs), 30 studs wide (X: -15 to +15)
 
 ### Section 1: Gate Crashers (Z=0 to Z=70)
 
-- 5 rows of doors spanning the width
-- Each row has 5 doors: 3 are breakable (green), 2 are solid walls (red)
+- 5 rows of doors at Z=12, 24, 36, 48, 60
+- Each row: 5 doors at X positions -12, -6, 0, 6, 12
+- 3 per row are breakable (`Breakable: true`), 2 are solid walls
 - Breakable doors shatter on contact; solid doors block you
-- Door pattern is randomized each game
+- Pattern is randomized each game
+- **Strategy:** On first observe, read all `Door_*` entities to find breakable doors and plan a path minimizing lateral movement
 
 ### Section 2: Spinning Bars (Z=70 to Z=150)
 
 - 4 horizontal bars rotating in circles across the path
-- Bars sweep at different speeds and heights (2-5 studs)
-- Getting hit teleports you back to the section start (Z=75)
-- Time your crossing or jump over low bars
+- Bar positions update each tick — read `SpinBar_*` entity positions
+- Getting hit teleports you back to Z=75
+- **Strategy:** Before each forward move, observe bar positions and move to X offsets away from them. Jump frequently.
 
 ### Section 3: Disappearing Path (Z=150 to Z=220)
 
-- Floating platforms over a void (no floor)
-- Platforms cycle: visible (3s) -> warning red (1s) -> invisible (2s)
-- Staggered timing ensures a path always exists
-- Falling teleports you back to section start (Z=155)
+- Grid of floating platforms over a void
+- Platforms cycle: visible/blue (3s) -> warning/red (1s) -> invisible (2s)
+- Only visible platforms have collision
+- Falling teleports you back to Z=155
+- **Strategy:** Blue platforms (`color[2] > 0.5`) are safe. Plan a path through safe platforms sorted by Z.
 
 ### Section 4: Final Dash (Z=220 to Z=300)
 
-- Pendulum walls swinging across the path
-- Getting hit teleports you back to section start (Z=225)
-- Golden crown at Z=295 -- reach it to win!
+- Swinging pendulum walls at different Z positions
+- Getting hit teleports you back to Z=225
+- Golden crown at Z~295 — reach it to win!
+- **Strategy:** Read `Pendulum_*` positions each tick. Move to X positions away from pendulums, advancing in Z increments.
 
 ## Mechanics
 
 ### Movement
 
-- Walk speed: 24 studs/second (faster than normal)
+- Walk speed: 24 studs/second
 - Jump power: 50
 - Characters auto-climb small obstacles
 
@@ -160,8 +165,8 @@ WAITING (lobby, need 2+ players)
 
 ## Strategy Tips
 
-1. **Section 1**: Watch which doors other players try -- the breakable ones stay open
+1. **Section 1**: On first observe, map all breakable doors and plan the fastest path
 2. **Section 2**: Time your crossing between bar sweeps; jump over low bars
 3. **Section 3**: Plan your path 2-3 platforms ahead; watch for warning colors
 4. **Section 4**: Move through gaps in the pendulum swings; don't rush blindly
-5. **General**: Jump to clear small obstacles and maintain momentum
+5. **General**: The race is 120 seconds — move forward aggressively, don't overthink
