@@ -95,6 +95,8 @@ enum Commands {
         #[arg(default_value = "latest")]
         target: String,
     },
+    /// Fetch latest engine docs from GitHub into ./docs/
+    Docs,
 }
 
 fn main() {
@@ -114,6 +116,7 @@ fn main() {
             server,
         } => deploy_game(path, api_key, server),
         Commands::Install { target: _ } => install_cli(),
+        Commands::Docs => fetch_docs(),
     }
 }
 
@@ -199,6 +202,25 @@ fn install_cli() {
 }
 
 // =============================================================================
+// Docs Command
+// =============================================================================
+
+fn fetch_docs() {
+    let docs_dir = std::env::current_dir()
+        .expect("Failed to get current directory")
+        .join("docs");
+
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+    match rt.block_on(fetch_docs_from_github(&docs_dir)) {
+        Ok(()) => println!("Docs updated in {}", docs_dir.display()),
+        Err(e) => {
+            eprintln!("Error: Failed to fetch docs from GitHub: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+// =============================================================================
 // Init Command
 // =============================================================================
 
@@ -212,6 +234,74 @@ fn write_embedded_dir(dir: &Dir, target: &Path) {
         let subdir_name = subdir.path().file_name().unwrap();
         write_embedded_dir(subdir, &target.join(subdir_name));
     }
+}
+
+const GITHUB_DOCS_API_URL: &str =
+    "https://api.github.com/repos/nacloos/clawblox/contents/docs";
+
+/// Fetch docs from GitHub and write them to `target_dir`.
+/// Returns Ok(()) on success, Err with description on any failure.
+async fn fetch_docs_from_github(target_dir: &Path) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .user_agent("clawblox-cli")
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    // List files in docs/ via GitHub Contents API
+    let resp = client
+        .get(GITHUB_DOCS_API_URL)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach GitHub API: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API returned {}", resp.status()));
+    }
+
+    let entries: Vec<serde_json::Value> = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse GitHub API response: {}", e))?;
+
+    std::fs::create_dir_all(target_dir)
+        .map_err(|e| format!("Failed to create docs directory: {}", e))?;
+
+    for entry in &entries {
+        let entry_type = entry["type"].as_str().unwrap_or("");
+        if entry_type != "file" {
+            continue;
+        }
+        let name = entry["name"]
+            .as_str()
+            .ok_or("Missing 'name' in GitHub API entry")?;
+        let download_url = entry["download_url"]
+            .as_str()
+            .ok_or(format!("Missing 'download_url' for {}", name))?;
+
+        let file_resp = client
+            .get(download_url)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to download {}: {}", name, e))?;
+
+        if !file_resp.status().is_success() {
+            return Err(format!(
+                "Failed to download {} ({})",
+                name,
+                file_resp.status()
+            ));
+        }
+
+        let content = file_resp
+            .bytes()
+            .await
+            .map_err(|e| format!("Failed to read {}: {}", name, e))?;
+
+        std::fs::write(target_dir.join(name), &content)
+            .map_err(|e| format!("Failed to write {}: {}", name, e))?;
+    }
+
+    Ok(())
 }
 
 fn init_project(name: Option<String>) {
@@ -390,8 +480,18 @@ Move to a position on the map.
     );
     std::fs::write(project_dir.join("SKILL.md"), skill_md).expect("Failed to create SKILL.md");
 
-    // Copy engine docs into project
-    write_embedded_dir(&DOCS_DIR, &project_dir.join("docs"));
+    // Fetch latest docs from GitHub, fall back to embedded copy
+    {
+        let docs_dir = project_dir.join("docs");
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+        match rt.block_on(fetch_docs_from_github(&docs_dir)) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("Warning: Could not fetch docs from GitHub ({}), using bundled copy", e);
+                write_embedded_dir(&DOCS_DIR, &docs_dir);
+            }
+        }
+    }
 
     // Create assets/ directory for game assets (GLB models, images, audio)
     std::fs::create_dir_all(project_dir.join("assets"))
