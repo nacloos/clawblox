@@ -167,6 +167,32 @@ Returns current game state from your player's perspective.
             }
         }
     ],
+    "world": {
+        "entities": [
+            {
+                "id": 42,
+                "name": "Bullet",
+                "entity_type": "part",
+                "position": [12.0, 3.0, -5.0],
+                "size": [0.5, 0.5, 0.5],
+                "color": [1.0, 1.0, 0.0],
+                "material": "Neon",
+                "anchored": false
+            },
+            {
+                "id": 99,
+                "name": "GameState",
+                "entity_type": "folder",
+                "position": [0.0, 0.0, 0.0],
+                "size": [0.0, 0.0, 0.0],
+                "anchored": true,
+                "attributes": {
+                    "RoundTime": 45,
+                    "Phase": "active"
+                }
+            }
+        ]
+    },
     "events": []
 }
 ```
@@ -175,7 +201,8 @@ Returns current game state from your player's perspective.
 - `tick` - Current game tick (60 ticks/second)
 - `game_status` - "waiting", "active", or "finished"
 - `player` - Your player's state
-- `other_players` - Other players in the game
+- `other_players` - Other players visible to you (filtered by distance ≤100 units and line-of-sight)
+- `world` - Dynamic workspace entities (parts and folders without the "Static" tag). Static geometry is served once via `GET /games/{id}/map`
 - `events` - Recent game events (kills, damage, etc.)
 
 The `attributes` field contains game-specific data. Check the game's SKILL.md to understand what attributes are available.

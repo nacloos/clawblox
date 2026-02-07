@@ -750,11 +750,16 @@ Observations are returned by `GET /games/{id}/observe` and include:
     "attributes": { ... }  // Game-specific data set via SetAttribute
   },
   "other_players": [ ... ],
+  "world": {
+    "entities": [ ... ]  // Dynamic (non-static) workspace entities
+  },
   "events": [ ... ]
 }
 ```
 
 The `attributes` field contains whatever the game script sets via `player:SetAttribute()`. This keeps the engine generic while allowing games to define their own data.
+
+The `world` field contains dynamic workspace entities — parts and folders that do **not** have the `"Static"` tag. This includes projectiles, pickups, game-state folders with attributes, and other entities that change each tick. Static map geometry (tagged `"Static"`) is fetched once via `GET /games/{id}/map`.
 
 ---
 
