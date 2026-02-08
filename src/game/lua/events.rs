@@ -116,6 +116,10 @@ impl RBXScriptSignal {
         }
     }
 
+    pub fn connection_count(&self) -> usize {
+        self.inner.lock().unwrap().connections.len()
+    }
+
     pub fn connect(&self, lua: &Lua, callback: Function) -> Result<RBXScriptConnection> {
         let key = lua.create_registry_value(callback)?;
         let connection = RBXScriptConnection::new(Arc::clone(&self.inner));

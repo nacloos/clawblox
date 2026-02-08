@@ -1,9 +1,11 @@
 use rapier3d::control::{
     CharacterAutostep, CharacterLength, EffectiveCharacterMovement, KinematicCharacterController,
 };
+use rapier3d::na::{Quaternion, UnitQuaternion};
 use rapier3d::prelude::*;
 use std::collections::HashMap;
 
+use super::constants::humanoid as humanoid_consts;
 use super::constants::physics as consts;
 
 // Collision groups for Roblox-style physics behavior
@@ -20,6 +22,8 @@ pub struct CharacterControllerState {
     pub vertical_velocity: f32,
     pub target_position: Option<[f32; 3]>,
     pub grounded: bool,
+    pub jump_requested: bool,
+    pub jump_power: f32,
 }
 
 /// Wrapper around Rapier3D physics world for game physics simulation.
@@ -105,14 +109,17 @@ impl PhysicsWorld {
         anchored: bool,
         can_collide: bool,
     ) -> RigidBodyHandle {
-        // Create rigid body
+        // Create rigid body with proper quaternion rotation
+        let translation = vector![position[0], position[1], position[2]];
+        let quat_rotation = UnitQuaternion::new_unchecked(Quaternion::new(
+            rotation[3], rotation[0], rotation[1], rotation[2], // w, x, y, z
+        ));
         let body = if anchored {
             RigidBodyBuilder::kinematic_position_based()
         } else {
             RigidBodyBuilder::dynamic()
         }
-        .translation(vector![position[0], position[1], position[2]])
-        .rotation(vector![rotation[0], rotation[1], rotation[2]]) // Use axis-angle
+        .position(Isometry::from_parts(translation.into(), quat_rotation))
         .build();
 
         let handle = self.rigid_body_set.insert(body);
@@ -152,11 +159,36 @@ impl PhysicsWorld {
         }
     }
 
+    /// Toggles CanCollide on an existing part by setting its collider as sensor (no collision) or solid
+    pub fn set_can_collide(&mut self, lua_id: u64, can_collide: bool) {
+        if let Some(&handle) = self.lua_to_body.get(&lua_id) {
+            if let Some(body) = self.rigid_body_set.get(handle) {
+                for &collider_handle in body.colliders() {
+                    if let Some(collider) = self.collider_set.get_mut(collider_handle) {
+                        collider.set_sensor(!can_collide);
+                    }
+                }
+            }
+        }
+    }
+
     /// Updates the position of an anchored (kinematic) part
     pub fn set_kinematic_position(&mut self, handle: RigidBodyHandle, position: [f32; 3]) {
         if let Some(body) = self.rigid_body_set.get_mut(handle) {
             if body.is_kinematic() {
                 body.set_next_kinematic_translation(vector![position[0], position[1], position[2]]);
+            }
+        }
+    }
+
+    /// Updates the rotation of an anchored (kinematic) part
+    pub fn set_kinematic_rotation(&mut self, handle: RigidBodyHandle, quat: [f32; 4]) {
+        if let Some(body) = self.rigid_body_set.get_mut(handle) {
+            if body.is_kinematic() {
+                let rotation = UnitQuaternion::new_unchecked(Quaternion::new(
+                    quat[3], quat[0], quat[1], quat[2], // w, x, y, z
+                ));
+                body.set_next_kinematic_rotation(rotation);
             }
         }
     }
@@ -294,6 +326,8 @@ impl PhysicsWorld {
             vertical_velocity: 0.0,
             target_position: None,
             grounded: false,
+            jump_requested: false,
+            jump_power: humanoid_consts::DEFAULT_JUMP_POWER,
         };
 
         self.character_controllers.insert(lua_id, state);
@@ -472,6 +506,7 @@ impl PhysicsWorld {
         let desired = vector![desired_translation[0], desired_translation[1], desired_translation[2]];
         let filter = QueryFilter::default()
             .exclude_rigid_body(body_handle)
+            .exclude_sensors() // Sensors (CanCollide=false) must not block character movement
             .groups(InteractionGroups::new(GROUP_STATIC, Group::ALL & !GROUP_CHARACTER));
 
         let movement = controller.move_shape(

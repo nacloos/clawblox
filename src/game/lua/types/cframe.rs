@@ -245,6 +245,65 @@ impl CFrame {
         self.inverse().multiply(cf)
     }
 
+    /// Convert rotation matrix to quaternion [x, y, z, w]
+    pub fn to_quaternion(&self) -> [f32; 4] {
+        let r = &self.rotation;
+        let trace = r[0][0] + r[1][1] + r[2][2];
+
+        if trace > 0.0 {
+            let s = (trace + 1.0).sqrt() * 2.0; // s = 4*w
+            let w = 0.25 * s;
+            let x = (r[2][1] - r[1][2]) / s;
+            let y = (r[0][2] - r[2][0]) / s;
+            let z = (r[1][0] - r[0][1]) / s;
+            [x, y, z, w]
+        } else if r[0][0] > r[1][1] && r[0][0] > r[2][2] {
+            let s = (1.0 + r[0][0] - r[1][1] - r[2][2]).sqrt() * 2.0;
+            let w = (r[2][1] - r[1][2]) / s;
+            let x = 0.25 * s;
+            let y = (r[0][1] + r[1][0]) / s;
+            let z = (r[0][2] + r[2][0]) / s;
+            [x, y, z, w]
+        } else if r[1][1] > r[2][2] {
+            let s = (1.0 + r[1][1] - r[0][0] - r[2][2]).sqrt() * 2.0;
+            let w = (r[0][2] - r[2][0]) / s;
+            let x = (r[0][1] + r[1][0]) / s;
+            let y = 0.25 * s;
+            let z = (r[1][2] + r[2][1]) / s;
+            [x, y, z, w]
+        } else {
+            let s = (1.0 + r[2][2] - r[0][0] - r[1][1]).sqrt() * 2.0;
+            let w = (r[1][0] - r[0][1]) / s;
+            let x = (r[0][2] + r[2][0]) / s;
+            let y = (r[1][2] + r[2][1]) / s;
+            let z = 0.25 * s;
+            [x, y, z, w]
+        }
+    }
+
+    /// Create a CFrame from a quaternion [x, y, z, w]
+    pub fn from_quaternion(quat: [f32; 4]) -> Self {
+        let [x, y, z, w] = quat;
+        let xx = x * x;
+        let yy = y * y;
+        let zz = z * z;
+        let xy = x * y;
+        let xz = x * z;
+        let yz = y * z;
+        let wx = w * x;
+        let wy = w * y;
+        let wz = w * z;
+
+        Self {
+            position: Vector3::zero(),
+            rotation: [
+                [1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy)],
+                [2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)],
+                [2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)],
+            ],
+        }
+    }
+
     pub fn get_components(&self) -> [f32; 12] {
         [
             self.position.x,

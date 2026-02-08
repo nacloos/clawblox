@@ -308,6 +308,9 @@ impl GameInstance {
 
     /// Queues an agent input for the AgentInputService in Lua
     pub fn queue_agent_input(&self, user_id: u64, input_type: String, data: serde_json::Value) {
+        if input_type == "Jump" {
+            eprintln!("[InputQueue] Jump queued for user_id={}", user_id);
+        }
         if let Some(runtime) = &self.lua_runtime {
             let input = AgentInput::new(input_type, data);
             runtime.queue_agent_input(user_id, input);
@@ -530,15 +533,13 @@ impl GameInstance {
                 }
 
                 if !self.physics.has_part(lua_id) {
-                    // Skip parts with CanCollide=false - they don't need physics
-                    if !part_data.can_collide {
-                        continue;
-                    }
-                    // New part - add to physics
+                    // New part - add to physics with CFrame rotation
+                    // Parts with CanCollide=false are added as sensors (no physical response)
+                    let quat = part_data.cframe.to_quaternion();
                     self.physics.add_part(
                         lua_id,
                         [part_data.position.x, part_data.position.y, part_data.position.z],
-                        [0.0, 0.0, 0.0, 1.0], // TODO: extract rotation from CFrame
+                        quat,
                         [part_data.size.x, part_data.size.y, part_data.size.z],
                         part_data.anchored,
                         part_data.can_collide,
@@ -553,13 +554,19 @@ impl GameInstance {
                             );
                         }
                     }
-                } else if part_data.anchored {
-                    // Anchored part - update physics position from Lua
-                    if let Some(handle) = self.physics.get_handle(lua_id) {
-                        self.physics.set_kinematic_position(
-                            handle,
-                            [part_data.position.x, part_data.position.y, part_data.position.z],
-                        );
+                } else {
+                    // Existing part — sync CanCollide (sensor toggle) and position/rotation
+                    self.physics.set_can_collide(lua_id, part_data.can_collide);
+
+                    if part_data.anchored {
+                        if let Some(handle) = self.physics.get_handle(lua_id) {
+                            self.physics.set_kinematic_position(
+                                handle,
+                                [part_data.position.x, part_data.position.y, part_data.position.z],
+                            );
+                            let quat = part_data.cframe.to_quaternion();
+                            self.physics.set_kinematic_rotation(handle, quat);
+                        }
                     }
                 }
             }
@@ -751,6 +758,14 @@ impl GameInstance {
                     } else if let Some(target) = humanoid.move_to_target.take() {
                         self.physics.set_character_target(hrp_id, Some([target.x, target.y, target.z]));
                     }
+                    // Sync jump request and jump power to physics
+                    if humanoid.jump_requested {
+                        humanoid.jump_requested = false;
+                        if let Some(state) = self.physics.get_character_state_mut(hrp_id) {
+                            state.jump_requested = true;
+                            state.jump_power = humanoid.jump_power;
+                        }
+                    }
                 }
             }
             if !found_humanoid {
@@ -778,15 +793,15 @@ impl GameInstance {
             .collect();
 
         for (agent_id, hrp_id) in agent_hrp_pairs {
-            // Get current position, target, and vertical velocity
-            let (current_pos, target, vertical_velocity, grounded) = {
+            // Get current position, target, vertical velocity, and jump state
+            let (current_pos, target, vertical_velocity, grounded, jump_requested, jump_power) = {
                 let Some(state) = self.physics.get_character_state(hrp_id) else {
                     continue;
                 };
                 let Some(pos) = self.physics.get_character_position(hrp_id) else {
                     continue;
                 };
-                (pos, state.target_position, state.vertical_velocity, state.grounded)
+                (pos, state.target_position, state.vertical_velocity, state.grounded, state.jump_requested, state.jump_power)
             };
 
             // Look up the humanoid's walk_speed from Lua instance data
@@ -794,6 +809,17 @@ impl GameInstance {
 
             let gravity = self.physics.gravity.y;
             let mut new_vertical_velocity = vertical_velocity + gravity * dt;
+
+            // Apply jump when grounded and jump was requested
+            // Only clear the flag when the jump actually executes, so jumps
+            // can be queued while airborne and fire on next landing
+            if grounded && jump_requested {
+                new_vertical_velocity = jump_power;
+                if let Some(state) = self.physics.get_character_state_mut(hrp_id) {
+                    state.jump_requested = false;
+                }
+                eprintln!("[Jump] agent={} jump_power={:.1} grounded={}", agent_id, jump_power, grounded);
+            }
 
             // Calculate horizontal movement towards target
             let mut dx = 0.0f32;
@@ -805,7 +831,16 @@ impl GameInstance {
                 let dist_xz = (tx * tx + tz * tz).sqrt();
 
                 if dist_xz > 0.5 {
-                    let speed = walk_speed * dt;
+                    // Reduce horizontal speed while truly airborne (jumping/falling),
+                    // but keep full speed for brief ground loss (walking over bumps)
+                    let effective_speed = if grounded {
+                        walk_speed
+                    } else if new_vertical_velocity.abs() > consts::AIR_CONTROL_THRESHOLD {
+                        walk_speed * consts::AIR_CONTROL
+                    } else {
+                        walk_speed // Brief ground loss, keep normal speed
+                    };
+                    let speed = effective_speed * dt;
                     dx = (tx / dist_xz) * speed;
                     dz = (tz / dist_xz) * speed;
                 } else {
@@ -824,6 +859,16 @@ impl GameInstance {
             };
             let desired = [dx, desired_y, dz];
             if let Some(movement) = self.physics.move_character(hrp_id, desired, dt) {
+                // Debug: log grounded transitions for first few frames
+                if !grounded && movement.grounded {
+                    if let Some(pos) = self.physics.get_character_position(hrp_id) {
+                        eprintln!("[Ground] agent={} LANDED at y={:.3} vert_vel={:.2}", agent_id, pos[1], new_vertical_velocity);
+                    }
+                } else if grounded && !movement.grounded {
+                    if let Some(pos) = self.physics.get_character_position(hrp_id) {
+                        eprintln!("[Ground] agent={} LEFT ground at y={:.3} vert_vel={:.2} desired_y={:.4}", agent_id, pos[1], new_vertical_velocity, desired_y);
+                    }
+                }
                 if movement.grounded && new_vertical_velocity < 0.0 {
                     new_vertical_velocity = 0.0;
                 }
@@ -988,6 +1033,7 @@ impl GameInstance {
                         color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
                         material: Some(part_data.material.name().to_string()),
                         anchored: part_data.anchored,
+                        transparency: if part_data.transparency > 0.0 { Some(part_data.transparency) } else { None },
                         attributes: if attrs.is_empty() { None } else { Some(attrs) },
                     });
                 }
@@ -1022,6 +1068,7 @@ impl GameInstance {
                             color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
                             material: Some(part_data.material.name().to_string()),
                             anchored: part_data.anchored,
+                            transparency: if part_data.transparency > 0.0 { Some(part_data.transparency) } else { None },
                             attributes: if attrs.is_empty() { None } else { Some(attrs) },
                         });
                     }
@@ -1038,6 +1085,7 @@ impl GameInstance {
                             color: None,
                             material: None,
                             anchored: true,
+                            transparency: None,
                             attributes: Some(attrs),
                         });
                     }
@@ -1068,6 +1116,7 @@ impl GameInstance {
                         color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
                         material: Some(part_data.material.name().to_string()),
                         anchored: part_data.anchored,
+                        transparency: if part_data.transparency > 0.0 { Some(part_data.transparency) } else { None },
                         attributes: if attrs.is_empty() { None } else { Some(attrs) },
                     });
                 } else if data.class_name == ClassName::Folder {
@@ -1083,6 +1132,7 @@ impl GameInstance {
                             color: None,
                             material: None,
                             anchored: true,
+                            transparency: None,
                             attributes: Some(attrs),
                         });
                     }
@@ -1268,6 +1318,7 @@ impl GameInstance {
                         color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
                         material: Some(part_data.material.name().to_string()),
                         shape: Some(part_data.shape.name().to_string()),
+                        transparency: if part_data.transparency > 0.0 { Some(part_data.transparency) } else { None },
                         health: None,
                         pickup_type: None,
                         model_url: Self::extract_model_url(&data.attributes),
@@ -1472,6 +1523,8 @@ pub struct WorldEntity {
     pub material: Option<String>,
     pub anchored: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub transparency: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub attributes: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
@@ -1620,6 +1673,8 @@ pub struct SpectatorEntity {
     pub material: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shape: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transparency: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]

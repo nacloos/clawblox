@@ -213,11 +213,11 @@ function CameraController({
 
           const playerPos = new THREE.Vector3(x, y + 2, z)
 
-          // Desired camera position (behind and above player)
+          // Desired camera position (behind and above player, looking toward +Z)
           const desiredPos = new THREE.Vector3(
-            x + FOLLOW_DISTANCE * 0.7,
+            x,
             y + FOLLOW_HEIGHT,
-            z + FOLLOW_DISTANCE * 0.7
+            z - FOLLOW_DISTANCE
           )
 
           // Raycast from player to desired camera position for wall avoidance
