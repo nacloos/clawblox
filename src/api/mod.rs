@@ -42,6 +42,7 @@ pub fn routes(
             pool.clone(),
             game_manager,
             api_key_cache.clone(),
+            r2_client.clone(),
         ));
 
     if let Some(r2) = r2_client {

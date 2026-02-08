@@ -3,12 +3,16 @@
 .env
 
 # Frontend
-frontend/node_modules
-frontend/dist
+**/node_modules/
+**/dist/
 
 **/__pycache__/
+.venv/
+.claude/
 
+characters/
 
 characters/
 games/fall-bots/RUN.md
 .claude
+**/.DS_Store

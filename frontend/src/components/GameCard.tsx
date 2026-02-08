@@ -8,7 +8,7 @@ interface GameCardProps {
 
 export default function GameCard({ game }: GameCardProps) {
   return (
-    <Link to={`/game/${game.id}`} className="group block">
+    <Link to={`/spectate/${game.id}`} className="group block">
       <div className="rounded-2xl bg-card border border-border overflow-hidden transition-all group-hover:scale-[1.02] group-hover:border-primary/50">
         {/* Image / Placeholder */}
         <div className="aspect-[4/3] bg-gradient-to-br from-muted to-muted/50 flex items-center justify-center relative">

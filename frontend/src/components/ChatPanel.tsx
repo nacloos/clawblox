@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { MessageSquare, ChevronDown } from 'lucide-react'
+import { MessageSquare, ChevronDown, Volume2, VolumeX } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ChatMessage, fetchChatMessages } from '../api'
 
@@ -15,9 +15,14 @@ export default function ChatPanel({ gameId, instanceId }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isOpen, setIsOpen] = useState(true)
   const [hasNew, setHasNew] = useState(false)
+  const [isMuted, setIsMuted] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const lastTimestampRef = useRef<string | undefined>(undefined)
   const isAtBottomRef = useRef(true)
+  const audioQueueRef = useRef<string[]>([])
+  const isPlayingRef = useRef(false)
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null)
+  const isMutedRef = useRef(false)
 
   const scrollToBottom = useCallback(() => {
     if (scrollRef.current) {
@@ -31,6 +36,57 @@ export default function ChatPanel({ gameId, instanceId }: ChatPanelProps) {
     isAtBottomRef.current = scrollHeight - scrollTop - clientHeight < 20
     if (isAtBottomRef.current) {
       setHasNew(false)
+    }
+  }, [])
+
+  const playNext = useCallback(() => {
+    if (isMutedRef.current || audioQueueRef.current.length === 0) {
+      isPlayingRef.current = false
+      currentAudioRef.current = null
+      return
+    }
+    isPlayingRef.current = true
+    const url = audioQueueRef.current.shift()!
+    const audio = new Audio(url)
+    currentAudioRef.current = audio
+    audio.onended = () => playNext()
+    audio.onerror = () => playNext()
+    audio.play().catch(() => playNext())
+  }, [])
+
+  const enqueueAudio = useCallback((url: string) => {
+    audioQueueRef.current.push(url)
+    if (!isPlayingRef.current) {
+      playNext()
+    }
+  }, [playNext])
+
+  const toggleMute = useCallback(() => {
+    setIsMuted(prev => {
+      const newMuted = !prev
+      isMutedRef.current = newMuted
+      if (newMuted) {
+        // Stop current audio and clear queue
+        if (currentAudioRef.current) {
+          currentAudioRef.current.pause()
+          currentAudioRef.current = null
+        }
+        audioQueueRef.current = []
+        isPlayingRef.current = false
+      }
+      return newMuted
+    })
+  }, [])
+
+  // Cleanup audio on unmount
+  useEffect(() => {
+    return () => {
+      if (currentAudioRef.current) {
+        currentAudioRef.current.pause()
+        currentAudioRef.current = null
+      }
+      audioQueueRef.current = []
+      isPlayingRef.current = false
     }
   }, [])
 
@@ -51,6 +107,13 @@ export default function ChatPanel({ gameId, instanceId }: ChatPanelProps) {
         if (!active || newMessages.length === 0) return
 
         lastTimestampRef.current = newMessages[newMessages.length - 1].created_at
+
+        // Enqueue audio for new voice messages
+        for (const msg of newMessages) {
+          if (msg.message_type === 'voice' && msg.media_url && !isMutedRef.current) {
+            enqueueAudio(msg.media_url)
+          }
+        }
 
         setMessages(prev => {
           const combined = [...prev, ...newMessages]
@@ -73,7 +136,7 @@ export default function ChatPanel({ gameId, instanceId }: ChatPanelProps) {
       active = false
       clearInterval(interval)
     }
-  }, [gameId, instanceId])
+  }, [gameId, instanceId, enqueueAudio])
 
   // Auto-scroll when new messages arrive and user is at bottom
   useEffect(() => {
@@ -110,14 +173,25 @@ export default function ChatPanel({ gameId, instanceId }: ChatPanelProps) {
           <MessageSquare className="h-3.5 w-3.5" />
           Chat
         </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-6 w-6"
-          onClick={() => setIsOpen(false)}
-        >
-          <ChevronDown className="h-3.5 w-3.5" />
-        </Button>
+        <div className="flex items-center gap-0.5">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6"
+            onClick={toggleMute}
+            title={isMuted ? 'Unmute voice' : 'Mute voice'}
+          >
+            {isMuted ? <VolumeX className="h-3.5 w-3.5" /> : <Volume2 className="h-3.5 w-3.5" />}
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6"
+            onClick={() => setIsOpen(false)}
+          >
+            <ChevronDown className="h-3.5 w-3.5" />
+          </Button>
+        </div>
       </div>
 
       {/* Messages */}
@@ -135,6 +209,9 @@ export default function ChatPanel({ gameId, instanceId }: ChatPanelProps) {
             <div key={msg.id} className="text-xs">
               <span className="font-medium text-foreground">{msg.agent_name}</span>
               <span className="text-muted-foreground ml-1">{msg.content}</span>
+              {msg.message_type === 'voice' && (
+                <Volume2 className="h-3 w-3 inline ml-1 text-muted-foreground" />
+              )}
             </div>
           ))
         )}
