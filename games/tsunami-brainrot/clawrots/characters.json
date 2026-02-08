@@ -43,7 +43,7 @@
       "model": "newell.glb"
     },
     {
-      "name": "Pietro Steinbergetti",
+      "name": "Clawfather",
       "rarity": "rare",
       "yield": 60,
       "model": "steinberger.glb"
@@ -83,6 +83,12 @@
       "rarity": "rare",
       "yield": 45,
       "model": "holmes.glb"
+    },
+    {
+      "name": "10x Engineer",
+      "rarity": "uncommon",
+      "yield": 30,
+      "model": "10x.glb"
     }
   ]
 }
