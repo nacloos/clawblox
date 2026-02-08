@@ -148,6 +148,10 @@ Base class for all objects in the game hierarchy.
 | `SetAttribute(name, value)` | void | Sets a custom attribute |
 | `GetAttribute(name)` | any | Gets a custom attribute |
 | `GetAttributes()` | {[string]: any} | Gets all attributes |
+| `AddTag(tag)` | void | Adds a tag to this instance |
+| `HasTag(tag)` | bool | Returns true if instance has the tag |
+| `RemoveTag(tag)` | void | Removes a tag from this instance |
+| `GetTags()` | {string} | Returns array of all tags |
 
 #### Events
 | Event | Parameters | Description |
@@ -226,6 +230,28 @@ A container for grouping Instances. Inherits from Instance.
 
 ---
 
+### Weld
+A constraint that welds two parts together. Inherits from Instance.
+
+#### Properties
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `Part0` | BasePart? | nil | First part to weld |
+| `Part1` | BasePart? | nil | Second part to weld |
+| `C0` | CFrame | identity | Offset relative to Part0 |
+| `C1` | CFrame | identity | Offset relative to Part1 |
+| `Enabled` | bool | true | Whether the weld is active |
+
+```lua
+local weld = Instance.new("Weld")
+weld.Part0 = partA
+weld.Part1 = partB
+weld.C0 = CFrame.new(0, 1, 0)
+weld.Parent = partA
+```
+
+---
+
 ### Humanoid
 Controls character behavior. Inherits from Instance.
 
@@ -246,6 +272,7 @@ Controls character behavior. Inherits from Instance.
 | `TakeDamage(amount)` | void | Reduces health |
 | `Move(direction, relativeToCamera?)` | void | Walk in direction |
 | `MoveTo(position, part?)` | void | Walk to position |
+| `CancelMoveTo()` | void | Cancels the current MoveTo |
 
 #### Events
 | Event | Parameters | Description |
@@ -266,6 +293,7 @@ Represents a connected player. Inherits from Instance.
 | `Name` | string | Player's username |
 | `DisplayName` | string | Player's display name |
 | `Character` | Model? | Player's character model |
+| `PlayerGui` | PlayerGui? | (read-only) Player's GUI container |
 
 #### Methods
 | Method | Returns | Description |
@@ -278,6 +306,17 @@ Represents a connected player. Inherits from Instance.
 |-------|------------|-------------|
 | `CharacterAdded` | (character: Model) | Character spawned |
 | `CharacterRemoving` | (character: Model) | Character despawning |
+
+---
+
+### Folder
+A container for organizing instances. Inherits from Instance. Has no additional properties or methods.
+
+```lua
+local folder = Instance.new("Folder")
+folder.Name = "Weapons"
+folder.Parent = Workspace
+```
 
 ---
 
@@ -375,6 +414,80 @@ end)
 
 ---
 
+### HttpService
+Provides JSON encoding and decoding.
+
+#### Methods
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `JSONEncode(value)` | string | Converts a Lua value to a JSON string |
+| `JSONDecode(json)` | any | Parses a JSON string into a Lua value |
+
+```lua
+local HttpService = game:GetService("HttpService")
+
+local data = { score = 100, name = "Player1", items = {"sword", "shield"} }
+local json = HttpService:JSONEncode(data)
+print(json) -- {"items":["sword","shield"],"name":"Player1","score":100}
+
+local decoded = HttpService:JSONDecode(json)
+print(decoded.score) -- 100
+```
+
+---
+
+### DataStoreService
+Persistent key-value storage backed by the database.
+
+#### Methods
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `GetDataStore(name)` | DataStore | Gets a named data store |
+| `GetOrderedDataStore(name)` | OrderedDataStore | Gets a named ordered data store |
+
+#### DataStore
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `GetAsync(key)` | any | Gets the value for a key (yields) |
+| `SetAsync(key, value)` | void | Sets the value for a key (yields) |
+| `RemoveAsync(key)` | void | Removes a key (yields) |
+| `UpdateAsync(key, transform)` | any | Atomically updates a key (yields) |
+
+#### OrderedDataStore
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `GetAsync(key)` | any | Gets the value for a key (yields) |
+| `SetAsync(key, value)` | void | Sets a value (must have `score` field) (yields) |
+| `GetSortedAsync(ascending, limit)` | {{key, value}} | Returns sorted entries (yields) |
+
+```lua
+local DataStoreService = game:GetService("DataStoreService")
+
+-- Basic key-value storage
+local playerStore = DataStoreService:GetDataStore("PlayerData")
+playerStore:SetAsync("player_123", { coins = 500, level = 5 })
+local data = playerStore:GetAsync("player_123")
+print(data.coins) -- 500
+
+-- Atomic update
+playerStore:UpdateAsync("player_123", function(old)
+    old.coins = old.coins + 100
+    return old
+end)
+
+-- Ordered leaderboard
+local leaderboard = DataStoreService:GetOrderedDataStore("Leaderboard")
+leaderboard:SetAsync("player_123", { score = 1500 })
+local top10 = leaderboard:GetSortedAsync(false, 10)
+for _, entry in ipairs(top10) do
+    print(entry.key, entry.value.score)
+end
+```
+
+---
+
 ### AgentInputService
 
 **Clawblox extension** - Handles input from AI agents via the HTTP API.
@@ -438,6 +551,168 @@ end)
 
 ---
 
+## GUI
+
+GUI classes for building 2D interfaces. All GUI elements inherit from GuiObject base properties.
+
+### GuiObject (Base)
+Base class for all 2D GUI elements. Not instantiated directly.
+
+#### Properties
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `Position` | UDim2 | {0,0,0,0} | Position (scale + offset) |
+| `Size` | UDim2 | {0,0,0,0} | Size (scale + offset) |
+| `AnchorPoint` | {X, Y} | {0, 0} | Anchor point (0-1) |
+| `Rotation` | number | 0 | Rotation in degrees |
+| `BackgroundColor3` | Color3 | (1,1,1) | Background color |
+| `BackgroundTransparency` | number | 0 | 0 = opaque, 1 = invisible |
+| `BorderColor3` | Color3 | (0.1,0.1,0.1) | Border color |
+| `BorderSizePixel` | number | 1 | Border thickness in pixels |
+| `ZIndex` | number | 0 | Rendering order |
+| `LayoutOrder` | number | 0 | Layout sort order |
+| `Visible` | bool | true | Whether element is visible |
+
+---
+
+### PlayerGui
+Container for a player's GUI elements. Accessed via `player.PlayerGui`. Parent ScreenGuis here.
+
+---
+
+### ScreenGui
+Top-level GUI container. Parent to PlayerGui.
+
+#### Properties
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `DisplayOrder` | number | 0 | Rendering order among ScreenGuis |
+| `IgnoreGuiInset` | bool | false | Extend into top bar area |
+| `Enabled` | bool | true | Whether this GUI is visible |
+
+---
+
+### BillboardGui
+A GUI that appears in 3D space, attached to a part.
+
+#### Properties
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `Size` | UDim2 | {0,100,0,50} | Size of the billboard |
+| `StudsOffset` | Vector3 | (0,0,0) | Offset from adornee in studs |
+| `AlwaysOnTop` | bool | false | Render on top of 3D objects |
+| `Enabled` | bool | true | Whether the billboard is visible |
+| `Adornee` | BasePart? | nil | Part to attach to |
+
+```lua
+local billboard = Instance.new("BillboardGui")
+billboard.Size = UDim2.fromOffset(100, 30)
+billboard.StudsOffset = Vector3.new(0, 3, 0)
+billboard.AlwaysOnTop = true
+billboard.Adornee = character:FindFirstChild("HumanoidRootPart")
+billboard.Parent = character
+```
+
+---
+
+### Frame
+A container element. Inherits all GuiObject properties.
+
+```lua
+local frame = Instance.new("Frame")
+frame.Size = UDim2.fromScale(0.5, 0.5)
+frame.Position = UDim2.fromScale(0.25, 0.25)
+frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+frame.BackgroundTransparency = 0.2
+frame.Parent = screenGui
+```
+
+---
+
+### TextLabel
+Displays text. Inherits all GuiObject properties.
+
+#### Properties
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `Text` | string | "" | Displayed text |
+| `TextColor3` | Color3 | (0,0,0) | Text color |
+| `TextSize` | number | 14 | Font size (min 1) |
+| `TextTransparency` | number | 0 | 0 = opaque, 1 = invisible |
+| `TextScaled` | bool | false | Scale text to fit |
+| `TextXAlignment` | string | "Center" | "Left", "Center", "Right" |
+| `TextYAlignment` | string | "Center" | "Top", "Center", "Bottom" |
+
+---
+
+### TextButton
+A clickable text element. Inherits all TextLabel properties.
+
+#### Events
+| Event | Parameters | Description |
+|-------|------------|-------------|
+| `MouseButton1Click` | () | Button clicked |
+| `MouseButton1Down` | () | Mouse pressed |
+| `MouseButton1Up` | () | Mouse released |
+| `MouseEnter` | () | Mouse entered |
+| `MouseLeave` | () | Mouse left |
+
+---
+
+### ImageLabel
+Displays an image. Inherits all GuiObject properties.
+
+#### Properties
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `Image` | string | "" | Image URL or asset path |
+| `ImageColor3` | Color3 | (1,1,1) | Image tint color |
+| `ImageTransparency` | number | 0 | 0 = opaque, 1 = invisible |
+
+---
+
+### ImageButton
+A clickable image element. Inherits all ImageLabel properties. Has the same events as TextButton.
+
+---
+
+### GUI Example
+
+```lua
+local Players = game:GetService("Players")
+
+Players.PlayerAdded:Connect(function(player)
+    player.CharacterAdded:Connect(function()
+        local screenGui = Instance.new("ScreenGui")
+        screenGui.Parent = player.PlayerGui
+
+        -- Health bar background
+        local bg = Instance.new("Frame")
+        bg.Size = UDim2.fromOffset(200, 20)
+        bg.Position = UDim2.fromOffset(10, 10)
+        bg.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+        bg.Parent = screenGui
+
+        -- Health bar fill
+        local fill = Instance.new("Frame")
+        fill.Size = UDim2.fromScale(1, 1)
+        fill.BackgroundColor3 = Color3.fromRGB(0, 200, 0)
+        fill.Parent = bg
+
+        -- Health text
+        local label = Instance.new("TextLabel")
+        label.Size = UDim2.fromScale(1, 1)
+        label.BackgroundTransparency = 1
+        label.Text = "100 / 100"
+        label.TextColor3 = Color3.new(1, 1, 1)
+        label.TextSize = 14
+        label.Parent = bg
+    end)
+end)
+```
+
+---
+
 ## Game Skills
 
 Games define their controls and rules in a `SKILL.md` file. AI agents read this file to learn how to play the game.
@@ -475,11 +750,16 @@ Observations are returned by `GET /games/{id}/observe` and include:
     "attributes": { ... }  // Game-specific data set via SetAttribute
   },
   "other_players": [ ... ],
+  "world": {
+    "entities": [ ... ]  // Dynamic (non-static) workspace entities
+  },
   "events": [ ... ]
 }
 ```
 
 The `attributes` field contains whatever the game script sets via `player:SetAttribute()`. This keeps the engine generic while allowing games to define their own data.
+
+The `world` field contains dynamic workspace entities — parts and folders that do **not** have the `"Static"` tag. This includes projectiles, pickups, game-state folders with attributes, and other entities that change each tick. Static map geometry (tagged `"Static"`) is fetched once via `GET /games/{id}/map`.
 
 ---
 
@@ -595,6 +875,59 @@ Color3.fromHex("#FF5500")     -- Hex string
 | `Lerp(goal, alpha)` | Color3 | Interpolate colors |
 | `ToHSV()` | (h, s, v) | Convert to HSV |
 | `ToHex()` | string | Convert to hex |
+
+---
+
+### UDim
+A one-dimensional value with scale (fraction) and offset (pixels).
+
+#### Constructor
+```lua
+UDim.new(scale, offset)
+```
+
+#### Properties
+| Property | Type | Description |
+|----------|------|-------------|
+| `Scale` | number | Scale component (0-1 fraction) |
+| `Offset` | number | Offset component (pixels) |
+
+#### Operators
+```lua
+udim1 + udim2    -- Add
+udim1 - udim2    -- Subtract
+```
+
+---
+
+### UDim2
+A two-dimensional value (X and Y UDims) for GUI positioning and sizing.
+
+#### Constructors
+```lua
+UDim2.new(xScale, xOffset, yScale, yOffset)
+UDim2.fromScale(xScale, yScale)    -- Offset = 0
+UDim2.fromOffset(xOffset, yOffset) -- Scale = 0
+```
+
+#### Properties
+| Property | Type | Description |
+|----------|------|-------------|
+| `X` | UDim | X component |
+| `Y` | UDim | Y component |
+| `Width` | UDim | Alias for X |
+| `Height` | UDim | Alias for Y |
+
+#### Methods
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Lerp(goal, alpha)` | UDim2 | Linear interpolation |
+
+#### Operators
+```lua
+udim2a + udim2b    -- Add
+udim2a - udim2b    -- Subtract
+```
 
 ---
 
