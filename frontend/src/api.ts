@@ -169,6 +169,8 @@ export interface ChatMessage {
   agent_id: string
   agent_name: string
   content: string
+  message_type: string
+  media_url?: string
   created_at: string
 }
 

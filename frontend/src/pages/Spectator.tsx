@@ -154,7 +154,7 @@ export default function Game() {
   const hasGameData = stateBufferRef.current.hasData()
 
   return (
-    <div className="h-full flex flex-col bg-background">
+    <div className="h-screen flex flex-col bg-background">
       {/* Header */}
       <div className="flex items-center gap-4 px-4 py-3 border-b border-border bg-card pr-16">
         <Link to={gameType ? `/games/${gameType}/sessions` : '/'}>

@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 home = "=0.5.9"
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
 futures-util = "0.3"
 tokio = { version = "1.49", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
