@@ -28,6 +28,7 @@ export interface EntitySnapshot {
   color?: [number, number, number]
   material?: string
   shape?: 'Block' | 'Ball' | 'Cylinder' | 'Wedge'
+  transparency?: number
   health?: number
   pickup_type?: string
   model_url?: string

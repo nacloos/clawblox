@@ -30,6 +30,13 @@ pub mod physics {
     /// Character controller snap to ground distance
     pub const SNAP_TO_GROUND: f32 = 0.2;
 
+    /// Air control multiplier (fraction of walk speed applied while airborne)
+    /// With walk_speed=16, air_time≈1.39s: 16*0.6*1.39 ≈ 13.3 studs max jump distance
+    pub const AIR_CONTROL: f32 = 0.6;
+
+    /// Minimum vertical velocity to trigger air control (avoids slowing walking over bumps)
+    pub const AIR_CONTROL_THRESHOLD: f32 = 2.0;
+
     /// Small epsilon for float comparisons
     pub const EPSILON: f32 = 0.001;
 }
@@ -45,8 +52,8 @@ pub mod humanoid {
     /// Default walk speed (studs/second)
     pub const DEFAULT_WALK_SPEED: f32 = 16.0;
 
-    /// Default jump power
-    pub const DEFAULT_JUMP_POWER: f32 = 50.0;
+    /// Default jump power: v = sqrt(2*g*h) = sqrt(2*30*7.2) ≈ 20.8 for 7.2-stud jump height
+    pub const DEFAULT_JUMP_POWER: f32 = 20.8;
 
     /// Default jump height
     pub const DEFAULT_JUMP_HEIGHT: f32 = 7.2;

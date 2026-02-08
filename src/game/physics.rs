@@ -159,6 +159,19 @@ impl PhysicsWorld {
         }
     }
 
+    /// Toggles CanCollide on an existing part by setting its collider as sensor (no collision) or solid
+    pub fn set_can_collide(&mut self, lua_id: u64, can_collide: bool) {
+        if let Some(&handle) = self.lua_to_body.get(&lua_id) {
+            if let Some(body) = self.rigid_body_set.get(handle) {
+                for &collider_handle in body.colliders() {
+                    if let Some(collider) = self.collider_set.get_mut(collider_handle) {
+                        collider.set_sensor(!can_collide);
+                    }
+                }
+            }
+        }
+    }
+
     /// Updates the position of an anchored (kinematic) part
     pub fn set_kinematic_position(&mut self, handle: RigidBodyHandle, position: [f32; 3]) {
         if let Some(body) = self.rigid_body_set.get_mut(handle) {
@@ -493,6 +506,7 @@ impl PhysicsWorld {
         let desired = vector![desired_translation[0], desired_translation[1], desired_translation[2]];
         let filter = QueryFilter::default()
             .exclude_rigid_body(body_handle)
+            .exclude_sensors() // Sensors (CanCollide=false) must not block character movement
             .groups(InteractionGroups::new(GROUP_STATIC, Group::ALL & !GROUP_CHARACTER));
 
         let movement = controller.move_shape(

@@ -698,6 +698,12 @@ impl LuaRuntime {
 
         // 2. Now fire events (no locks held)
         for (player, inputs) in to_process {
+            for input in &inputs {
+                if input.input_type == "Jump" {
+                    let conn_count = agent_input_service.data.lock().unwrap().input_received.connection_count();
+                    eprintln!("[InputFire] Firing Jump event (connections={})", conn_count);
+                }
+            }
             for input in inputs {
                 agent_input_service.fire_input_received(
                     &self.lua,

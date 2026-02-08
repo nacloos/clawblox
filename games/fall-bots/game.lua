@@ -11,7 +11,7 @@ local Players = game:GetService("Players")
 
 local MIN_PLAYERS = 2
 local MAX_PLAYERS = 8
-local COUNTDOWN_SECONDS = 3
+local COUNTDOWN_SECONDS = 10
 local RACE_TIME_LIMIT = 120 -- seconds
 
 -- Course dimensions
@@ -35,12 +35,13 @@ local BREAKABLE_PER_ROW = 3
 
 -- Spinning Bars config
 local SPIN_BAR_COUNT = 4
-local SPIN_BAR_RADIUS = 12
+local SPIN_BAR_LENGTH = 12
+local SPIN_BAR_RADIUS = 6
 
 -- Disappearing Path config
-local PLATFORM_VISIBLE_TIME = 3.0
-local PLATFORM_WARN_TIME = 1.0
-local PLATFORM_HIDDEN_TIME = 2.0
+local PLATFORM_VISIBLE_TIME = 5.0
+local PLATFORM_WARN_TIME = 2.0
+local PLATFORM_HIDDEN_TIME = 3.0
 local PLATFORM_CYCLE_TIME = PLATFORM_VISIBLE_TIME + PLATFORM_WARN_TIME + PLATFORM_HIDDEN_TIME
 
 -- Final Dash config
@@ -89,6 +90,7 @@ local spinningBars = {} -- {part, speed, radius, centerZ, height, centerX}
 local disappearingSegments = {} -- {part, offset, originalColor}
 local pendulumWalls = {} -- {part, speed, radius, centerX, centerZ, height}
 local breakableDoors = {} -- {part}
+local doorIsBreakable = {} -- keyed by part, true if breakable (hidden from observations)
 local allObstacleParts = {} -- for cleanup
 
 local crownPart = nil
@@ -137,7 +139,7 @@ end
 local function getCheckpointForSection(section)
     if section == 1 then return Vector3.new(0, SPAWN_Y, SECTION_1_START + 5)
     elseif section == 2 then return Vector3.new(0, SPAWN_Y, SECTION_2_START + 5)
-    elseif section == 3 then return Vector3.new(0, SPAWN_Y, SECTION_3_START + 5)
+    elseif section == 3 then return Vector3.new(0, SPAWN_Y, SECTION_2_END - 5) -- on section 2 floor (section 3 has no floor)
     elseif section == 4 then return Vector3.new(0, SPAWN_Y, SECTION_4_START + 5)
     else return Vector3.new(0, SPAWN_Y, 5) end
 end
@@ -159,17 +161,12 @@ end
 --------------------------------------------------------------------------------
 
 local function createFloor()
-    -- Section 1 floor (Gate Crashers)
-    createPart("Floor_S1",
-        Vector3.new(COURSE_WIDTH, 2, SECTION_1_END - SECTION_1_START),
-        Vector3.new(0, -1, (SECTION_1_START + SECTION_1_END) / 2),
+    -- Use a single continuous floor to avoid character controller seam issues
+    -- Section 1+2 floor (Gate Crashers + Spinning Bars)
+    createPart("Floor_S12",
+        Vector3.new(COURSE_WIDTH, 2, SECTION_2_END - SECTION_1_START),
+        Vector3.new(0, -1, (SECTION_1_START + SECTION_2_END) / 2),
         COLOR_FLOOR)
-
-    -- Section 2 floor (Spinning Bars)
-    createPart("Floor_S2",
-        Vector3.new(COURSE_WIDTH, 2, SECTION_2_END - SECTION_2_START),
-        Vector3.new(0, -1, (SECTION_2_START + SECTION_2_END) / 2),
-        COLOR_SECTION_2_FLOOR)
 
     -- Section 3: no floor (disappearing platforms over void)
 
@@ -182,6 +179,7 @@ local function createFloor()
     -- No side walls — players can fall off the edges
 
     -- Back wall (behind start)
+    local wallHeight = 10
     createPart("Wall_Back",
         Vector3.new(COURSE_WIDTH + 4, wallHeight, 2),
         Vector3.new(0, wallHeight / 2 - 1, -1),
@@ -222,8 +220,7 @@ local function createGateCrashers()
                 Vector3.new(x, doorHeight / 2, z),
                 breakable[col] and COLOR_GATE_BREAKABLE or COLOR_GATE_SOLID
             )
-            door:SetAttribute("Breakable", breakable[col])
-            door:SetAttribute("Row", row)
+            doorIsBreakable[door] = breakable[col]
             table.insert(breakableDoors, door)
         end
     end
@@ -232,13 +229,14 @@ end
 local function createSpinningBars()
     local speeds = {0.5, -0.67, 0.6, -0.43}
     local heights = {2, 5, 2, 4}
-    local spacing = (SECTION_2_END - SECTION_2_START) / (SPIN_BAR_COUNT + 1)
+    local buffer = 20  -- safe zone at section start before first bar
+    local spacing = (SECTION_2_END - SECTION_2_START - buffer) / (SPIN_BAR_COUNT + 1)
 
     for i = 1, SPIN_BAR_COUNT do
-        local centerZ = SECTION_2_START + spacing * i
+        local centerZ = SECTION_2_START + buffer + spacing * i
         local bar = createPart(
             "SpinBar_" .. i,
-            Vector3.new(COURSE_WIDTH - 4, 2, 2),
+            Vector3.new(SPIN_BAR_LENGTH, 2, 2),
             Vector3.new(0, heights[i], centerZ),
             COLOR_SPIN_BAR
         )
@@ -255,17 +253,23 @@ local function createSpinningBars()
 end
 
 local function createDisappearingPath()
-    local segmentSize = Vector3.new(4, 1, 4)
-    local pathSegments = {}
+    local platformSize = Vector3.new(4, 2, 4)
 
     -- Create a winding path of platforms across section 3
     -- 3 columns (left=-6, center=0, right=6), staggered rows
     local columns = {-6, 0, 6}
-    local numRows = 12
-    local rowSpacing = (SECTION_3_END - SECTION_3_START - 10) / numRows
+
+    -- Compute uniform gap: same distance from floor→first platform, between platforms, and last platform→floor
+    -- sectionLength = (N+1)*gap + N*platformDepth  →  gap = (sectionLength - N*platformDepth) / (N+1)
+    local sectionLength = SECTION_3_END - SECTION_3_START -- 70
+    local numRows = 9
+    local gap = (sectionLength - numRows * platformSize.Z) / (numRows + 1) -- ~3.4 studs
+    -- Max jump distance ≈ 7.67 studs (walk=24, air_control=0.6, jump=8, gravity=30)
+    -- Gap of 3.4 studs requires jumping but is comfortable
 
     for row = 0, numRows - 1 do
-        local z = SECTION_3_START + 5 + row * rowSpacing
+        -- Platform center: start + gap + half_platform + row*(gap+platform)
+        local z = SECTION_3_START + gap + platformSize.Z / 2 + row * (gap + platformSize.Z)
         -- Create 2-3 platforms per row for multiple path options
         local numPlatforms = 2 + (row % 2) -- alternates 2 and 3
 
@@ -282,8 +286,8 @@ local function createDisappearingPath()
 
             local seg = createPart(
                 "Platform_" .. row .. "_" .. p,
-                segmentSize,
-                Vector3.new(x, 0, z),
+                platformSize,
+                Vector3.new(x, -1, z),  -- y=-1 so top surface at y=0, matching floor height
                 COLOR_PLATFORM
             )
 
@@ -298,14 +302,15 @@ end
 
 local function createFinalDash()
     local speeds = {0.4, -0.5, 0.33, -0.6}
-    local spacing = (SECTION_4_END - SECTION_4_START - 20) / (PENDULUM_COUNT + 1)
+    local wallHeight = 4  -- shorter walls to reduce overhead camera visual overlap
+    local spacing = (SECTION_4_END - SECTION_4_START - 30) / (PENDULUM_COUNT + 1)
 
     for i = 1, PENDULUM_COUNT do
-        local centerZ = SECTION_4_START + 10 + spacing * i
+        local centerZ = SECTION_4_START + 20 + spacing * i  -- 20-stud buffer from section start
         local wall = createPart(
             "Pendulum_" .. i,
-            Vector3.new(4, 12, 2),
-            Vector3.new(0, 6, centerZ),
+            Vector3.new(4, wallHeight, 2),
+            Vector3.new(0, wallHeight / 2, centerZ),
             COLOR_PENDULUM
         )
 
@@ -315,7 +320,7 @@ local function createFinalDash()
             radius = PENDULUM_RADIUS,
             centerX = 0,
             centerZ = centerZ,
-            height = 6,
+            height = wallHeight / 2,
         })
     end
 
@@ -393,11 +398,13 @@ local function checkObstacleCollisions()
                         local doorPos = door.Position
                         local doorSize = door.Size
                         local dx = math.abs(pos.X - doorPos.X)
-                        local dy = math.abs(pos.Y - doorPos.Y)
                         local dz = math.abs(pos.Z - doorPos.Z)
 
-                        if dx < doorSize.X / 2 + 1.5 and dy < doorSize.Y / 2 + 1.5 and dz < doorSize.Z / 2 + 1.5 then
-                            if door:GetAttribute("Breakable") then
+                        -- Only check X and Z proximity (ignore Y - doors are tall enough)
+                        if dx < doorSize.X / 2 + 1.5 and dz < doorSize.Z / 2 + 1.5 then
+                            if doorIsBreakable[door] then
+                                print("[DOOR] Breaking " .. door.Name .. " at z=" .. doorPos.Z)
+                                doorIsBreakable[door] = nil
                                 door:Destroy()
                                 table.remove(breakableDoors, i)
                             end
@@ -481,11 +488,11 @@ local function startRaceForPlayer(player, playerIndex)
     -- Teleport to start
     teleportPlayer(player, getSpawnPosition(playerIndex))
 
-    -- Set walk speed higher for racing
+    -- Set walk speed higher for racing (keep default jump power from engine)
     local humanoid = getHumanoid(player)
     if humanoid then
         humanoid.WalkSpeed = 24
-        humanoid.JumpPower = 50
+        humanoid.JumpPower = 12
     end
 end
 
@@ -512,6 +519,7 @@ local AgentInputService = game:GetService("AgentInputService")
 if AgentInputService then
     AgentInputService.InputReceived:Connect(function(player, inputType, data)
         local userId = player.UserId
+        print("[INPUT] " .. tostring(player.Name) .. " type=" .. tostring(inputType))
 
         if inputType == "MoveTo" then
             local humanoid = getHumanoid(player)
@@ -523,7 +531,10 @@ if AgentInputService then
         elseif inputType == "Jump" then
             local humanoid = getHumanoid(player)
             if humanoid then
+                print("[JUMP] " .. player.Name .. " jumping! JumpPower=" .. humanoid.JumpPower)
                 humanoid:Jump()
+            else
+                warn("[JUMP] No humanoid for " .. player.Name)
             end
         end
     end)

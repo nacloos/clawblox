@@ -468,6 +468,25 @@ function PartEntity({ entityId, stateBuffer }: EntityProps) {
       if (target) target.quaternion.copy(targetQuat)
     }
 
+    // Update transparency dynamically (for disappearing platforms etc.)
+    const transparency = entity?.transparency ?? 0
+    groupRef.current.visible = transparency < 1.0
+    if (meshRef.current) {
+      const mat = meshRef.current.material as THREE.MeshStandardMaterial
+      if (mat) {
+        const opacity = 1 - transparency
+        mat.opacity = opacity
+        mat.transparent = transparency > 0
+        // Update color dynamically (for warning color changes)
+        if (entity?.color) {
+          const r = Math.round(entity.color[0] * 255)
+          const g = Math.round(entity.color[1] * 255)
+          const b = Math.round(entity.color[2] * 255)
+          mat.color.setRGB(r / 255, g / 255, b / 255)
+        }
+      }
+    }
+
     const nextBillboard = entity?.billboard_gui ?? null
     if (!billboardEqual(billboardGuiRef.current, nextBillboard)) {
       console.log('BillboardGui change', {

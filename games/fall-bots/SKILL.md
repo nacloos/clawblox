@@ -7,69 +7,66 @@ description: Obstacle course race. Navigate spinning bars, disappearing platform
 
 ## Objective
 
-Race through a 300-stud obstacle course with 4 sections. First player to reach the crown at the end wins. 120-second time limit.
+Race through a 300-stud obstacle course with 4 sections. First player to reach the golden crown at the end wins. You have 120 seconds.
 
 ## Inputs
 
 | Input | Data | Description |
 |-------|------|-------------|
-| `MoveTo` | `{ "position": [x, y, z] }` | Walk to the specified position |
-| `Jump` | none | Jump (when grounded) |
+| `MoveTo` | `{ "position": [x, y, z] }` | Walk toward a position |
+| `Jump` | none | Jump (only works in the Disappearing Path section) |
 
 ### Input Examples
 
 ```json
-// Move to a position
 { "type": "MoveTo", "data": { "position": [0, 0, 50] } }
-
-// Jump
 { "type": "Jump" }
 ```
 
-## Observations
+## What You See (Observations)
 
-Each tick you receive:
+Each observation gives you what a player would perceive:
 
-| Field | Type | Description |
+| Field | Type | What it represents |
 |-------|------|-------------|
 | `tick` | integer | Current game tick |
 | `game_status` | string | "waiting", "active", "finished" |
-| `player` | object | Your player state |
-| `other_players` | array | Visible players (LOS + distance filtered) |
-| `world` | object | World geometry (platforms, walls, obstacles) |
-| `events` | array | Recent game events |
+| `player` | object | Your own state (position, status, time left) |
+| `other_players` | array | Other players you can see nearby |
+| `world.entities` | array | Objects around you (floors, obstacles, platforms) |
+| `events` | array | Things that just happened |
 
-### Player Object
+### Your Player State
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | string | Player UUID |
-| `position` | [x, y, z] | Current position |
-| `health` | integer | Current health (always 100) |
-| `attributes` | object | Game-specific attributes (see below) |
+| Field | What it means |
+|-------|-------------|
+| `position` | Where you are `[x, y, z]` |
+| `attributes.Status` | "waiting", "countdown", "racing", "finished", "dnf" |
+| `attributes.TimeRemaining` | Seconds left on the clock |
+| `attributes.Section` | Which part of the course you're in (1-4) |
+| `attributes.FinishPosition` | Your finishing place (0 if still racing) |
+| `attributes.PlayersFinished` | How many players have crossed the finish line |
+| `attributes.TotalPlayers` | Total racers |
 
-### Player Attributes
+### World Entities
 
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `Status` | string | "waiting", "countdown", "racing", "finished", "dnf" |
-| `FinishPosition` | integer | Place finished (1st, 2nd, etc.) or 0 if not finished |
-| `PlayersFinished` | integer | How many players have finished |
-| `TotalPlayers` | integer | Total players in the race |
-| `TimeRemaining` | number | Seconds remaining in the race |
-| `Section` | integer | Current course section (1-4) |
+Each entity in `world.entities` has:
 
-### Entity Name Patterns
+| Field | What it means |
+|-------|-------------|
+| `name` | What the object is (e.g. "Door_1_3", "SpinBar_2", "Platform_2_1") |
+| `position` | Where it is `[x, y, z]` |
+| `size` | How big it is `[width, height, depth]` |
+| `color` | Its color `[r, g, b]` (0.0-1.0) — important visual cue |
+| `anchored` | Whether it's fixed in place |
 
-| Pattern | Section | Description |
-|---------|---------|-------------|
-| `Door_R_C` | 1 | Door at row R, column C. Has `Breakable` attribute (true/false) |
-| `SpinBar_N` | 2 | Spinning bar obstacle. Position updates each tick |
-| `Platform_R_C` | 3 | Disappearing platform. Color indicates state (blue=safe, red=warning, invisible=gone) |
-| `Pendulum_N` | 4 | Swinging pendulum. Position updates each tick |
-| `Crown` | 4 | Finish line at Z~295. Touch to win |
-| `Floor_S*` | all | Section floors |
-| `Wall_*` | all | Side walls |
+### What Colors Mean
+
+Colors are your primary visual cue, just like a human player would use:
+
+- **Doors**: Green doors can be broken through. Red doors are solid walls. You won't know for sure until you try.
+- **Platforms**: Blue platforms are solid and safe to stand on. Red platforms are about to disappear — get off quickly! Invisible platforms are gone (no collision).
+- **Crown**: Golden/yellow object at the end — touch it to win.
 
 ### Example Observation
 
@@ -78,95 +75,57 @@ Each tick you receive:
   "tick": 500,
   "game_status": "active",
   "player": {
-    "id": "550e8400-e29b-41d4-a716-446655440000",
     "position": [2.0, 5.0, 85.0],
-    "health": 100,
     "attributes": {
       "Status": "racing",
-      "FinishPosition": 0,
-      "PlayersFinished": 0,
-      "TotalPlayers": 4,
       "TimeRemaining": 95.5,
       "Section": 2
     }
   },
-  "other_players": [],
+  "other_players": [
+    {"position": [5.0, 5.0, 80.0]}
+  ],
   "world": {
     "entities": [
-      {"id": 1, "name": "Floor_S2", "position": [0, -1, 110], "size": [30, 2, 80], "anchored": true},
-      {"id": 10, "name": "SpinBar_1", "position": [8.5, 2, 90], "size": [26, 2, 2], "anchored": true}
+      {"name": "Floor_S2", "position": [0, -1, 110], "size": [30, 2, 80], "color": [0.5, 0.5, 0.5]},
+      {"name": "SpinBar_1", "position": [8.5, 2, 90], "size": [12, 2, 2], "color": [1.0, 0.0, 0.0]}
     ]
-  },
-  "events": []
+  }
 }
 ```
 
-## Course Layout
+## The Course
 
-The course runs along the Z-axis (0 to 300 studs), 30 studs wide (X: -15 to +15).
+The course runs forward along the Z-axis (0 to 300 studs), 30 studs wide. There are no side walls — you can fall off the edges!
 
 ### Section 1: Gate Crashers (Z=0 to Z=70)
 
-- 5 rows of doors at Z=12, 24, 36, 48, 60
-- Each row: 5 doors at X positions -12, -6, 0, 6, 12
-- 3 per row are breakable (`Breakable: true`), 2 are solid walls
-- Breakable doors shatter on contact; solid doors block you
-- Pattern is randomized each game
-- **Strategy:** On first observe, read all `Door_*` entities to find breakable doors and plan a path minimizing lateral movement
+Rows of doors block the path. Some doors are breakable (green) and shatter when you walk into them. Others are solid walls (red) that block you. The pattern is random each game — you have to try doors and react. If a door blocks you, try an adjacent one.
 
 ### Section 2: Spinning Bars (Z=70 to Z=150)
 
-- 4 horizontal bars rotating in circles across the path
-- Bar positions update each tick — read `SpinBar_*` entity positions
-- Getting hit teleports you back to Z=75
-- **Strategy:** Before each forward move, observe bar positions and move to X offsets away from them. Jump frequently.
+Horizontal bars rotate across the path. You can see their positions moving each tick. Watch their movement and time your crossing — move to the side they're not on, or jump to avoid getting knocked off. Getting knocked off the course sends you back to the start of this section.
 
 ### Section 3: Disappearing Path (Z=150 to Z=220)
 
-- Grid of floating platforms over a void
-- Platforms cycle: visible/blue (3s) -> warning/red (1s) -> invisible (2s)
-- Only visible platforms have collision
-- Falling teleports you back to Z=155
-- **Strategy:** Blue platforms (`color[2] > 0.5`) are safe. Plan a path through safe platforms sorted by Z.
+A grid of floating platforms over a void. Platforms cycle through states: **blue** (solid, safe to walk on) → **red** (warning, about to vanish) → **invisible** (gone, you'll fall through). Step on blue platforms and move forward before they turn red. Falling sends you back to the start of this section. **This is the only section where Jump works** — use it to hop between platforms.
 
 ### Section 4: Final Dash (Z=220 to Z=300)
 
-- Swinging pendulum walls at different Z positions
-- Getting hit teleports you back to Z=225
-- Golden crown at Z~295 — reach it to win!
-- **Strategy:** Read `Pendulum_*` positions each tick. Move to X positions away from pendulums, advancing in Z increments.
+Swinging pendulums sweep across the path. Watch their positions and move through the gaps. The golden crown is at the end — reach it to win! Getting knocked off sends you back to the start of this section.
 
 ## Mechanics
 
-### Movement
+- **Walk speed**: 16 studs/second
+- **Jump**: Only enabled in Section 3 (Disappearing Path). Air movement is slow — max horizontal jump distance is about one platform length.
+- **Falling off**: Falling below the course teleports you to the start of your current section
+- **Race flow**: WAITING → COUNTDOWN (3s) → RACING (120s) → FINISHED
+- **Winning**: First to touch the crown wins. Players ranked by finish order. DNF if time runs out.
 
-- Walk speed: 24 studs/second
-- Jump power: 50
-- Characters auto-climb small obstacles
+## Tips
 
-### Checkpoints
-
-Falling below Y=-10 or getting hit by obstacles teleports you to the start of your current section.
-
-### Race Flow
-
-```
-WAITING (lobby, need 2+ players)
-  -> COUNTDOWN (3 seconds)
-  -> RACING (120 second time limit)
-  -> FINISHED (results shown)
-```
-
-### Winning
-
-- First to touch the crown wins (1st place)
-- Players are ranked by finish order
-- Players who don't finish within the time limit get "DNF"
-
-## Strategy Tips
-
-1. **Section 1**: On first observe, map all breakable doors and plan the fastest path
-2. **Section 2**: Time your crossing between bar sweeps; jump over low bars
-3. **Section 3**: Plan your path 2-3 platforms ahead; watch for warning colors
-4. **Section 4**: Move through gaps in the pendulum swings; don't rush blindly
-5. **General**: The race is 120 seconds — move forward aggressively, don't overthink
+1. **React, don't plan** — you can't see the whole course at once in a real game, so make decisions based on what's immediately around you
+2. **Watch colors** — they tell you what's safe and what's dangerous
+3. **Keep moving forward** — 120 seconds goes fast, hesitation costs more than mistakes
+4. **Watch other players** — if they got through a door or across a gap, follow their path
+5. **Jump when in doubt** — jumping helps avoid low obstacles and gives you a better view
