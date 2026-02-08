@@ -48,7 +48,7 @@ export const PLATFORM_GAMES: PlatformGame[] = [
   {
     id: 'tsunami',
     name: 'Escape Tsunami For Brainrots',
-    thumbnail: '/games/tsunami.png',
+    thumbnail: '/games/tsunami-wallpaper-600x800.png',
     agentCount: 1247,
     description: 'Collect brainrots, deposit for money, buy speed upgrades to escape the rising tsunami!',
     categories: ['survival', 'arcade'],
@@ -59,7 +59,7 @@ export const PLATFORM_GAMES: PlatformGame[] = [
   {
     id: 'arsenal',
     name: 'Block Arsenal',
-    thumbnail: '/games/arsenal.png',
+    thumbnail: '/games/arsenal-wallpaper-600x800.png',
     agentCount: 892,
     description: 'Gun Game mode - progress through weapons by getting kills. First to the Golden Knife wins!',
     categories: ['fps'],
@@ -69,7 +69,7 @@ export const PLATFORM_GAMES: PlatformGame[] = [
   {
     id: 'moba',
     name: 'MOBA Arena',
-    thumbnail: '/games/moba.png',
+    thumbnail: '/games/moba-wallpaper-600x800.png',
     agentCount: 653,
     description: 'Team battles with unique champions and abilities in fast-paced 5v5 matches.',
     categories: ['moba', 'strategy'],
@@ -79,7 +79,7 @@ export const PLATFORM_GAMES: PlatformGame[] = [
   {
     id: 'brawl',
     name: 'Brawl Stars',
-    thumbnail: '/games/brawl.png',
+    thumbnail: '/games/brawl-wallpaper-600x800.png',
     agentCount: 421,
     description: 'Fast-paced 3v3 team battles with various game modes and unique brawlers.',
     categories: ['moba'],
@@ -91,7 +91,7 @@ export const PLATFORM_GAMES: PlatformGame[] = [
   {
     id: 'racing',
     name: 'Velocity Racing',
-    thumbnail: '/games/tsunami.png',
+    thumbnail: '/games/racing-wallpaper-600x800.png',
     agentCount: 334,
     description: 'High-speed racing with AI drivers competing for the championship.',
     categories: ['racing'],
@@ -101,7 +101,7 @@ export const PLATFORM_GAMES: PlatformGame[] = [
   {
     id: 'tower-defense',
     name: 'Tower Defense Ultimate',
-    thumbnail: '/games/tsunami.png',
+    thumbnail: '/games/tower-defense-wallpaper-600x800.png',
     agentCount: 289,
     description: 'Strategic tower placement to defend against waves of enemies.',
     categories: ['strategy'],
@@ -111,7 +111,7 @@ export const PLATFORM_GAMES: PlatformGame[] = [
   {
     id: 'battle-royale',
     name: 'Battle Royale 100',
-    thumbnail: '/games/tsunami.png',
+    thumbnail: '/games/battle-royale-wallpaper-600x800.png',
     agentCount: 1523,
     description: '100 agents drop into a shrinking map. Last one standing wins!',
     categories: ['fps', 'survival'],
@@ -121,7 +121,7 @@ export const PLATFORM_GAMES: PlatformGame[] = [
   {
     id: 'city-builder',
     name: 'Metropolis Builder',
-    thumbnail: '/games/tsunami.png',
+    thumbnail: '/games/city-builder-wallpaper-600x800.png',
     agentCount: 167,
     description: 'Build and manage a thriving city with AI citizens.',
     categories: ['strategy'],
@@ -131,7 +131,7 @@ export const PLATFORM_GAMES: PlatformGame[] = [
   {
     id: 'platformer',
     name: 'Pixel Jumper',
-    thumbnail: '/games/tsunami.png',
+    thumbnail: '/games/platformer-wallpaper-600x800.png',
     agentCount: 445,
     description: 'Classic platforming action with AI-controlled speedrunners.',
     categories: ['arcade'],
@@ -141,7 +141,7 @@ export const PLATFORM_GAMES: PlatformGame[] = [
   {
     id: 'card-game',
     name: 'Card Masters',
-    thumbnail: '/games/tsunami.png',
+    thumbnail: '/games/card-game-wallpaper-600x800.png',
     agentCount: 298,
     description: 'Strategic card battles with AI opponents learning optimal strategies.',
     categories: ['strategy'],

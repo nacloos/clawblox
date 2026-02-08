@@ -1,0 +1,54 @@
+{
+  "thumbnails": [
+    {
+      "id": "tsunami",
+      "name": "Escape Tsunami For Brainrots",
+      "description": "Vibrant Roblox-style thumbnail with cartoonish low-poly blocky characters running frantically on a tropical island. Massive blue tsunami wave looming in the background with dramatic lighting. Bright floating brainrot collectibles (glowing colorful orbs) scattered across sandy beach. Bold yellow text 'ESCAPE THE TSUNAMI!' with red outline. Exaggerated expressions on character faces showing panic. Sparkle effects and speed lines. Saturated colors - bright blue water, golden sand, green palm trees. Dynamic diagonal composition showing urgency. Roblox aesthetic with simple geometry and playful physics."
+    },
+    {
+      "id": "arsenal",
+      "name": "Block Arsenal",
+      "description": "High-energy Roblox FPS thumbnail featuring blocky characters in dynamic combat poses holding various weapons (pistol, rifle, knife). Urban warfare map with concrete walls and colorful graffiti. Muzzle flashes and bullet tracers creating action. Bold text 'GUN GAME' with metallic chrome effect. Golden knife prominently displayed (the winning weapon). Red vs blue team colors. Explosive effects and particle systems. Modern military aesthetic mixed with Roblox's blocky charm. Fast-paced composition with diagonal action lines suggesting movement and chaos."
+    },
+    {
+      "id": "moba",
+      "name": "MOBA Arena",
+      "description": "Epic fantasy MOBA scene with 5 diverse champions facing off in a symmetrical arena. League of Legends / Dota 2 inspired aesthetic with detailed character designs - mage casting spells, warrior with sword, archer, tank, and assassin. Glowing nexus towers in background. Magical abilities creating colorful spell effects - fire, ice, lightning. Dark fantasy color palette with neon ability highlights. Three-lane map visible from elevated perspective. Dramatic cinematic lighting with lens flare. Professional esports tournament poster quality. Clean UI elements showing 5v5 team composition."
+    },
+    {
+      "id": "brawl",
+      "name": "Brawl Stars",
+      "description": "Colorful Supercell-style thumbnail with three cartoonish brawler characters in action poses. Vibrant comic book aesthetic with thick outlines and cell-shaded rendering. Characters shooting projectiles with exaggerated effects. Gem grab mode with glowing purple gems scattered on ground. Bright, saturated colors - hot pink, electric blue, lime green. Playful destruction with crates and bushes. Dynamic starburst background pattern. Bold chunky text logo style. Mobile game energy with simplified but expressive character designs. Top-down arena partially visible showing tactical gameplay area."
+    },
+    {
+      "id": "racing",
+      "name": "Velocity Racing",
+      "description": "High-speed racing thumbnail with sleek futuristic hovercars on a neon-lit cyberpunk track. Forza / Gran Turismo level of polish with realistic reflections and motion blur. Multiple AI-driven cars competing side-by-side at extreme speeds. Futuristic city skyline at night with glowing billboards. Light trails from vehicles creating sense of velocity. Dramatic low-angle camera showing underbody glow effects. Electric blue and hot pink accent lighting. Metallic car paint with perfect reflections. Speed lines and particle effects suggesting 300+ mph. Championship trophy or finish line visible. Professional racing game aesthetic."
+    },
+    {
+      "id": "tower-defense",
+      "name": "Tower Defense Ultimate",
+      "description": "Strategic top-down view of a tower defense battlefield with winding path through fantasy terrain. Kingdom Rush / Bloons TD inspired aesthetic. Multiple colorful defensive towers - archer towers (green), mage towers (purple), cannon towers (red) - firing at waves of diverse enemies. Medieval fantasy theme with stone pathways, grass, trees. Enemies in formation marching toward base - goblins, orcs, flying creatures. Glowing damage numbers and effect particles. Clear tactical grid layout. Vibrant but strategic color coding. Castle or crystal at end needing protection. Satisfying visual feedback of towers destroying enemies."
+    },
+    {
+      "id": "battle-royale",
+      "name": "Battle Royale 100",
+      "description": "Epic battle royale thumbnail showing 100 player drop from aircraft over massive island map. Fortnite / PUBG / Apex Legends aesthetic with mix of realism and style. Aerial view of diverse terrain - cities, forests, mountains, beaches. Shrinking storm circle visible as glowing boundary. Players parachuting down with colorful trails. Ground showing buildings, vehicles, loot crates. Dramatic sunset lighting casting long shadows. Supply drop planes in sky. Top players equipped with legendary weapons and gear. Text '100 PLAYERS. 1 WINNER.' in bold military stencil font. Cinematic wide-angle composition suggesting scale and competition."
+    },
+    {
+      "id": "city-builder",
+      "name": "Metropolis Builder",
+      "description": "Isometric city-building view showing thriving modern metropolis with SimCity / Cities Skylines aesthetic. Grid layout of detailed buildings - skyscrapers, residential zones, industrial areas, parks. Tiny AI citizens walking on streets, cars on roads. Day-to-night transition showing city lights glowing. Green parks contrasting with grey concrete. Construction cranes showing active development. Clean, organized urban planning. Stats overlays showing population growth and happiness. Aerial perspective showing interconnected road networks and zoning. Warm, inviting colors suggesting prosperity. Detailed infrastructure - power lines, water pipes visible. Professional city planning simulation aesthetic."
+    },
+    {
+      "id": "platformer",
+      "name": "Pixel Jumper",
+      "description": "Retro pixel art platformer with nostalgic 8-bit / 16-bit aesthetic. Celeste / Hollow Knight pixel art quality. Character mid-jump between floating platforms over dangerous spikes and lava. Bright pixel art with limited color palette - cyan sky, brown platforms, red hazards. Power-ups floating - coins, hearts, speed boosts. Background showing parallax scrolling layers - clouds, mountains, castle in distance. CRT scanline effect for authentic retro feel. Speedrun timer visible showing optimized route. Frame-perfect jump indicators. Challenging level design visible with precise platforming required. Warm nostalgic glow like classic NES/SNES games."
+    },
+    {
+      "id": "card-game",
+      "name": "Card Masters",
+      "description": "Strategic card battler with Hearthstone / Magic the Gathering Arena aesthetic. Ornate fantasy cards displayed prominently showing creatures, spells, artifacts. Magical battlefield table with glowing mana crystals. Two hands of cards facing off - detailed card art visible with fantasy illustrations. Particle effects showing card being played and coming to life. Rich wooden table texture with arcane runes. Gold and purple color scheme suggesting prestige. Holographic foil effects on legendary cards. Strategic positioning of minions on battlefield. Crystal-clear card text readable. Professional digital card game polish with 3D card animations and spell effects."
+    }
+  ]
+}

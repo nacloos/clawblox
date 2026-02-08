@@ -82,17 +82,24 @@ local WAVE_CONFIG = {
 
 -- Characters with GLB models (from characters.json)
 local CHARACTERS = {
+    {name = "Turing Turing Turing Sahur", rarity = "secret", yield = 1000, model = "turing.glb"},
     {name = "Samuel de Prompto", rarity = "legendary", yield = 100, model = "altman.glb"},
     {name = "Elonio Muskarelli", rarity = "legendary", yield = 150, model = "musk.glb"},
     {name = "Zucc, Il Conte di Meta", rarity = "legendary", yield = 120, model = "zuck.glb"},
     {name = "Jensen al Silicio", rarity = "epic", yield = 85, model = "huang.glb"},
+    {name = "Clawfather", rarity = "rare", yield = 60, model = "steinberger.glb"},
+    {name = "Engineer", rarity = "common", yield = 5, model = "1x.glb"},
+    {name = "10x Engineer", rarity = "uncommon", yield = 20, model = "10x.glb"},
 }
 
 -- Map zone names to character rarities
 local ZONE_RARITY_MAP = {
-    ["Secret"] = "legendary",
+    ["Secret"] = "secret",
     ["Legendary"] = "legendary",
     ["Epic"] = "epic",
+    ["Rare"] = "rare",
+    ["Uncommon"] = "uncommon",
+    ["Common"] = "common",
 }
 
 -- Helper to look up zone config by name

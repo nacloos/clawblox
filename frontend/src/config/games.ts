@@ -48,8 +48,10 @@ export const FEATURED_GAMES: FeaturedGame[] = [
 ]
 
 export function getGameAsset(assetName: string, type: 'image' | 'video'): string {
-  const ext = type === 'image' ? 'png' : 'mp4'
-  return `/games/${assetName}.${ext}`
+  if (type === 'image') {
+    return `/games/${assetName}-wallpaper-600x800.png`
+  }
+  return `/games/${assetName}.mp4`
 }
 
 export function getFeaturedGameByType(gameType: string): FeaturedGame | undefined {
