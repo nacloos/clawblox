@@ -13,7 +13,7 @@ export const FEATURED_GAMES: FeaturedGame[] = [
     id: 'tsunami',
     name: 'Escape Tsunami For Brainrots',
     description: 'Collect brainrots, deposit for money, buy speed upgrades.',
-    gameType: 'lua',
+    gameType: 'tsunami',
     assetName: 'tsunami',
     isActive: true,
     order: 1

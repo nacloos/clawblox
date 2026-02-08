@@ -2,10 +2,12 @@ import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { listGames, GameListItem } from '../api'
-import { getFeaturedGameById } from '../config/games'
+import { getFeaturedGameById, getGameAsset } from '../config/games'
+import { getGameById } from '../config/platformData'
 import SessionCard from '../components/SessionCard'
 import GameInstructions from '../components/GameInstructions'
 import { Button } from '../components/ui/button'
+import { Badge } from '../components/ui/badge'
 
 function LoadingSkeleton() {
   return (
@@ -25,6 +27,7 @@ export default function GameSessions() {
   const [error, setError] = useState<string | null>(null)
 
   const featuredGame = gameType ? getFeaturedGameById(gameType) : null
+  const platformGame = gameType ? getGameById(gameType) : null
 
   useEffect(() => {
     const loadSessions = async () => {
@@ -40,7 +43,8 @@ export default function GameSessions() {
         setSessions(filtered)
         setError(null)
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Failed to load sessions')
+        console.error('Failed to load sessions:', e)
+        setError(e instanceof Error ? e.message : 'Failed to load sessions. Make sure the backend is running.')
       } finally {
         setLoading(false)
       }
@@ -65,23 +69,66 @@ export default function GameSessions() {
   }
 
   return (
-    <div className="p-8 pb-20 space-y-8">
+    <div className="p-8 pb-20">
       {/* Header */}
-      <div>
+      <div className="mb-8">
         <Button
           variant="ghost"
-          onClick={() => navigate('/')}
+          onClick={() => navigate('/browse')}
           className="mb-4 -ml-2"
         >
           <ArrowLeft className="h-4 w-4 mr-2" />
           Back to Games
         </Button>
-        <h1 className="text-3xl font-bold text-foreground">{featuredGame.name}</h1>
-        <p className="text-muted-foreground mt-2">{featuredGame.description}</p>
+
+        <div className="flex items-start gap-6">
+          {/* Thumbnail */}
+          <img
+            src={getGameAsset(featuredGame.assetName, 'image')}
+            alt={featuredGame.name}
+            className="w-48 h-64 object-cover rounded-xl border border-border"
+          />
+
+          {/* Info */}
+          <div className="flex-1">
+            <div className="flex items-start justify-between">
+              <div>
+                <h1 className="text-4xl font-bold text-foreground mb-2">{featuredGame.name}</h1>
+                <p className="text-lg text-muted-foreground mb-4">{featuredGame.description}</p>
+              </div>
+              {platformGame?.isLive && (
+                <Badge variant="default" className="bg-red-500 text-white">
+                  LIVE
+                </Badge>
+              )}
+            </div>
+
+            <div className="mt-6 p-4 rounded-lg bg-card border border-border">
+              <div className="flex items-center gap-6">
+                <div>
+                  <div className="text-2xl font-bold text-primary">
+                    {platformGame?.agentCount.toLocaleString() || 0}
+                  </div>
+                  <div className="text-sm text-muted-foreground">Active Agents</div>
+                </div>
+                <div>
+                  <div className="text-2xl font-bold text-primary">{sessions.length}</div>
+                  <div className="text-sm text-muted-foreground">Live Sessions</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Instructions */}
-      <GameInstructions gameType={featuredGame.gameType} />
+      <div className="mb-8">
+        <GameInstructions
+          gameType={featuredGame.gameType}
+          gameName={featuredGame.name}
+          gameId={sessions.length > 0 ? sessions[0].id : undefined}
+        />
+      </div>
 
       {/* Error */}
       {error && (
