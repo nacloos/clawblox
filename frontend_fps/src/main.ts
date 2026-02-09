@@ -14,6 +14,13 @@ interface SpectatorPlayerInfo {
   root_part_id?: number
   health: number
   attributes?: Record<string, unknown>
+  active_animations?: Array<{
+    animation_id: string
+    time_position: number
+    speed: number
+    looped: boolean
+    is_playing: boolean
+  }>
 }
 
 interface SpectatorEntity {
@@ -123,7 +130,17 @@ function geometryFromEntity(entity: SpectatorEntity): THREE.BufferGeometry {
 
 const entityObjects = new Map<number, THREE.Object3D>()
 const gltfLoader = new GLTFLoader()
-const modelTemplateCache = new Map<string, Promise<THREE.Object3D>>()
+const modelTemplateCache = new Map<string, Promise<{ scene: THREE.Object3D, animations: THREE.AnimationClip[] }>>()
+const modelEntityStates = new Map<number, {
+  mixer: THREE.AnimationMixer
+  walkAction?: THREE.AnimationAction
+  idleAction?: THREE.AnimationAction
+  lastPos: THREE.Vector3 | null
+  moveSpeed: number
+  targetYaw: number
+  currentYaw: number
+  modelRoot: THREE.Object3D
+}>()
 const clock = new THREE.Clock()
 let latestObservation: SpectatorObservation | null = null
 let selectedPlayerId: string | null = null
@@ -200,13 +217,13 @@ function createPrimitiveEntityMesh(entity: SpectatorEntity): THREE.Mesh {
   return mesh
 }
 
-function loadModelTemplate(url: string): Promise<THREE.Object3D> {
+function loadModelTemplate(url: string): Promise<{ scene: THREE.Object3D, animations: THREE.AnimationClip[] }> {
   let cached = modelTemplateCache.get(url)
   if (!cached) {
     cached = new Promise((resolve, reject) => {
       gltfLoader.load(
         url,
-        (gltf) => resolve(gltf.scene),
+        (gltf) => resolve({ scene: gltf.scene, animations: gltf.animations ?? [] }),
         undefined,
         (error) => reject(error),
       )
@@ -214,6 +231,10 @@ function loadModelTemplate(url: string): Promise<THREE.Object3D> {
     modelTemplateCache.set(url, cached)
   }
   return cached
+}
+
+function findClip(animations: THREE.AnimationClip[], pattern: RegExp): THREE.AnimationClip | undefined {
+  return animations.find((clip) => pattern.test(clip.name))
 }
 
 function fitModelToSize(model: THREE.Object3D, size: [number, number, number]): void {
@@ -253,7 +274,7 @@ async function attachModelToEntityRoot(
   render: RenderSpec,
 ): Promise<void> {
   try {
-    const template = await loadModelTemplate(modelUrl)
+    const loaded = await loadModelTemplate(modelUrl)
     const entityId = root.userData.entityId as number | undefined
     if (typeof entityId !== 'number' || !entityObjects.has(entityId)) {
       return
@@ -263,12 +284,86 @@ async function attachModelToEntityRoot(
       root.remove(child)
       disposeObject(child)
     }
-    const clone = cloneSkeleton(template)
+    const clone = cloneSkeleton(loaded.scene)
     fitModelToSize(clone, size)
     setShadowFlags(clone, render.casts_shadow, render.receives_shadow)
     root.add(clone)
+
+    if (loaded.animations.length > 0) {
+      const mixer = new THREE.AnimationMixer(clone)
+      const walkClip = findClip(loaded.animations, /(walk|run|jog|locomotion)/i) ?? loaded.animations[0]
+      const idleClip = findClip(loaded.animations, /idle/i)
+      const walkAction = walkClip ? mixer.clipAction(walkClip) : undefined
+      const idleAction = idleClip ? mixer.clipAction(idleClip) : undefined
+
+      if (walkAction) {
+        walkAction.reset()
+        walkAction.play()
+        walkAction.paused = true
+        walkAction.time = 0
+      }
+      if (idleAction && idleAction !== walkAction) {
+        idleAction.reset()
+        idleAction.play()
+      }
+
+      modelEntityStates.set(entityId, {
+        mixer,
+        walkAction,
+        idleAction,
+        lastPos: null,
+        moveSpeed: 0,
+        targetYaw: 0,
+        currentYaw: 0,
+        modelRoot: clone,
+      })
+    }
   } catch (error) {
     console.warn('Failed to load model for entity', modelUrl, error)
+  }
+}
+
+function updateModelAnimations(dt: number): void {
+  if (dt <= 0) return
+  for (const [entityId, state] of modelEntityStates) {
+    const obj = entityObjects.get(entityId)
+    if (!obj) continue
+
+    const current = obj.position.clone()
+    if (state.lastPos) {
+      const dx = current.x - state.lastPos.x
+      const dz = current.z - state.lastPos.z
+      const speed = Math.sqrt(dx * dx + dz * dz) / dt
+      const lerpFactor = speed < state.moveSpeed ? 0.5 : 0.2
+      state.moveSpeed = THREE.MathUtils.lerp(state.moveSpeed, speed, lerpFactor)
+      if (Math.abs(dx) > 0.01 || Math.abs(dz) > 0.01) {
+        state.targetYaw = Math.atan2(dx, dz)
+      }
+    }
+    state.lastPos = current
+
+    const rotDiff = state.targetYaw - state.currentYaw
+    const shortest = Math.atan2(Math.sin(rotDiff), Math.cos(rotDiff))
+    state.currentYaw += shortest * Math.min(1, dt * 10)
+    state.modelRoot.rotation.y = state.currentYaw
+
+    const isMoving = state.moveSpeed > 0.5
+    if (state.walkAction) {
+      if (isMoving) {
+        state.walkAction.paused = false
+        state.walkAction.timeScale = THREE.MathUtils.clamp(state.moveSpeed / 5, 0.7, 1.6)
+      } else {
+        state.walkAction.paused = true
+        state.walkAction.time = 0
+      }
+    }
+
+    if (state.idleAction && state.idleAction !== state.walkAction) {
+      state.idleAction.paused = false
+      state.idleAction.weight = isMoving ? 0 : 1
+    }
+
+    state.mixer.update(dt)
   }
 }
 
@@ -314,6 +409,13 @@ function updateScene(obs: SpectatorObservation): void {
       scene.remove(obj)
       disposeObject(obj)
       entityObjects.delete(id)
+      const modelState = modelEntityStates.get(id)
+      if (modelState) {
+        modelState.walkAction?.stop()
+        modelState.idleAction?.stop()
+        modelState.mixer.stopAllAction()
+        modelEntityStates.delete(id)
+      }
     }
   }
 }
@@ -551,6 +653,7 @@ function frame(): void {
 
   if (latestObservation) {
     updateCamera(latestObservation, dt)
+    updateModelAnimations(dt)
   }
 
   const t = Date.now() * 0.001
