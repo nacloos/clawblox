@@ -4,9 +4,6 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use super::async_bridge::AsyncBridge;
-use super::constants::physics as consts;
-use super::constants::humanoid as humanoid_consts;
-use super::humanoid_movement::{build_motion_plan, resolve_vertical_velocity_after_move};
 use super::lua::instance::{
     attributes_to_json, AttributeValue, ClassName, Instance, TextXAlignment, TextYAlignment,
 };
@@ -18,13 +15,8 @@ use super::touch_events::compute_touch_transitions;
 mod tick_pipeline;
 mod observation;
 mod character_controller;
+mod controller_runtime;
 
-use self::character_controller::{
-    evaluate_ground_controller, sample_ground_sensor, ControllerManagerConfig,
-};
-
-/// Walk speed for player characters (studs per second)
-const WALK_SPEED: f32 = consts::WALK_SPEED;
 /// Default AFK timeout in seconds (5 minutes)
 const DEFAULT_AFK_TIMEOUT_SECS: u64 = 300;
 
@@ -869,100 +861,7 @@ impl GameInstance {
 
     /// Syncs Lua humanoid MoveTo targets to physics character controllers
     fn sync_humanoid_move_targets(&mut self) {
-        if self.lua_runtime.is_none() {
-            return;
-        }
-
-        // For each player, check if their humanoid has a move target.
-        // Copy pairs first so we can emit callbacks mutably inside the loop.
-        let player_pairs: Vec<(Uuid, u64)> = self
-            .players
-            .iter()
-            .map(|(&agent_id, &user_id)| (agent_id, user_id))
-            .collect();
-
-        for (agent_id, user_id) in player_pairs {
-            let Some(&hrp_id) = self.player_hrp_ids.get(&agent_id) else {
-                if let Ok(mut counts) = self.humanoid_warn_counts.lock() {
-                    let count = counts.entry(agent_id).or_insert(0);
-                    if *count < 3 {
-                        eprintln!("[MoveTo WARN] Missing HRP for agent {}", agent_id);
-                        *count += 1;
-                    }
-                }
-                continue;
-            };
-
-            // Get player's character and humanoid
-            let runtime = self.lua_runtime.as_ref().unwrap();
-            let Some(player) = runtime.players().get_player_by_user_id(user_id) else {
-                if let Ok(mut counts) = self.humanoid_warn_counts.lock() {
-                    let count = counts.entry(agent_id).or_insert(0);
-                    if *count < 3 {
-                        eprintln!("[MoveTo WARN] Missing player for agent {}", agent_id);
-                        *count += 1;
-                    }
-                }
-                continue;
-            };
-
-            let player_data = player.data.lock().unwrap();
-            let Some(character_weak) = player_data.player_data.as_ref().and_then(|pd| pd.character.as_ref()) else {
-                if let Ok(mut counts) = self.humanoid_warn_counts.lock() {
-                    let count = counts.entry(agent_id).or_insert(0);
-                    if *count < 3 {
-                        eprintln!("[MoveTo WARN] Missing character for agent {}", agent_id);
-                        *count += 1;
-                    }
-                }
-                continue;
-            };
-            let Some(character_ref) = character_weak.upgrade() else {
-                if let Ok(mut counts) = self.humanoid_warn_counts.lock() {
-                    let count = counts.entry(agent_id).or_insert(0);
-                    if *count < 3 {
-                        eprintln!("[MoveTo WARN] Character ref expired for agent {}", agent_id);
-                        *count += 1;
-                    }
-                }
-                continue;
-            };
-            drop(player_data);
-
-            // Find humanoid in character and process move target
-            let character_data = character_ref.lock().unwrap();
-            let mut found_humanoid = false;
-            let mut cancelled_move_to = false;
-            for child_ref in &character_data.children {
-                let mut child_data = child_ref.lock().unwrap();
-                if let Some(humanoid) = &mut child_data.humanoid_data {
-                    found_humanoid = true;
-                    // Check for cancel first
-                    if humanoid.cancel_move_to {
-                        humanoid.cancel_move_to = false;
-                        self.physics.set_character_target(hrp_id, None);
-                        cancelled_move_to = true;
-                    } else if let Some(target) = humanoid.move_to_target.take() {
-                        self.physics.set_character_target(hrp_id, Some([target.x, target.y, target.z]));
-                    }
-                }
-            }
-            drop(character_data);
-
-            if cancelled_move_to {
-                self.fire_humanoid_move_to_finished(agent_id, false);
-            }
-
-            if !found_humanoid {
-                if let Ok(mut counts) = self.humanoid_warn_counts.lock() {
-                    let count = counts.entry(agent_id).or_insert(0);
-                    if *count < 3 {
-                        eprintln!("[MoveTo WARN] No humanoid found for agent {}", agent_id);
-                        *count += 1;
-                    }
-                }
-            }
-        }
+        controller_runtime::sync_move_targets(self);
     }
 
 
@@ -970,90 +869,7 @@ impl GameInstance {
     /// Updates character controller movement towards targets.
     /// Uses Rapier's kinematic character controller for full 3D translation.
     fn update_character_movement(&mut self, dt: f32) {
-        // Collect agent_id -> hrp_id pairs to process (avoid borrow issues)
-        let agent_hrp_pairs: Vec<(Uuid, u64)> = self
-            .player_hrp_ids
-            .iter()
-            .map(|(&agent_id, &hrp_id)| (agent_id, hrp_id))
-            .collect();
-
-        for (agent_id, hrp_id) in agent_hrp_pairs {
-            // Get current position, target, and vertical velocity
-            let (current_pos, target, vertical_velocity, grounded, move_to_elapsed) = {
-                let Some(state) = self.physics.get_character_state(hrp_id) else {
-                    continue;
-                };
-                let Some(pos) = self.physics.get_character_position(hrp_id) else {
-                    continue;
-                };
-                (
-                    pos,
-                    state.target_position,
-                    state.vertical_velocity,
-                    state.grounded,
-                    state.move_to_elapsed,
-                )
-            };
-
-            // Look up the humanoid's walk_speed from Lua instance data
-            let walk_speed = self.get_humanoid_walk_speed(agent_id).unwrap_or(WALK_SPEED);
-            let jump_power = self.consume_humanoid_jump_request(agent_id);
-            let gravity = self.physics.gravity.y;
-            let controller_config = ControllerManagerConfig {
-                ground_query_distance: consts::CHARACTER_GROUND_QUERY_DISTANCE,
-                platform_stick_distance: consts::CHARACTER_PLATFORM_STICK_DISTANCE,
-            };
-            let ground_sample = sample_ground_sensor(&self.physics, hrp_id, grounded, controller_config);
-            let ground_decision = evaluate_ground_controller(ground_sample, controller_config);
-            let motion_plan = build_motion_plan(
-                current_pos,
-                target,
-                walk_speed,
-                vertical_velocity,
-                gravity,
-                dt,
-                grounded,
-                ground_decision.carry_by_platform,
-                jump_power,
-                ground_decision.platform_velocity,
-            );
-
-            let mut new_vertical_velocity = motion_plan.new_vertical_velocity;
-            let mut new_move_to_elapsed = move_to_elapsed;
-            if motion_plan.reached_move_to {
-                self.physics.set_character_target(hrp_id, None);
-                new_move_to_elapsed = 0.0;
-            }
-
-            let mut move_to_timed_out = false;
-            if target.is_some() && !motion_plan.reached_move_to {
-                new_move_to_elapsed += dt;
-                if new_move_to_elapsed >= humanoid_consts::MOVE_TO_TIMEOUT_SECS {
-                    self.physics.set_character_target(hrp_id, None);
-                    new_move_to_elapsed = 0.0;
-                    move_to_timed_out = true;
-                }
-            }
-
-            if let Some(movement) = self.physics.move_character(hrp_id, motion_plan.desired, dt) {
-                new_vertical_velocity = resolve_vertical_velocity_after_move(
-                    new_vertical_velocity,
-                    motion_plan.desired[1],
-                    movement.translation.y,
-                    movement.grounded,
-                );
-            }
-
-            if let Some(state) = self.physics.get_character_state_mut(hrp_id) {
-                state.vertical_velocity = new_vertical_velocity;
-                state.move_to_elapsed = new_move_to_elapsed;
-            }
-            if motion_plan.reached_move_to {
-                self.fire_humanoid_move_to_finished(agent_id, true);
-            } else if move_to_timed_out {
-                self.fire_humanoid_move_to_finished(agent_id, false);
-            }
-        }
+        controller_runtime::update_character_movement(self, dt);
     }
 
     /// Gets the observation for a specific player
@@ -1104,112 +920,10 @@ impl GameInstance {
         None
     }
 
-    /// Get walk speed from the player's Humanoid
+    #[cfg(test)]
+    /// Get walk speed from the player's controller source.
     fn get_humanoid_walk_speed(&self, agent_id: Uuid) -> Option<f32> {
-        let user_id = *self.players.get(&agent_id)?;
-        let runtime = self.lua_runtime.as_ref()?;
-        let player = runtime.players().get_player_by_user_id(user_id)?;
-
-        let player_data = player.data.lock().unwrap();
-        let character = player_data
-            .player_data
-            .as_ref()?
-            .character
-            .as_ref()?
-            .upgrade()?;
-        drop(player_data);
-
-        let char_data = character.lock().unwrap();
-        for child in &char_data.children {
-            let child_data = child.lock().unwrap();
-            if let Some(humanoid) = &child_data.humanoid_data {
-                return Some(humanoid.walk_speed);
-            }
-        }
-        None
-    }
-
-    /// Consume one pending jump request from the player's Humanoid.
-    fn consume_humanoid_jump_request(&mut self, agent_id: Uuid) -> Option<f32> {
-        let user_id = *self.players.get(&agent_id)?;
-        let runtime = self.lua_runtime.as_ref()?;
-        let player = runtime.players().get_player_by_user_id(user_id)?;
-
-        let player_data = player.data.lock().unwrap();
-        let character = player_data
-            .player_data
-            .as_ref()?
-            .character
-            .as_ref()?
-            .upgrade()?;
-        drop(player_data);
-
-        let char_data = character.lock().unwrap();
-        for child in &char_data.children {
-            let mut child_data = child.lock().unwrap();
-            if let Some(humanoid) = &mut child_data.humanoid_data {
-                if humanoid.jump_requested {
-                    humanoid.jump_requested = false;
-                    return Some(humanoid.jump_power);
-                }
-                return None;
-            }
-        }
-        None
-    }
-
-    /// Fire Humanoid.MoveToFinished(reached) for this player if a humanoid is available.
-    fn fire_humanoid_move_to_finished(&mut self, agent_id: Uuid, reached: bool) {
-        let result: Result<(), mlua::Error> = (|| {
-            let Some(user_id) = self.players.get(&agent_id).copied() else {
-                return Ok(());
-            };
-            let Some(runtime) = &self.lua_runtime else {
-                return Ok(());
-            };
-            let Some(player) = runtime.players().get_player_by_user_id(user_id) else {
-                return Ok(());
-            };
-
-            let signal = {
-                let player_data = player.data.lock().unwrap();
-                let Some(character) = player_data
-                    .player_data
-                    .as_ref()
-                    .and_then(|p| p.character.as_ref())
-                    .and_then(|w| w.upgrade()) else {
-                    return Ok(());
-                };
-                drop(player_data);
-
-                let char_data = character.lock().unwrap();
-                let mut result = None;
-                for child in &char_data.children {
-                    let child_data = child.lock().unwrap();
-                    if let Some(humanoid) = &child_data.humanoid_data {
-                        result = Some(humanoid.move_to_finished.clone());
-                        break;
-                    }
-                }
-                result
-            };
-
-            let Some(signal) = signal else {
-                return Ok(());
-            };
-
-            let lua = runtime.lua();
-            let threads = signal.fire_as_coroutines(
-                lua,
-                mlua::MultiValue::from_iter([mlua::Value::Boolean(reached)]),
-            )?;
-            super::lua::events::track_yielded_threads(lua, threads)?;
-            Ok(())
-        })();
-
-        if let Err(e) = result {
-            self.handle_lua_error("MoveToFinished event", &e);
-        }
+        controller_runtime::get_humanoid_walk_speed(self, agent_id)
     }
 
     /// Get static map geometry (entities with "Static" tag)
