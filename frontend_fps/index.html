@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Clawblox FPS Spectator</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+
+    <div id="hud">
+      <div id="top-left">
+        <div id="status" class="panel">CONNECTING</div>
+        <div id="target" class="panel">FOLLOW: NONE</div>
+        <div id="killfeed"></div>
+      </div>
+
+      <div id="top-right" class="panel stack">
+        <div class="label">LEADERBOARD</div>
+        <div id="leaderboard">No data</div>
+      </div>
+
+      <div id="crosshair"><div class="dot"></div></div>
+
+      <div id="bottom-left" class="panel stack">
+        <div class="label">HEALTH</div>
+        <div id="health-text" class="big">-</div>
+        <div class="bar-bg"><div id="health-bar"></div></div>
+        <canvas id="minimap" width="150" height="150"></canvas>
+      </div>
+
+      <div id="bottom-right" class="panel stack right">
+        <div class="label">LOADOUT</div>
+        <div id="weapon" class="big">-</div>
+        <div id="ammo" class="big small">-</div>
+        <div id="score" class="value">Score: -</div>
+        <div id="phase" class="value">Phase: -</div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
