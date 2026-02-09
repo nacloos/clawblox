@@ -5,7 +5,9 @@ pub mod instance;
 pub mod lua;
 pub mod physics;
 pub mod touch_events;
+mod manager_instances;
 mod manager_lifecycle;
+mod manager_listing;
 mod manager_observations;
 mod manager_players;
 
@@ -170,48 +172,6 @@ pub struct FindInstanceResult {
     pub created: bool,
 }
 
-/// Creates a new instance for a game
-fn create_instance(
-    state: &GameManagerHandle,
-    game_id: Uuid,
-    max_players: u32,
-    script: Option<&str>,
-) -> Uuid {
-    let instance = match script {
-        Some(code) => GameInstance::new_with_script_and_config(
-            game_id,
-            code,
-            max_players,
-            state.async_bridge.clone(),
-            state.error_mode,
-        ),
-        None => GameInstance::new_with_config(game_id, max_players, state.async_bridge.clone(), state.error_mode),
-    };
-
-    let instance_id = instance.instance_id;
-
-    // Cache initial spectator observation
-    let spectator_obs = instance.get_spectator_observation();
-    state.spectator_cache.insert(instance_id, spectator_obs);
-
-    let instance_handle = Arc::new(RwLock::new(instance));
-    state.instances.insert(instance_id, instance_handle);
-
-    // Track this instance under the game
-    state
-        .game_instances
-        .entry(game_id)
-        .or_insert_with(Vec::new)
-        .push(instance_id);
-
-    eprintln!(
-        "[Instance] Created {} for game {} (max_players={})",
-        instance_id, game_id, max_players
-    );
-
-    instance_id
-}
-
 /// Finds an instance with capacity or creates a new one
 pub fn find_or_create_instance(
     state: &GameManagerHandle,
@@ -219,36 +179,12 @@ pub fn find_or_create_instance(
     max_players: u32,
     script: Option<&str>,
 ) -> FindInstanceResult {
-    // Check existing instances for capacity
-    if let Some(instance_ids) = state.game_instances.get(&game_id) {
-        for &instance_id in instance_ids.value() {
-            if let Some(handle) = state.instances.get(&instance_id) {
-                let instance = handle.read();
-                if instance.has_capacity() {
-                    return FindInstanceResult {
-                        instance_id,
-                        created: false,
-                    };
-                }
-            }
-        }
-    }
-
-    // Create new instance
-    let instance_id = create_instance(state, game_id, max_players, script);
-    FindInstanceResult {
-        instance_id,
-        created: true,
-    }
+    manager_instances::find_or_create_instance(state, game_id, max_players, script)
 }
 
 /// Checks if any instance is running for this game
 pub fn is_instance_running(state: &GameManagerHandle, game_id: Uuid) -> bool {
-    state
-        .game_instances
-        .get(&game_id)
-        .map(|ids| !ids.is_empty())
-        .unwrap_or(false)
+    manager_instances::is_instance_running(state, game_id)
 }
 
 /// Gets the instance_id a player is in for a specific game
@@ -257,10 +193,7 @@ pub fn get_player_instance(
     agent_id: Uuid,
     game_id: Uuid,
 ) -> Option<Uuid> {
-    state
-        .player_instances
-        .get(&(agent_id, game_id))
-        .map(|r| *r.value())
+    manager_instances::get_player_instance(state, agent_id, game_id)
 }
 
 // =============================================================================
@@ -369,76 +302,15 @@ pub struct InstanceInfo {
 }
 
 pub fn list_instances(state: &GameManagerHandle) -> Vec<InstanceInfo> {
-    state
-        .instances
-        .iter()
-        .map(|entry| {
-            let instance_id = *entry.key();
-            let instance = entry.value().read();
-            InstanceInfo {
-                instance_id,
-                game_id: instance.game_id,
-                status: match instance.status {
-                    GameStatus::Waiting => "waiting".to_string(),
-                    GameStatus::Playing => "playing".to_string(),
-                    GameStatus::Finished => "finished".to_string(),
-                },
-                player_count: instance.players.len(),
-                max_players: instance.max_players as usize,
-                tick: instance.tick,
-            }
-        })
-        .collect()
+    manager_listing::list_instances(state)
 }
 
 pub fn list_games(state: &GameManagerHandle) -> Vec<GameInfo> {
-    let mut game_infos: std::collections::HashMap<Uuid, GameInfo> = std::collections::HashMap::new();
-
-    for entry in state.instances.iter() {
-        let instance = entry.value().read();
-        let game_id = instance.game_id;
-
-        let info = game_infos.entry(game_id).or_insert_with(|| GameInfo {
-            id: game_id,
-            status: "waiting".to_string(),
-            player_count: 0,
-            tick: 0,
-        });
-
-        info.player_count += instance.players.len();
-        info.tick = info.tick.max(instance.tick);
-        if instance.status == GameStatus::Playing {
-            info.status = "playing".to_string();
-        }
-    }
-
-    game_infos.into_values().collect()
+    manager_listing::list_games(state)
 }
 
 pub fn get_game_info(state: &GameManagerHandle, game_id: Uuid) -> Option<GameInfo> {
-    let instance_ids = state.game_instances.get(&game_id)?;
-
-    let mut total_players = 0;
-    let mut max_tick = 0;
-    let mut any_playing = false;
-
-    for &instance_id in instance_ids.value() {
-        if let Some(handle) = state.instances.get(&instance_id) {
-            let instance = handle.read();
-            total_players += instance.players.len();
-            max_tick = max_tick.max(instance.tick);
-            if instance.status == GameStatus::Playing {
-                any_playing = true;
-            }
-        }
-    }
-
-    Some(GameInfo {
-        id: game_id,
-        status: if any_playing { "playing" } else { "waiting" }.to_string(),
-        player_count: total_players,
-        tick: max_tick,
-    })
+    manager_listing::get_game_info(state, game_id)
 }
 
 // =============================================================================
