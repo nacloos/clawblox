@@ -11,7 +11,7 @@ use super::instance::{AttributeValue, Instance, InstanceData};
 use super::services::{
     register_overlap_params, register_raycast_params, AgentInput, AgentInputService,
     DataStoreService, HttpService,
-    PlayersService, RunService, WorkspaceService,
+    PlayersService, RemoteEventService, RunService, WorkspaceService,
 };
 use super::types::register_all_types;
 use crate::game::async_bridge::AsyncBridge;
@@ -33,6 +33,7 @@ pub struct GameDataModel {
     pub run_service: RunService,
     pub agent_input_service: AgentInputService,
     pub data_store_service: DataStoreService,
+    pub remote_event_service: RemoteEventService,
     pub server_script_service: Instance,
     /// Queue of pending kick requests from Lua scripts
     pub kick_requests: Vec<KickRequest>,
@@ -52,6 +53,7 @@ impl GameDataModel {
             run_service: RunService::new(true),
             agent_input_service: AgentInputService::new(),
             data_store_service: DataStoreService::new(game_id, async_bridge),
+            remote_event_service: RemoteEventService::new(),
             server_script_service: Instance::from_data(InstanceData::new_server_script_service()),
             kick_requests: Vec::new(),
         }
@@ -94,6 +96,10 @@ impl Game {
         self.data_model.lock().unwrap().data_store_service.clone()
     }
 
+    pub fn remote_event_service(&self) -> RemoteEventService {
+        self.data_model.lock().unwrap().remote_event_service.clone()
+    }
+
     pub fn server_script_service(&self) -> Instance {
         self.data_model.lock().unwrap().server_script_service.clone()
     }
@@ -127,6 +133,9 @@ impl UserData for Game {
                 "DataStoreService" => Ok(Value::UserData(
                     lua.create_userdata(dm.data_store_service.clone())?,
                 )),
+                "RemoteEventService" => Ok(Value::UserData(
+                    lua.create_userdata(dm.remote_event_service.clone())?,
+                )),
                 "ServerScriptService" => {
                     Ok(Value::UserData(lua.create_userdata(dm.server_script_service.clone())?))
                 }
@@ -144,6 +153,9 @@ impl UserData for Game {
                 "Workspace" => Ok(Value::UserData(lua.create_userdata(dm.workspace.clone())?)),
                 "Players" => Ok(Value::UserData(lua.create_userdata(dm.players.clone())?)),
                 "RunService" => Ok(Value::UserData(lua.create_userdata(dm.run_service.clone())?)),
+                "RemoteEventService" => Ok(Value::UserData(
+                    lua.create_userdata(dm.remote_event_service.clone())?,
+                )),
                 "ServerScriptService" => Ok(Value::UserData(
                     lua.create_userdata(dm.server_script_service.clone())?,
                 )),
@@ -201,6 +213,8 @@ impl LuaRuntime {
         lua.globals().set("Workspace", game.workspace())?;
         lua.globals().set("Players", game.players())?;
         lua.globals().set("RunService", game.run_service())?;
+        lua.globals()
+            .set("RemoteEventService", game.remote_event_service())?;
         lua.globals()
             .set("ServerScriptService", game.server_script_service())?;
 

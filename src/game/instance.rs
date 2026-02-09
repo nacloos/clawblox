@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -25,6 +25,8 @@ const AFK_CHECK_INTERVAL_TICKS: u64 = 60;
 
 /// Default max players when not specified
 const DEFAULT_MAX_PLAYERS: u32 = 8;
+const MAX_REPLICATED_EVENTS_BUFFER: usize = 512;
+const MAX_RECENT_EVENTS_PER_OBSERVATION: usize = 128;
 
 /// Round a float to 2 decimal places (reduces JSON payload size)
 #[inline]
@@ -75,6 +77,10 @@ pub struct GameInstance {
     pub halted_error: Option<String>,
     /// Previous frame's touch pairs for Touched/TouchEnded event detection
     prev_touches: HashSet<(u64, u64)>,
+    /// Ring buffer of recent replicated transient events (shots, impacts, etc.)
+    replicated_events: VecDeque<SpectatorReplicatedEvent>,
+    /// Monotonic event id assigned by server for dedupe/order.
+    next_replicated_event_id: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -150,6 +156,8 @@ impl GameInstance {
             error_mode,
             halted_error: None,
             prev_touches: HashSet::new(),
+            replicated_events: VecDeque::new(),
+            next_replicated_event_id: 1,
         }
     }
 
@@ -361,7 +369,54 @@ impl GameInstance {
             }
         }
 
+        self.process_replicated_events();
+
         self.tick += 1;
+    }
+
+    fn process_replicated_events(&mut self) {
+        let Some(runtime) = &self.lua_runtime else {
+            return;
+        };
+        let queued = runtime.game().remote_event_service().drain_events();
+        if queued.is_empty() {
+            return;
+        }
+
+        let tick = self.tick;
+        let server_time_ms = self.elapsed_ms();
+        for event in queued {
+            let id = self.next_replicated_event_id;
+            self.next_replicated_event_id = self.next_replicated_event_id.saturating_add(1);
+            self.replicated_events.push_back(SpectatorReplicatedEvent {
+                id,
+                tick,
+                server_time_ms,
+                name: event.name,
+                reliable: event.reliable,
+                payload: event.payload,
+            });
+        }
+
+        while self.replicated_events.len() > MAX_REPLICATED_EVENTS_BUFFER {
+            self.replicated_events.pop_front();
+        }
+    }
+
+    fn recent_replicated_events(&self) -> Vec<SpectatorReplicatedEvent> {
+        let count = self
+            .replicated_events
+            .len()
+            .min(MAX_RECENT_EVENTS_PER_OBSERVATION);
+        self.replicated_events
+            .iter()
+            .rev()
+            .take(count)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
     }
 
     /// Process kick requests queued by Lua scripts (e.g., Player:Kick())
@@ -1384,6 +1439,17 @@ pub struct SpectatorObservation {
     pub game_status: String,
     pub players: Vec<SpectatorPlayerInfo>,
     pub entities: Vec<SpectatorEntity>,
+    pub recent_events: Vec<SpectatorReplicatedEvent>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SpectatorReplicatedEvent {
+    pub id: u64,
+    pub tick: u64,
+    pub server_time_ms: u64,
+    pub name: String,
+    pub reliable: bool,
+    pub payload: serde_json::Value,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

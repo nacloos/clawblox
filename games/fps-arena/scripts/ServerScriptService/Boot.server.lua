@@ -33,6 +33,7 @@ CombatService.Init({
     spawnService = SpawnService,
     roundService = RoundService,
     animationService = AnimationService,
+    remoteEventService = game:GetService("RemoteEventService"),
 })
 
 InputService.Init({

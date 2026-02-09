@@ -192,7 +192,9 @@ def observe(sess: Session) -> dict[str, Any]:
     return r.json()
 
 
-def send_input(sess: Session, input_type: str, data: dict[str, Any]) -> None:
+def send_input(sess: Session, input_type: str, data: dict[str, Any] | None = None) -> None:
+    if data is None:
+        data = {}
     payload = {"type": input_type, "data": data}
     if sess.mode == "platform":
         assert sess.game_id is not None
@@ -206,40 +208,6 @@ def choose_move_target(t: float, radius: float = 32.0) -> list[float]:
     x = math.cos(t * 0.55) * radius
     z = math.sin(t * 0.55) * radius
     return [x, 2.0, z]
-
-
-def choose_fire_target(obs: dict[str, Any], self_id: str | None) -> list[float] | None:
-    others = obs.get("other_players") or []
-    if not others:
-        return None
-
-    me = obs.get("player") or {}
-    my_pos = me.get("position") or [0.0, 0.0, 0.0]
-
-    best = None
-    best_dist = float("inf")
-    for p in others:
-        pid = p.get("id")
-        if self_id is not None and pid == self_id:
-            continue
-        pos = p.get("position")
-        if not isinstance(pos, list) or len(pos) != 3:
-            continue
-        dx = float(pos[0]) - float(my_pos[0])
-        dz = float(pos[2]) - float(my_pos[2])
-        d = dx * dx + dz * dz
-        if d < best_dist:
-            best_dist = d
-            best = [float(pos[0]), float(pos[1]) + 1.2, float(pos[2])]
-    return best
-
-
-def choose_forced_fire_target(obs: dict[str, Any], phase_t: float) -> list[float]:
-    player = obs.get("player") or {}
-    my_pos = player.get("position") or [0.0, 2.0, 0.0]
-    x = float(my_pos[0]) + math.cos(phase_t * 1.3) * 24.0
-    z = float(my_pos[2]) + math.sin(phase_t * 1.3) * 24.0
-    return [x, float(my_pos[1]) + 1.0, z]
 
 
 def main() -> int:
@@ -260,7 +228,6 @@ def main() -> int:
 
         start = time.time()
         last_fire_by_idx = [0.0 for _ in sessions]
-        self_ids: list[str | None] = [None for _ in sessions]
 
         while time.time() - start < args.duration:
             now = time.time()
@@ -268,10 +235,6 @@ def main() -> int:
                 obs = observe(sess)
 
                 player = obs.get("player") or {}
-                if self_ids[i] is None:
-                    pid = player.get("id")
-                    if isinstance(pid, str):
-                        self_ids[i] = pid
 
                 pos = player.get("position") or [0.0, 0.0, 0.0]
                 hp = player.get("health")
@@ -290,15 +253,8 @@ def main() -> int:
                 send_input(sess, "MoveTo", {"position": move_target})
 
                 if now - last_fire_by_idx[i] >= 0.25:
-                    fire_target = choose_fire_target(obs, self_ids[i])
-                    if fire_target is None and i == 0:
-                        # Lead bot: force continuous firing so spectator has visible shot cues.
-                        fire_target = choose_forced_fire_target(obs, now - start)
-                    if fire_target is not None:
-                        send_input(sess, "Fire", {"target": fire_target})
-                        print(
-                            f"[fire][{sess.agent_name}] target=({fire_target[0]:.1f},{fire_target[1]:.1f},{fire_target[2]:.1f})"
-                        )
+                    send_input(sess, "Fire")
+                    print(f"[fire][{sess.agent_name}] moving-direction shot")
                     last_fire_by_idx[i] = now
 
             time.sleep(args.tick)

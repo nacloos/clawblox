@@ -46,6 +46,16 @@ interface SpectatorObservation {
   game_status: string
   players: SpectatorPlayerInfo[]
   entities: SpectatorEntity[]
+  recent_events?: SpectatorReplicatedEvent[]
+}
+
+interface SpectatorReplicatedEvent {
+  id: number
+  tick: number
+  server_time_ms: number
+  name: string
+  reliable: boolean
+  payload: Record<string, unknown>
 }
 
 const canvas = document.getElementById('game') as HTMLCanvasElement
@@ -130,6 +140,7 @@ let followWeaponReloadBlend = 0
 let followWeaponWalkTarget = 0
 let followWeaponWalkBlend = 0
 let followWeaponWalkPhase = 0
+
 const lastPlayerTrackState = new Map<string, {
   fireTrackId: number | null
   reloadTrackId: number | null
@@ -161,6 +172,153 @@ const modelEntityStates = new Map<number, {
 const clock = new THREE.Clock()
 let latestObservation: SpectatorObservation | null = null
 let selectedPlayerId: string | null = null
+let lastProcessedReplicatedEventId = 0
+
+const shotParticles: Array<{ mesh: THREE.Mesh, vel: THREE.Vector3, life: number }> = []
+const shotDecals: Array<{ mesh: THREE.Mesh, life: number }> = []
+
+function vec3FromUnknown(value: unknown): THREE.Vector3 | null {
+  if (!Array.isArray(value) || value.length < 3) return null
+  const x = value[0]
+  const y = value[1]
+  const z = value[2]
+  if (typeof x !== 'number' || typeof y !== 'number' || typeof z !== 'number') return null
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null
+  return new THREE.Vector3(x, y, z)
+}
+
+function spawnShotParticles(pos: THREE.Vector3, color: number, count = 8, speed = 5): void {
+  for (let i = 0; i < count; i++) {
+    const geo = new THREE.SphereGeometry(0.08 + Math.random() * 0.08, 4, 4)
+    const mat = new THREE.MeshBasicMaterial({ color })
+    const mesh = new THREE.Mesh(geo, mat)
+    mesh.position.copy(pos)
+    scene.add(mesh)
+
+    const vel = new THREE.Vector3(
+      (Math.random() - 0.5) * speed,
+      Math.random() * speed * 0.5,
+      (Math.random() - 0.5) * speed,
+    )
+    shotParticles.push({ mesh, vel, life: 0.5 + Math.random() * 0.5 })
+  }
+}
+
+function spawnBulletTrail(from: THREE.Vector3, to: THREE.Vector3): void {
+  const dir = new THREE.Vector3().subVectors(to, from)
+  const len = dir.length()
+  if (len < 0.01) return
+
+  const geo = new THREE.CylinderGeometry(0.05, 0.05, len, 4)
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xffff88,
+    transparent: true,
+    opacity: 0.6,
+  })
+  const mesh = new THREE.Mesh(geo, mat)
+  mesh.position.copy(from).add(to).multiplyScalar(0.5)
+  mesh.lookAt(to)
+  mesh.rotateX(Math.PI / 2)
+  scene.add(mesh)
+  shotParticles.push({ mesh, vel: new THREE.Vector3(), life: 0.08 })
+}
+
+function spawnImpactDecal(pos: THREE.Vector3, normal: THREE.Vector3): void {
+  const geo = new THREE.CircleGeometry(0.2 + Math.random() * 0.15, 8)
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0x222222,
+    transparent: true,
+    opacity: 0.7,
+    side: THREE.DoubleSide,
+  })
+  const mesh = new THREE.Mesh(geo, mat)
+  mesh.position.copy(pos).add(normal.clone().multiplyScalar(0.01))
+  mesh.lookAt(pos.clone().add(normal))
+  scene.add(mesh)
+
+  shotDecals.push({ mesh, life: 15 })
+  if (shotDecals.length > 100) {
+    const old = shotDecals.shift()
+    if (old) {
+      scene.remove(old.mesh)
+      old.mesh.geometry.dispose()
+      const material = old.mesh.material
+      if (Array.isArray(material)) material.forEach((m) => m.dispose())
+      else material.dispose()
+    }
+  }
+}
+
+function processShotTraceEvent(payload: Record<string, unknown>): void {
+  const serverOrigin = vec3FromUnknown(payload.origin)
+  const end = vec3FromUnknown(payload.end_position)
+  if (!serverOrigin || !end) return
+
+  // Use weapon muzzle position if available, otherwise fall back to server origin
+  let muzzleOrigin = serverOrigin
+  if (followWeapon && followWeapon.visible) {
+    const forward = lastFollowForward.clone().normalize()
+    muzzleOrigin = followWeapon.position.clone().addScaledVector(forward, 1.4)
+  }
+
+  const hitKind = typeof payload.hit_kind === 'string' ? payload.hit_kind : 'none'
+  const hitNormal = vec3FromUnknown(payload.hit_normal) ?? new THREE.Vector3(0, 1, 0)
+
+  spawnShotParticles(muzzleOrigin, 0xffaa44, 5, 2.5)
+  spawnBulletTrail(muzzleOrigin, end)
+  if (hitKind === 'player') {
+    spawnShotParticles(end, 0xff3333, 6, 3.2)
+  } else if (hitKind === 'world') {
+    spawnShotParticles(end, 0xb0b0b0, 5, 2.2)
+    spawnImpactDecal(end, hitNormal)
+  }
+}
+
+function processReplicatedEvents(obs: SpectatorObservation): void {
+  const events = obs.recent_events
+  if (!events || events.length === 0) return
+  for (const event of events) {
+    if (!event || typeof event.id !== 'number') continue
+    if (event.id <= lastProcessedReplicatedEventId) continue
+    if (event.name === 'ShotTrace' && event.payload && typeof event.payload === 'object') {
+      processShotTraceEvent(event.payload as Record<string, unknown>)
+    }
+    lastProcessedReplicatedEventId = Math.max(lastProcessedReplicatedEventId, event.id)
+  }
+}
+
+function tickShotEffects(dt: number): void {
+  for (let i = shotParticles.length - 1; i >= 0; i--) {
+    const p = shotParticles[i]
+    p.life -= dt
+    if (p.life <= 0) {
+      scene.remove(p.mesh)
+      p.mesh.geometry.dispose()
+      const material = p.mesh.material
+      if (Array.isArray(material)) material.forEach((m) => m.dispose())
+      else material.dispose()
+      shotParticles.splice(i, 1)
+      continue
+    }
+    p.mesh.position.addScaledVector(p.vel, dt)
+    p.vel.y -= 10 * dt
+    const material = p.mesh.material as THREE.Material & { opacity?: number }
+    if (typeof material.opacity === 'number') material.opacity = p.life
+  }
+
+  for (let i = shotDecals.length - 1; i >= 0; i--) {
+    const d = shotDecals[i]
+    d.life -= dt
+    if (d.life <= 0) {
+      scene.remove(d.mesh)
+      d.mesh.geometry.dispose()
+      const material = d.mesh.material
+      if (Array.isArray(material)) material.forEach((m) => m.dispose())
+      else material.dispose()
+      shotDecals.splice(i, 1)
+    }
+  }
+}
 
 // ─── Interpolation buffer ───────────────────────────────────────────────
 const INTERP_DELAY = 0.10 // seconds behind real-time
@@ -1135,6 +1293,7 @@ function handleObservation(obs: SpectatorObservation): void {
   for (const id of lastPlayerTrackState.keys()) {
     if (!activePlayerIds.has(id)) lastPlayerTrackState.delete(id)
   }
+  processReplicatedEvents(obs)
   latestObservation = obs
   pushSnapshot(obs)
   // HUD and killfeed use latest data (no delay)
@@ -1212,6 +1371,7 @@ function frame(): void {
     updateModelAnimations(interpObs, dt)
   }
   tickWeaponVisual(dt)
+  tickShotEffects(dt)
 
   const t = Date.now() * 0.001
   accentLights.forEach((l, i) => {

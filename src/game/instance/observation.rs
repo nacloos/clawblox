@@ -359,5 +359,6 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
         },
         players,
         entities,
+        recent_events: instance.recent_replicated_events(),
     }
 }

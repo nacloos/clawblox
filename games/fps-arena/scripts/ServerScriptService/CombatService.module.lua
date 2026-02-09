@@ -7,16 +7,7 @@ local state
 local spawnService
 local roundService
 local animationService
-
-local function vecFromTriplet(v)
-    if type(v) ~= "table" then
-        return nil
-    end
-    if type(v[1]) ~= "number" or type(v[2]) ~= "number" or type(v[3]) ~= "number" then
-        return nil
-    end
-    return Vector3.new(v[1], v[2], v[3])
-end
+local remoteEventService
 
 local function getCharacter(player)
     return player and player.Character or nil
@@ -149,6 +140,31 @@ local function randomSpreadDirection(baseDir, spread)
     return (baseDir + right * jitterX + up * jitterY).Unit
 end
 
+local function movementFireDirection(character)
+    local humanoid = getHumanoid(character)
+    if humanoid then
+        local moveDir = humanoid.MoveDirection
+        local horizontal = Vector3.new(moveDir.X, 0, moveDir.Z)
+        if horizontal.Magnitude > 0.01 then
+            return horizontal.Unit
+        end
+    end
+    return nil
+end
+
+local function vecToArray(v)
+    return { v.X, v.Y, v.Z }
+end
+
+local function emitShotTrace(payload)
+    if not remoteEventService then
+        return
+    end
+    pcall(function()
+        remoteEventService:FireAllClientsUnreliable("ShotTrace", payload)
+    end)
+end
+
 local function damageVictim(victim, attackerPdata, wdef)
     local vdata = state.GetPlayer(victim.player)
     if not vdata or not vdata.alive then
@@ -187,6 +203,7 @@ function CombatService.Init(deps)
     spawnService = deps.spawnService
     roundService = deps.roundService
     animationService = deps.animationService
+    remoteEventService = deps.remoteEventService or game:GetService("RemoteEventService")
 end
 
 function CombatService.HandleSwitchWeapon(player, payload)
@@ -225,7 +242,7 @@ function CombatService.Tick(now)
     end)
 end
 
-function CombatService.HandleFire(player, payload)
+function CombatService.HandleFire(player, _payload)
     local round = state.GetRound()
     if round.phase ~= "active" then
         return
@@ -252,21 +269,15 @@ function CombatService.HandleFire(player, payload)
         return
     end
 
-    local target = payload and vecFromTriplet(payload.target)
-    if not target then
-        return
-    end
-
     local character = getCharacter(player)
     local root = getRoot(character)
     if not character or not root then
         return
     end
 
-    local origin = root.Position + Vector3.new(0, 1.5, 0)
-    local toTarget = target - origin
-    local dist = toTarget.Magnitude
-    if dist <= 0.01 then
+    local baseDir = movementFireDirection(character)
+    if not baseDir then
+        -- Simplified shooter mode: can only shoot while moving.
         return
     end
 
@@ -277,24 +288,35 @@ function CombatService.HandleFire(player, payload)
     end
     syncWeaponFields(pdata)
 
-    local baseDir = toTarget.Unit
     local pellets = wdef.pellets or 1
+    local origin = root.Position + Vector3.new(0, 1.5, 0)
 
     local rayParams = RaycastParams.new()
     rayParams.FilterType = Enum.RaycastFilterType.Blacklist
     rayParams.FilterDescendantsInstances = { character }
 
-    for _ = 1, pellets do
+    for pelletIndex = 1, pellets do
         local dir = randomSpreadDirection(baseDir, wdef.spread or 0)
         local rayDir = dir * config.FIRE_RANGE
         local hit = Workspace:Raycast(origin, rayDir, rayParams)
+        local hitPos = origin + rayDir
+        local hitNormal = nil
+        local hitKind = "none"
+        local hitInstanceName = nil
+        local victimUserId = nil
         if hit and hit.Instance then
+            hitPos = hit.Position
+            hitNormal = hit.Normal
+            hitKind = "world"
+            hitInstanceName = hit.Instance.Name
             local hitCharacter = findCharacterFromPart(hit.Instance)
             if hitCharacter and hitCharacter ~= character then
                 local victimPlayer = Players:GetPlayerFromCharacter(hitCharacter)
                 if victimPlayer then
                     local victimHumanoid = getHumanoid(hitCharacter)
                     if victimHumanoid then
+                        hitKind = "player"
+                        victimUserId = victimPlayer.UserId
                         damageVictim({
                             player = victimPlayer,
                             humanoid = victimHumanoid,
@@ -304,6 +326,21 @@ function CombatService.HandleFire(player, payload)
                 end
             end
         end
+
+        emitShotTrace({
+            shooter_user_id = player.UserId,
+            shooter_name = player.Name,
+            weapon_id = pdata.weaponId,
+            pellet_index = pelletIndex,
+            pellet_count = pellets,
+            origin = vecToArray(origin),
+            direction = vecToArray(dir),
+            end_position = vecToArray(hitPos),
+            hit_kind = hitKind,
+            hit_normal = hitNormal and vecToArray(hitNormal) or nil,
+            hit_instance_name = hitInstanceName,
+            victim_user_id = victimUserId,
+        })
     end
 end
 
