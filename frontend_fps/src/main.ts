@@ -3,6 +3,8 @@ import * as THREE from 'three'
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js'
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js'
 import { geometryFromRender, materialFromRender, type RenderSpec } from './render/presets'
 
 interface SpectatorPlayerInfo {
@@ -21,6 +23,7 @@ interface SpectatorEntity {
   rotation?: [[number, number, number], [number, number, number], [number, number, number]]
   size: [number, number, number]
   render: RenderSpec
+  model_url?: string
 }
 
 interface SpectatorObservation {
@@ -104,59 +107,6 @@ lightPositions.forEach((pos, i) => {
   accentLights.push(light)
 })
 
-const floorTexture = createFloorTexture()
-const wallTexture = createWallTexture()
-
-function createFloorTexture(): THREE.CanvasTexture {
-  const c = document.createElement('canvas')
-  c.width = 512
-  c.height = 512
-  const ctx = c.getContext('2d')
-  if (!ctx) throw new Error('canvas 2d unavailable')
-  ctx.fillStyle = '#3a3a3a'
-  ctx.fillRect(0, 0, 512, 512)
-  ctx.strokeStyle = '#4a4a4a'
-  ctx.lineWidth = 2
-  for (let i = 0; i <= 512; i += 64) {
-    ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, 512); ctx.stroke()
-    ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(512, i); ctx.stroke()
-  }
-  for (let i = 0; i < 2000; i++) {
-    const x = Math.random() * 512
-    const y = Math.random() * 512
-    const v = 50 + Math.random() * 20
-    ctx.fillStyle = `rgb(${v},${v},${v})`
-    ctx.fillRect(x, y, 2, 2)
-  }
-  const tex = new THREE.CanvasTexture(c)
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping
-  tex.repeat.set(15, 15)
-  return tex
-}
-
-function createWallTexture(): THREE.CanvasTexture {
-  const c = document.createElement('canvas')
-  c.width = 256
-  c.height = 256
-  const ctx = c.getContext('2d')
-  if (!ctx) throw new Error('canvas 2d unavailable')
-  ctx.fillStyle = '#3a3a42'
-  ctx.fillRect(0, 0, 256, 256)
-  for (let i = 0; i < 3000; i++) {
-    const x = Math.random() * 256
-    const y = Math.random() * 256
-    const v = 50 + Math.random() * 25
-    ctx.fillStyle = `rgb(${v},${v},${v + 5})`
-    ctx.fillRect(x, y, Math.random() * 3 + 1, Math.random() * 3 + 1)
-  }
-  ctx.strokeStyle = '#2e2e36'
-  ctx.lineWidth = 2
-  ;[64, 128, 192].forEach((y) => { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(256, y); ctx.stroke() })
-  const tex = new THREE.CanvasTexture(c)
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping
-  return tex
-}
-
 function rotationToQuaternion(rot: [[number, number, number], [number, number, number], [number, number, number]]): THREE.Quaternion {
   const m = new THREE.Matrix4()
   m.set(rot[0][0], rot[0][1], rot[0][2], 0, rot[1][0], rot[1][1], rot[1][2], 0, rot[2][0], rot[2][1], rot[2][2], 0, 0, 0, 0, 1)
@@ -172,6 +122,8 @@ function geometryFromEntity(entity: SpectatorEntity): THREE.BufferGeometry {
 }
 
 const entityObjects = new Map<number, THREE.Object3D>()
+const gltfLoader = new GLTFLoader()
+const modelTemplateCache = new Map<string, Promise<THREE.Object3D>>()
 const clock = new THREE.Clock()
 let latestObservation: SpectatorObservation | null = null
 let selectedPlayerId: string | null = null
@@ -221,10 +173,103 @@ function disposeObject(obj: THREE.Object3D): void {
 }
 
 function createEntityObject(entity: SpectatorEntity): THREE.Object3D {
-  const mesh = new THREE.Mesh(geometryFromEntity(entity), materialFromEntity(entity))
-  mesh.castShadow = true
-  mesh.receiveShadow = true
+  if (entity.model_url) {
+    const root = new THREE.Group()
+    root.name = `entity-${entity.id}`
+    root.userData.entityId = entity.id
+    const fallback = createPrimitiveEntityMesh(entity)
+    root.add(fallback)
+    void attachModelToEntityRoot(root, entity.model_url, entity.size, entity.render)
+    return root
+  }
+  return createPrimitiveEntityMesh(entity)
+}
+
+function createPrimitiveEntityMesh(entity: SpectatorEntity): THREE.Mesh {
+  const preset = entity.render.preset_id ?? ''
+  const isFloorOrCeiling = preset === 'fps_arena/floor' || preset === 'fps_arena/ceiling'
+  const geometry = isFloorOrCeiling
+    ? new THREE.PlaneGeometry(entity.size[0], entity.size[2])
+    : geometryFromEntity(entity)
+  const mesh = new THREE.Mesh(geometry, materialFromEntity(entity))
+  if (isFloorOrCeiling) {
+    mesh.rotation.x = preset === 'fps_arena/floor' ? -Math.PI / 2 : Math.PI / 2
+  }
+  mesh.castShadow = entity.render.casts_shadow
+  mesh.receiveShadow = entity.render.receives_shadow
   return mesh
+}
+
+function loadModelTemplate(url: string): Promise<THREE.Object3D> {
+  let cached = modelTemplateCache.get(url)
+  if (!cached) {
+    cached = new Promise((resolve, reject) => {
+      gltfLoader.load(
+        url,
+        (gltf) => resolve(gltf.scene),
+        undefined,
+        (error) => reject(error),
+      )
+    })
+    modelTemplateCache.set(url, cached)
+  }
+  return cached
+}
+
+function fitModelToSize(model: THREE.Object3D, size: [number, number, number]): void {
+  const box = new THREE.Box3().setFromObject(model)
+  const source = box.getSize(new THREE.Vector3())
+  if (source.y <= 0.0001) return
+
+  const targetHeight = Math.max(size[1], 0.001)
+  const scale = targetHeight / source.y
+  model.scale.setScalar(scale)
+
+  const scaledBox = new THREE.Box3().setFromObject(model)
+  const center = scaledBox.getCenter(new THREE.Vector3())
+  const minY = scaledBox.min.y
+  const targetMinY = -targetHeight * 0.5
+
+  model.position.set(
+    model.position.x - center.x,
+    model.position.y + (targetMinY - minY),
+    model.position.z - center.z,
+  )
+}
+
+function setShadowFlags(root: THREE.Object3D, casts: boolean, receives: boolean): void {
+  root.traverse((node) => {
+    const mesh = node as THREE.Mesh
+    if (!mesh.isMesh) return
+    mesh.castShadow = casts
+    mesh.receiveShadow = receives
+  })
+}
+
+async function attachModelToEntityRoot(
+  root: THREE.Group,
+  modelUrl: string,
+  size: [number, number, number],
+  render: RenderSpec,
+): Promise<void> {
+  try {
+    const template = await loadModelTemplate(modelUrl)
+    const entityId = root.userData.entityId as number | undefined
+    if (typeof entityId !== 'number' || !entityObjects.has(entityId)) {
+      return
+    }
+
+    for (const child of [...root.children]) {
+      root.remove(child)
+      disposeObject(child)
+    }
+    const clone = cloneSkeleton(template)
+    fitModelToSize(clone, size)
+    setShadowFlags(clone, render.casts_shadow, render.receives_shadow)
+    root.add(clone)
+  } catch (error) {
+    console.warn('Failed to load model for entity', modelUrl, error)
+  }
 }
 
 function chooseFollowTarget(obs: SpectatorObservation): string | null {
@@ -254,8 +299,14 @@ function updateScene(obs: SpectatorObservation): void {
       scene.add(obj)
     }
 
-    obj.position.set(entity.position[0], entity.position[1], entity.position[2])
+    const preset = entity.render.preset_id ?? ''
+    if (preset === 'fps_arena/floor') {
+      obj.position.set(entity.position[0], entity.position[1] + entity.size[1] * 0.5, entity.position[2])
+    } else {
+      obj.position.set(entity.position[0], entity.position[1], entity.position[2])
+    }
     if (entity.rotation) obj.quaternion.copy(rotationToQuaternion(entity.rotation))
+    obj.visible = entity.render.visible
   }
 
   for (const [id, obj] of entityObjects) {
@@ -502,9 +553,9 @@ function frame(): void {
     updateCamera(latestObservation, dt)
   }
 
-  const t = performance.now() * 0.001
+  const t = Date.now() * 0.001
   accentLights.forEach((l, i) => {
-    l.intensity = 1.5 + Math.sin(t * 2 + i * 0.7) * 0.8
+    l.intensity = 1.5 + Math.sin(t + i * 0.7) * 0.8
   })
 
   composer.render()
