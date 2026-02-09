@@ -440,6 +440,79 @@ impl UserData for RaycastParams {
     }
 }
 
+#[derive(Clone)]
+pub struct OverlapParams {
+    pub filter_type: RaycastFilterType,
+    pub filter_instances: Vec<Instance>,
+    pub max_parts: usize,
+    pub collision_group: String,
+    pub respect_can_collide: bool,
+}
+
+impl Default for OverlapParams {
+    fn default() -> Self {
+        Self {
+            filter_type: RaycastFilterType::Exclude,
+            filter_instances: Vec::new(),
+            max_parts: 0,
+            collision_group: "Default".to_string(),
+            respect_can_collide: false,
+        }
+    }
+}
+
+impl FromLua for OverlapParams {
+    fn from_lua(value: Value, _lua: &Lua) -> Result<Self> {
+        match value {
+            Value::UserData(ud) => ud.borrow::<OverlapParams>().map(|v| v.clone()),
+            _ => Err(mlua::Error::FromLuaConversionError {
+                from: value.type_name(),
+                to: "OverlapParams".to_string(),
+                message: Some("expected OverlapParams".to_string()),
+            }),
+        }
+    }
+}
+
+impl UserData for OverlapParams {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("FilterType", |_, this| Ok(this.filter_type));
+        fields.add_field_method_set("FilterType", |_, this, filter_type: RaycastFilterType| {
+            this.filter_type = filter_type;
+            Ok(())
+        });
+
+        fields.add_field_method_get("FilterDescendantsInstances", |_, this| {
+            Ok(this.filter_instances.clone())
+        });
+        fields.add_field_method_set(
+            "FilterDescendantsInstances",
+            |_, this, instances: Vec<Instance>| {
+                this.filter_instances = instances;
+                Ok(())
+            },
+        );
+
+        fields.add_field_method_get("MaxParts", |_, this| Ok(this.max_parts as i32));
+        fields.add_field_method_set("MaxParts", |_, this, max_parts: i32| {
+            this.max_parts = max_parts.max(0) as usize;
+            Ok(())
+        });
+
+        fields.add_field_method_get("CollisionGroup", |_, this| Ok(this.collision_group.clone()));
+        fields.add_field_method_set("CollisionGroup", |_, this, collision_group: String| {
+            this.collision_group = collision_group;
+            Ok(())
+        });
+
+        fields.add_field_method_get("RespectCanCollide", |_, this| Ok(this.respect_can_collide));
+        fields.add_field_method_set("RespectCanCollide", |_, this, respect_can_collide: bool| {
+            this.respect_can_collide = respect_can_collide;
+            Ok(())
+        });
+    }
+}
+
 pub fn register_raycast_params(lua: &Lua) -> Result<()> {
     let params_table = lua.create_table()?;
 
@@ -449,6 +522,19 @@ pub fn register_raycast_params(lua: &Lua) -> Result<()> {
     )?;
 
     lua.globals().set("RaycastParams", params_table)?;
+
+    Ok(())
+}
+
+pub fn register_overlap_params(lua: &Lua) -> Result<()> {
+    let params_table = lua.create_table()?;
+
+    params_table.set(
+        "new",
+        lua.create_function(|_, ()| Ok(OverlapParams::default()))?,
+    )?;
+
+    lua.globals().set("OverlapParams", params_table)?;
 
     Ok(())
 }
@@ -517,6 +603,7 @@ impl WorkspaceService {
                     (
                         part.can_query,
                         part.can_collide,
+                        part.collision_group.clone(),
                         part.size,
                         part.cframe.position,
                         part.cframe.rotation,
@@ -525,7 +612,7 @@ impl WorkspaceService {
                 })
             }; // Lock released here
 
-            let Some((can_query, can_collide, size, position, rotation, shape)) = part_info else {
+            let Some((can_query, can_collide, collision_group, size, position, rotation, shape)) = part_info else {
                 continue;
             };
 
@@ -534,6 +621,12 @@ impl WorkspaceService {
             }
 
             if params.respect_can_collide && !can_collide {
+                continue;
+            }
+            if !params.collision_group.is_empty()
+                && params.collision_group != "Default"
+                && collision_group != params.collision_group
+            {
                 continue;
             }
 
@@ -601,57 +694,123 @@ impl WorkspaceService {
         })
     }
 
-    pub fn get_part_bounds_in_box(&self, cframe: CFrame, size: Vector3) -> Vec<Instance> {
+    pub fn get_part_bounds_in_box(
+        &self,
+        cframe: CFrame,
+        size: Vector3,
+        params: Option<OverlapParams>,
+    ) -> Vec<Instance> {
+        let params = params.unwrap_or_default();
         let query_center = [cframe.position.x, cframe.position.y, cframe.position.z];
         let query_rot = cframe.rotation;
         let query_half = [size.x / 2.0, size.y / 2.0, size.z / 2.0];
 
-        self.get_descendants()
-            .into_iter()
-            .filter(|inst| {
+        let mut out = Vec::new();
+        for inst in self.get_descendants() {
+            let should_filter = params.filter_instances.iter().any(|i| {
+                i.id() == inst.id() || inst.is_descendant_of(i)
+            });
+            let skip = match params.filter_type {
+                RaycastFilterType::Exclude => should_filter,
+                RaycastFilterType::Include => !should_filter,
+            };
+            if skip {
+                continue;
+            }
+
+            let intersects = {
                 let data = inst.data.lock().unwrap();
                 if let Some(part) = &data.part_data {
                     if !part.can_query {
-                        return false;
-                    }
-                    let part_center = [part.position.x, part.position.y, part.position.z];
-                    let part_rot = part.cframe.rotation;
-                    let part_half = [part.size.x / 2.0, part.size.y / 2.0, part.size.z / 2.0];
+                        false
+                    } else if params.respect_can_collide && !part.can_collide {
+                        false
+                    } else if !params.collision_group.is_empty()
+                        && params.collision_group != "Default"
+                        && part.collision_group != params.collision_group
+                    {
+                        false
+                    } else {
+                        let part_center = [part.position.x, part.position.y, part.position.z];
+                        let part_rot = part.cframe.rotation;
+                        let part_half = [part.size.x / 2.0, part.size.y / 2.0, part.size.z / 2.0];
 
-                    obb_intersects_obb(
-                        query_center,
-                        query_rot,
-                        query_half,
-                        part_center,
-                        part_rot,
-                        part_half,
-                    )
+                        obb_intersects_obb(
+                            query_center,
+                            query_rot,
+                            query_half,
+                            part_center,
+                            part_rot,
+                            part_half,
+                        )
+                    }
                 } else {
                     false
                 }
-            })
-            .collect()
+            };
+
+            if intersects {
+                out.push(inst);
+                if params.max_parts > 0 && out.len() >= params.max_parts {
+                    break;
+                }
+            }
+        }
+        out
     }
 
-    pub fn get_part_bounds_in_radius(&self, position: Vector3, radius: f32) -> Vec<Instance> {
+    pub fn get_part_bounds_in_radius(
+        &self,
+        position: Vector3,
+        radius: f32,
+        params: Option<OverlapParams>,
+    ) -> Vec<Instance> {
+        let params = params.unwrap_or_default();
         let sphere_center = [position.x, position.y, position.z];
-        self.get_descendants()
-            .into_iter()
-            .filter(|inst| {
+        let mut out = Vec::new();
+        for inst in self.get_descendants() {
+            let should_filter = params.filter_instances.iter().any(|i| {
+                i.id() == inst.id() || inst.is_descendant_of(i)
+            });
+            let skip = match params.filter_type {
+                RaycastFilterType::Exclude => should_filter,
+                RaycastFilterType::Include => !should_filter,
+            };
+            if skip {
+                continue;
+            }
+
+            let intersects = {
                 let data = inst.data.lock().unwrap();
                 if let Some(part) = &data.part_data {
                     if !part.can_query {
-                        return false;
+                        false
+                    } else if params.respect_can_collide && !part.can_collide {
+                        false
+                    } else if !params.collision_group.is_empty()
+                        && params.collision_group != "Default"
+                        && part.collision_group != params.collision_group
+                    {
+                        false
+                    } else {
+                        let part_center = [part.position.x, part.position.y, part.position.z];
+                        let part_rot = part.cframe.rotation;
+                        let part_half = [part.size.x / 2.0, part.size.y / 2.0, part.size.z / 2.0];
+                        sphere_intersects_obb(sphere_center, radius, part_center, part_rot, part_half)
                     }
-                    let part_center = [part.position.x, part.position.y, part.position.z];
-                    let part_rot = part.cframe.rotation;
-                    let part_half = [part.size.x / 2.0, part.size.y / 2.0, part.size.z / 2.0];
-                    sphere_intersects_obb(sphere_center, radius, part_center, part_rot, part_half)
                 } else {
                     false
                 }
-            })
-            .collect()
+            };
+
+            if intersects {
+                out.push(inst);
+                if params.max_parts > 0 && out.len() >= params.max_parts {
+                    break;
+                }
+            }
+        }
+        out
     }
 }
 
@@ -681,15 +840,15 @@ impl UserData for WorkspaceService {
 
         methods.add_method(
             "GetPartBoundsInBox",
-            |_, this, (cframe, size): (CFrame, Vector3)| {
-                Ok(this.get_part_bounds_in_box(cframe, size))
+            |_, this, (cframe, size, params): (CFrame, Vector3, Option<OverlapParams>)| {
+                Ok(this.get_part_bounds_in_box(cframe, size, params))
             },
         );
 
         methods.add_method(
             "GetPartBoundsInRadius",
-            |_, this, (position, radius): (Vector3, f32)| {
-                Ok(this.get_part_bounds_in_radius(position, radius))
+            |_, this, (position, radius, params): (Vector3, f32, Option<OverlapParams>)| {
+                Ok(this.get_part_bounds_in_radius(position, radius, params))
             },
         );
 

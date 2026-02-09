@@ -7,7 +7,8 @@ use crate::game::instance::ErrorMode;
 
 use super::instance::{AttributeValue, Instance, InstanceData};
 use super::services::{
-    register_raycast_params, AgentInput, AgentInputService, DataStoreService, HttpService,
+    register_overlap_params, register_raycast_params, AgentInput, AgentInputService,
+    DataStoreService, HttpService,
     PlayersService, RunService, WorkspaceService,
 };
 use super::types::register_all_types;
@@ -172,6 +173,7 @@ impl LuaRuntime {
         super::instance::register_instance(&lua)?;
 
         register_raycast_params(&lua)?;
+        register_overlap_params(&lua)?;
 
         let game = Game::with_config(game_id, max_players, async_bridge);
         lua.globals().set("game", game.clone())?;
@@ -891,6 +893,46 @@ mod tests {
     }
 
     #[test]
+    fn test_workspace_raycast_collision_group_filters_parts() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local front = Instance.new("Part")
+            front.Name = "FrontBlue"
+            front.Size = Vector3.new(4, 4, 4)
+            front.Anchored = true
+            front.CollisionGroup = "Blue"
+            front.Position = Vector3.new(0, 2, 0)
+            front.Parent = Workspace
+
+            local back = Instance.new("Part")
+            back.Name = "BackRed"
+            back.Size = Vector3.new(4, 4, 4)
+            back.Anchored = true
+            back.CollisionGroup = "Red"
+            back.Position = Vector3.new(0, 2, 8)
+            back.Parent = Workspace
+
+            local params = RaycastParams.new()
+            params.CollisionGroup = "Red"
+            local result = Workspace:Raycast(Vector3.new(0, 2, -10), Vector3.new(0, 0, 30), params)
+            _G.hitName = result and result.Instance and result.Instance.Name or nil
+        "#,
+            )
+            .expect("Failed to load script");
+
+        let hit_name: Option<String> = runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap()
+            .get("hitName")
+            .unwrap();
+        assert_eq!(hit_name.as_deref(), Some("BackRed"));
+    }
+
+    #[test]
     fn test_get_part_bounds_in_box_uses_volume_overlap() {
         let mut runtime = test_runtime();
         runtime
@@ -956,6 +998,217 @@ mod tests {
             .get("radiusHit")
             .unwrap();
         assert!(radius_hit, "Part intersecting sphere by volume should be included");
+    }
+
+    #[test]
+    fn test_get_part_bounds_in_box_respects_overlap_include_filter() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local folderA = Instance.new("Folder")
+            folderA.Name = "FolderA"
+            folderA.Parent = Workspace
+
+            local folderB = Instance.new("Folder")
+            folderB.Name = "FolderB"
+            folderB.Parent = Workspace
+
+            local a = Instance.new("Part")
+            a.Name = "InA"
+            a.Anchored = true
+            a.Size = Vector3.new(2, 2, 2)
+            a.Position = Vector3.new(0, 1, 0)
+            a.Parent = folderA
+
+            local b = Instance.new("Part")
+            b.Name = "InB"
+            b.Anchored = true
+            b.Size = Vector3.new(2, 2, 2)
+            b.Position = Vector3.new(0, 1, 0)
+            b.Parent = folderB
+
+            local params = OverlapParams.new()
+            params.FilterType = Enum.RaycastFilterType.Include
+            params.FilterDescendantsInstances = {folderA}
+
+            local hits = Workspace:GetPartBoundsInBox(CFrame.new(0, 1, 0), Vector3.new(6, 6, 6), params)
+            _G.hitA = false
+            _G.hitB = false
+            for _, v in ipairs(hits) do
+                if v.Name == "InA" then _G.hitA = true end
+                if v.Name == "InB" then _G.hitB = true end
+            end
+        "#,
+            )
+            .expect("Failed to load script");
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let hit_a: bool = globals.get("hitA").unwrap();
+        let hit_b: bool = globals.get("hitB").unwrap();
+        assert!(hit_a, "Included folder part should be returned");
+        assert!(!hit_b, "Excluded folder part should be filtered out");
+    }
+
+    #[test]
+    fn test_get_part_bounds_in_radius_respects_overlap_max_parts() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local p1 = Instance.new("Part")
+            p1.Name = "P1"
+            p1.Anchored = true
+            p1.Size = Vector3.new(2, 2, 2)
+            p1.Position = Vector3.new(0, 1, 0)
+            p1.Parent = Workspace
+
+            local p2 = Instance.new("Part")
+            p2.Name = "P2"
+            p2.Anchored = true
+            p2.Size = Vector3.new(2, 2, 2)
+            p2.Position = Vector3.new(1, 1, 0)
+            p2.Parent = Workspace
+
+            local params = OverlapParams.new()
+            params.MaxParts = 1
+
+            local hits = Workspace:GetPartBoundsInRadius(Vector3.new(0, 1, 0), 4.0, params)
+            _G.hitCount = #hits
+        "#,
+            )
+            .expect("Failed to load script");
+
+        let hit_count: i64 = runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap()
+            .get("hitCount")
+            .unwrap();
+        assert_eq!(hit_count, 1, "MaxParts should cap overlap query result size");
+    }
+
+    #[test]
+    fn test_get_part_bounds_in_radius_overlap_respects_can_query_false() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local q = Instance.new("Part")
+            q.Name = "QueryablePart"
+            q.Anchored = true
+            q.Size = Vector3.new(2, 2, 2)
+            q.Position = Vector3.new(0, 1, 0)
+            q.Parent = Workspace
+
+            local nq = Instance.new("Part")
+            nq.Name = "NoQueryPart"
+            nq.Anchored = true
+            nq.Size = Vector3.new(2, 2, 2)
+            nq.Position = Vector3.new(0, 1, 1)
+            nq.CanQuery = false
+            nq.Parent = Workspace
+
+            local hits = Workspace:GetPartBoundsInRadius(Vector3.new(0, 1, 0), 4.0)
+            _G.hitQueryable = false
+            _G.hitNoQuery = false
+            for _, v in ipairs(hits) do
+                if v.Name == "QueryablePart" then _G.hitQueryable = true end
+                if v.Name == "NoQueryPart" then _G.hitNoQuery = true end
+            end
+        "#,
+            )
+            .expect("Failed to load script");
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let hit_queryable: bool = globals.get("hitQueryable").unwrap();
+        let hit_no_query: bool = globals.get("hitNoQuery").unwrap();
+        assert!(hit_queryable);
+        assert!(!hit_no_query);
+    }
+
+    #[test]
+    fn test_get_part_bounds_in_box_overlap_respect_can_collide() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local trigger = Instance.new("Part")
+            trigger.Name = "Trigger"
+            trigger.Anchored = true
+            trigger.Size = Vector3.new(2, 2, 2)
+            trigger.Position = Vector3.new(0, 1, 0)
+            trigger.CanCollide = false
+            trigger.Parent = Workspace
+
+            local solid = Instance.new("Part")
+            solid.Name = "Solid"
+            solid.Anchored = true
+            solid.Size = Vector3.new(2, 2, 2)
+            solid.Position = Vector3.new(0, 1, 1)
+            solid.Parent = Workspace
+
+            local params = OverlapParams.new()
+            params.RespectCanCollide = true
+            local hits = Workspace:GetPartBoundsInBox(CFrame.new(0, 1, 0), Vector3.new(6, 6, 6), params)
+            _G.hitTrigger = false
+            _G.hitSolid = false
+            for _, v in ipairs(hits) do
+                if v.Name == "Trigger" then _G.hitTrigger = true end
+                if v.Name == "Solid" then _G.hitSolid = true end
+            end
+        "#,
+            )
+            .expect("Failed to load script");
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let hit_trigger: bool = globals.get("hitTrigger").unwrap();
+        let hit_solid: bool = globals.get("hitSolid").unwrap();
+        assert!(!hit_trigger, "RespectCanCollide should filter CanCollide=false parts");
+        assert!(hit_solid, "Solid part should still be included");
+    }
+
+    #[test]
+    fn test_get_part_bounds_in_box_overlap_collision_group_filters_parts() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local blue = Instance.new("Part")
+            blue.Name = "BluePart"
+            blue.Anchored = true
+            blue.Size = Vector3.new(2, 2, 2)
+            blue.CollisionGroup = "Blue"
+            blue.Position = Vector3.new(0, 1, 0)
+            blue.Parent = Workspace
+
+            local red = Instance.new("Part")
+            red.Name = "RedPart"
+            red.Anchored = true
+            red.Size = Vector3.new(2, 2, 2)
+            red.CollisionGroup = "Red"
+            red.Position = Vector3.new(0, 1, 1)
+            red.Parent = Workspace
+
+            local params = OverlapParams.new()
+            params.CollisionGroup = "Red"
+            local hits = Workspace:GetPartBoundsInBox(CFrame.new(0, 1, 0), Vector3.new(6, 6, 6), params)
+            _G.hitBlue = false
+            _G.hitRed = false
+            for _, v in ipairs(hits) do
+                if v.Name == "BluePart" then _G.hitBlue = true end
+                if v.Name == "RedPart" then _G.hitRed = true end
+            end
+        "#,
+            )
+            .expect("Failed to load script");
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let hit_blue: bool = globals.get("hitBlue").unwrap();
+        let hit_red: bool = globals.get("hitRed").unwrap();
+        assert!(!hit_blue);
+        assert!(hit_red);
     }
 
     #[test]

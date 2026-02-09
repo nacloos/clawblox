@@ -225,6 +225,7 @@ pub struct PartData {
     pub anchored: bool,
     pub can_collide: bool,
     pub can_query: bool,
+    pub collision_group: String,
     pub can_touch: bool,
     pub transparency: f32,
     pub color: Color3,
@@ -251,6 +252,7 @@ impl Default for PartData {
             anchored: false,
             can_collide: true,
             can_query: true,
+            collision_group: "Default".to_string(),
             can_touch: true,
             transparency: 0.0,
             color: Color3::new(0.6, 0.6, 0.6),
@@ -1055,6 +1057,18 @@ impl UserData for Instance {
             let mut data = this.data.lock().unwrap();
             if let Some(part) = &mut data.part_data {
                 part.can_query = can_query;
+            }
+            Ok(())
+        });
+
+        fields.add_field_method_get("CollisionGroup", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.part_data.as_ref().map(|p| p.collision_group.clone()))
+        });
+        fields.add_field_method_set("CollisionGroup", |_, this, collision_group: String| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(part) = &mut data.part_data {
+                part.collision_group = collision_group;
             }
             Ok(())
         });
