@@ -231,6 +231,11 @@ pub struct PartData {
     pub velocity: Vector3,
     pub shape: PartType,
     pub position_dirty: bool,
+    pub size_dirty: bool,
+    pub anchored_dirty: bool,
+    pub can_collide_dirty: bool,
+    pub velocity_dirty: bool,
+    pub shape_dirty: bool,
 
     pub touched: RBXScriptSignal,
     pub touch_ended: RBXScriptSignal,
@@ -251,6 +256,11 @@ impl Default for PartData {
             velocity: Vector3::zero(),
             shape: PartType::Block,
             position_dirty: false,
+            size_dirty: false,
+            anchored_dirty: false,
+            can_collide_dirty: false,
+            velocity_dirty: false,
+            shape_dirty: false,
             touched: create_signal("Touched"),
             touch_ended: create_signal("TouchEnded"),
         }
@@ -266,6 +276,8 @@ pub struct HumanoidData {
     pub jump_height: f32,
     pub auto_rotate: bool,
     pub hip_height: f32,
+    /// One-shot jump request consumed by game movement update
+    pub jump_requested: bool,
     /// Movement target set by MoveTo()
     pub move_to_target: Option<Vector3>,
     /// Flag to cancel movement (set by CancelMoveTo)
@@ -286,6 +298,7 @@ impl Default for HumanoidData {
             jump_height: humanoid_consts::DEFAULT_JUMP_HEIGHT,
             auto_rotate: true,
             hip_height: humanoid_consts::DEFAULT_HIP_HEIGHT,
+            jump_requested: false,
             move_to_target: None,
             cancel_move_to: false,
             died: create_signal("Died"),
@@ -993,6 +1006,7 @@ impl UserData for Instance {
                     if let Ok(size) = ud.borrow::<Vector3>() {
                         if let Some(part) = &mut data.part_data {
                             part.size = *size;
+                            part.size_dirty = true;
                         }
                     } else if let Ok(size) = ud.borrow::<UDim2>() {
                         if let Some(gui) = &mut data.gui_data {
@@ -1013,6 +1027,7 @@ impl UserData for Instance {
             let mut data = this.data.lock().unwrap();
             if let Some(part) = &mut data.part_data {
                 part.anchored = anchored;
+                part.anchored_dirty = true;
             }
             Ok(())
         });
@@ -1025,6 +1040,7 @@ impl UserData for Instance {
             let mut data = this.data.lock().unwrap();
             if let Some(part) = &mut data.part_data {
                 part.can_collide = can_collide;
+                part.can_collide_dirty = true;
             }
             Ok(())
         });
@@ -1085,6 +1101,7 @@ impl UserData for Instance {
             let mut data = this.data.lock().unwrap();
             if let Some(part) = &mut data.part_data {
                 part.velocity = velocity;
+                part.velocity_dirty = true;
             }
             Ok(())
         });
@@ -1102,6 +1119,7 @@ impl UserData for Instance {
             let mut data = this.data.lock().unwrap();
             if let Some(part) = &mut data.part_data {
                 part.shape = shape;
+                part.shape_dirty = true;
             }
             Ok(())
         });
@@ -1172,6 +1190,21 @@ impl UserData for Instance {
             let mut data = this.data.lock().unwrap();
             if let Some(humanoid) = &mut data.humanoid_data {
                 humanoid.jump_height = jump_height.max(0.0);
+            }
+            Ok(())
+        });
+
+        fields.add_field_method_get("Jump", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.humanoid_data.as_ref().map(|h| h.jump_requested))
+        });
+        fields.add_field_method_set("Jump", |_, this, jump: bool| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(humanoid) = &mut data.humanoid_data {
+                // Roblox semantics: setting Jump true requests one jump.
+                if jump {
+                    humanoid.jump_requested = true;
+                }
             }
             Ok(())
         });
@@ -1937,6 +1970,14 @@ impl UserData for Instance {
             if let Some(humanoid) = &mut data.humanoid_data {
                 humanoid.move_to_target = None;
                 humanoid.cancel_move_to = true; // Signal to clear physics target
+            }
+            Ok(())
+        });
+
+        methods.add_method("Jump", |_, this, ()| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(humanoid) = &mut data.humanoid_data {
+                humanoid.jump_requested = true;
             }
             Ok(())
         });
