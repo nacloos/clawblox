@@ -4,6 +4,7 @@ pub mod humanoid_movement;
 pub mod instance;
 pub mod lua;
 pub mod physics;
+pub mod script_bundle;
 pub mod touch_events;
 mod manager_instances;
 mod manager_lifecycle;

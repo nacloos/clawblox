@@ -8,6 +8,12 @@ use std::path::Path;
 pub struct ScriptsConfig {
     /// Main Lua script file (relative to game directory)
     pub main: String,
+    /// Optional script tree directory (relative to game directory).
+    /// Expected layout uses service roots like:
+    /// - scripts/ServerScriptService/**/*.lua
+    /// - scripts/Workspace/**/*.lua
+    #[serde(default)]
+    pub tree: Option<String>,
     /// Skill definition file (relative to game directory)
     #[serde(default)]
     pub skill: Option<String>,
@@ -17,6 +23,7 @@ impl Default for ScriptsConfig {
     fn default() -> Self {
         Self {
             main: "main.lua".to_string(),
+            tree: None,
             skill: Some("SKILL.md".to_string()),
         }
     }
@@ -114,6 +121,7 @@ mod tests {
 
             [scripts]
             main = "main.lua"
+            tree = "scripts"
             skill = "SKILL.md"
         "#;
         let config: WorldConfig = toml::from_str(toml).unwrap();
@@ -121,5 +129,6 @@ mod tests {
         assert_eq!(config.description, Some("A test game".to_string()));
         assert_eq!(config.max_players, 16);
         assert_eq!(config.scripts.main, "main.lua");
+        assert_eq!(config.scripts.tree, Some("scripts".to_string()));
     }
 }

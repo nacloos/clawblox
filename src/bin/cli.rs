@@ -30,10 +30,10 @@ use libc;
 use include_dir::{include_dir, Dir};
 use tower_http::services::ServeDir;
 
-use clawblox::config::WorldConfig;
 use clawblox::game::{
     self, find_or_create_instance,
     instance::{ErrorMode, PlayerObservation, SpectatorObservation},
+    script_bundle::load_world_and_entry_script,
     GameManager, GameManagerHandle,
 };
 
@@ -637,16 +637,9 @@ fn deploy_game(path: PathBuf, api_key_override: Option<String>, server_override:
         .or_else(|| stored.as_ref().map(|c| c.server.clone()))
         .unwrap_or_else(|| "https://clawblox.com".to_string());
 
-    // Load world config
-    let config = WorldConfig::from_game_dir(&path).unwrap_or_else(|e| {
-        eprintln!("Error loading world.toml: {}", e);
-        std::process::exit(1);
-    });
-
-    // Read Lua script
-    let script_path = path.join(&config.scripts.main);
-    let script_code = std::fs::read_to_string(&script_path).unwrap_or_else(|e| {
-        eprintln!("Error reading {}: {}", script_path.display(), e);
+    // Load world config + bundled runtime script (main.lua + optional scripts/ tree)
+    let (config, script_code) = load_world_and_entry_script(&path).unwrap_or_else(|e| {
+        eprintln!("{}", e);
         std::process::exit(1);
     });
 
@@ -969,16 +962,9 @@ fn run_game(path: PathBuf, port: u16, daemon: bool) {
 
     // Daemon mode: run the server (parent already killed old instance and wrote PID file)
 
-    // Load world config
-    let config = WorldConfig::from_game_dir(&path).unwrap_or_else(|e| {
-        eprintln!("Error loading world.toml: {}", e);
-        std::process::exit(1);
-    });
-
-    // Load the Lua script
-    let script_path = path.join(&config.scripts.main);
-    let script = std::fs::read_to_string(&script_path).unwrap_or_else(|e| {
-        eprintln!("Error loading {}: {}", script_path.display(), e);
+    // Load world config + bundled runtime script (main.lua + optional scripts/ tree)
+    let (config, script) = load_world_and_entry_script(&path).unwrap_or_else(|e| {
+        eprintln!("{}", e);
         std::process::exit(1);
     });
 
@@ -993,6 +979,11 @@ fn run_game(path: PathBuf, port: u16, daemon: bool) {
 
     println!("Starting {} (max {} players)", config.name, config.max_players);
     println!("Script: {}", config.scripts.main);
+    if let Some(tree) = &config.scripts.tree {
+        println!("Script tree: {}", tree);
+    } else if path.join("scripts").is_dir() {
+        println!("Script tree: scripts (auto-detected)");
+    }
 
     // Create game manager without database (Halt mode: stop on first Lua error)
     let (game_manager, game_handle) = GameManager::new_without_db(60, ErrorMode::Halt);
