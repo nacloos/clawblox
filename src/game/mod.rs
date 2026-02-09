@@ -1,5 +1,6 @@
 pub mod async_bridge;
 pub mod constants;
+pub mod humanoid_movement;
 pub mod instance;
 pub mod lua;
 pub mod physics;

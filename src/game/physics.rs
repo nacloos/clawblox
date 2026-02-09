@@ -1,10 +1,34 @@
+use nalgebra::UnitQuaternion;
 use rapier3d::control::{
     CharacterAutostep, CharacterLength, EffectiveCharacterMovement, KinematicCharacterController,
 };
 use rapier3d::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::constants::physics as consts;
+use super::lua::types::PartType;
+
+/// Converts a 3x3 rotation matrix to a UnitQuaternion (Shepperd's method).
+pub fn rotation_matrix_to_quaternion(m: &[[f32; 3]; 3]) -> UnitQuaternion<f32> {
+    let rot = nalgebra::Matrix3::new(
+        m[0][0], m[0][1], m[0][2],
+        m[1][0], m[1][1], m[1][2],
+        m[2][0], m[2][1], m[2][2],
+    );
+    let rotation = nalgebra::Rotation3::from_matrix_unchecked(rot);
+    UnitQuaternion::from_rotation_matrix(&rotation)
+}
+
+/// Converts a UnitQuaternion back to a 3x3 rotation matrix.
+pub fn quaternion_to_rotation_matrix(q: &UnitQuaternion<f32>) -> [[f32; 3]; 3] {
+    let rot = q.to_rotation_matrix();
+    let m = rot.matrix();
+    [
+        [m[(0, 0)], m[(0, 1)], m[(0, 2)]],
+        [m[(1, 0)], m[(1, 1)], m[(1, 2)]],
+        [m[(2, 0)], m[(2, 1)], m[(2, 2)]],
+    ]
+}
 
 // Collision groups for Roblox-style physics behavior
 // Characters don't collide with each other, only with static geometry
@@ -42,8 +66,43 @@ pub struct PhysicsWorld {
     pub lua_to_body: HashMap<u64, RigidBodyHandle>,
     /// Maps Rapier rigid body handle to Lua instance ID (reverse lookup)
     pub body_to_lua: HashMap<RigidBodyHandle, u64>,
+    /// Maps Lua instance ID to its PartType shape (for collider rebuilds)
+    pub lua_to_shape: HashMap<u64, PartType>,
     /// Character controllers for player movement
     pub character_controllers: HashMap<u64, CharacterControllerState>,
+    /// Maps Rapier collider handle to Lua instance ID (for touch detection)
+    pub collider_to_lua: HashMap<ColliderHandle, u64>,
+}
+
+/// Builds a collider with the correct shape for a given PartType and size.
+fn build_collider(size: [f32; 3], shape: PartType, can_collide: bool) -> Collider {
+    let [sx, sy, sz] = size;
+    let shared_shape = match shape {
+        PartType::Block => SharedShape::cuboid(sx / 2.0, sy / 2.0, sz / 2.0),
+        PartType::Ball => SharedShape::ball(sx / 2.0),
+        PartType::Cylinder => SharedShape::cylinder(sy / 2.0, sx / 2.0),
+        PartType::Wedge => {
+            // Triangular prism: flat bottom, slope rises from +X to -X
+            // 6 vertices matching Roblox wedge convention
+            let hx = sx / 2.0;
+            let hy = sy / 2.0;
+            let hz = sz / 2.0;
+            let points = [
+                point![-hx, -hy, -hz], // bottom-left-back
+                point![ hx, -hy, -hz], // bottom-right-back
+                point![-hx, -hy,  hz], // bottom-left-front
+                point![ hx, -hy,  hz], // bottom-right-front
+                point![-hx,  hy, -hz], // top-left-back
+                point![-hx,  hy,  hz], // top-left-front
+            ];
+            SharedShape::convex_hull(&points)
+                .expect("Wedge convex hull should always succeed with 6 valid vertices")
+        }
+    };
+    ColliderBuilder::new(shared_shape)
+        .sensor(!can_collide)
+        .collision_groups(InteractionGroups::new(GROUP_STATIC, Group::ALL))
+        .build()
 }
 
 impl PhysicsWorld {
@@ -64,7 +123,9 @@ impl PhysicsWorld {
             query_pipeline: QueryPipeline::new(),
             lua_to_body: HashMap::new(),
             body_to_lua: HashMap::new(),
+            lua_to_shape: HashMap::new(),
             character_controllers: HashMap::new(),
+            collider_to_lua: HashMap::new(),
         }
     }
 
@@ -100,11 +161,14 @@ impl PhysicsWorld {
         &mut self,
         lua_id: u64,
         position: [f32; 3],
-        rotation: [f32; 4], // quaternion [x, y, z, w]
+        rotation: &[[f32; 3]; 3], // 3x3 rotation matrix
         size: [f32; 3],
         anchored: bool,
         can_collide: bool,
+        shape: PartType,
     ) -> RigidBodyHandle {
+        let quat = rotation_matrix_to_quaternion(rotation);
+
         // Create rigid body
         let body = if anchored {
             RigidBodyBuilder::kinematic_position_based()
@@ -112,24 +176,22 @@ impl PhysicsWorld {
             RigidBodyBuilder::dynamic()
         }
         .translation(vector![position[0], position[1], position[2]])
-        .rotation(vector![rotation[0], rotation[1], rotation[2]]) // Use axis-angle
+        .rotation(quat.scaled_axis())
         .build();
 
         let handle = self.rigid_body_set.insert(body);
 
-        // Create collider (box shape, half-extents)
-        // Static geometry collides with everything (characters and other static)
-        let collider = ColliderBuilder::cuboid(size[0] / 2.0, size[1] / 2.0, size[2] / 2.0)
-            .sensor(!can_collide) // If can_collide is false, make it a sensor (no physical response)
-            .collision_groups(InteractionGroups::new(GROUP_STATIC, Group::ALL))
-            .build();
+        // Create collider with correct shape
+        let collider = build_collider(size, shape, can_collide);
 
-        self.collider_set
+        let collider_handle = self.collider_set
             .insert_with_parent(collider, handle, &mut self.rigid_body_set);
 
         // Store mappings
         self.lua_to_body.insert(lua_id, handle);
         self.body_to_lua.insert(handle, lua_id);
+        self.lua_to_shape.insert(lua_id, shape);
+        self.collider_to_lua.insert(collider_handle, lua_id);
 
         handle
     }
@@ -138,6 +200,13 @@ impl PhysicsWorld {
     pub fn remove_part(&mut self, lua_id: u64) -> bool {
         if let Some(handle) = self.lua_to_body.remove(&lua_id) {
             self.body_to_lua.remove(&handle);
+            self.lua_to_shape.remove(&lua_id);
+            // Remove collider->lua mappings before destroying the body
+            if let Some(body) = self.rigid_body_set.get(handle) {
+                for &ch in body.colliders() {
+                    self.collider_to_lua.remove(&ch);
+                }
+            }
             self.rigid_body_set.remove(
                 handle,
                 &mut self.island_manager,
@@ -157,6 +226,16 @@ impl PhysicsWorld {
         if let Some(body) = self.rigid_body_set.get_mut(handle) {
             if body.is_kinematic() {
                 body.set_next_kinematic_translation(vector![position[0], position[1], position[2]]);
+            }
+        }
+    }
+
+    /// Updates the rotation of an anchored (kinematic) part from a 3x3 rotation matrix
+    pub fn set_kinematic_rotation(&mut self, handle: RigidBodyHandle, rotation: &[[f32; 3]; 3]) {
+        if let Some(body) = self.rigid_body_set.get_mut(handle) {
+            if body.is_kinematic() {
+                let quat = rotation_matrix_to_quaternion(rotation);
+                body.set_next_kinematic_rotation(quat);
             }
         }
     }
@@ -183,6 +262,13 @@ impl PhysicsWorld {
         self.rigid_body_set.get(handle).map(|body| {
             let rot = body.rotation();
             [rot.i, rot.j, rot.k, rot.w]
+        })
+    }
+
+    /// Gets the rotation of a rigid body as a 3x3 rotation matrix
+    pub fn get_rotation_matrix(&self, handle: RigidBodyHandle) -> Option<[[f32; 3]; 3]> {
+        self.rigid_body_set.get(handle).map(|body| {
+            quaternion_to_rotation_matrix(body.rotation())
         })
     }
 
@@ -224,13 +310,19 @@ impl PhysicsWorld {
 
     /// Updates the size of a part's collider
     pub fn set_size(&mut self, lua_id: u64, size: [f32; 3]) {
+        let shape = self.lua_to_shape.get(&lua_id).copied().unwrap_or(PartType::Block);
         if let Some(&handle) = self.lua_to_body.get(&lua_id) {
-            // Get colliders attached to this body
             if let Some(body) = self.rigid_body_set.get(handle) {
                 let colliders: Vec<_> = body.colliders().iter().cloned().collect();
 
-                // Remove old colliders and add new ones with updated size
+                // Read can_collide from existing collider before removing
+                let can_collide = colliders.first()
+                    .and_then(|&ch| self.collider_set.get(ch))
+                    .map(|c| !c.is_sensor())
+                    .unwrap_or(true);
+
                 for collider_handle in colliders {
+                    self.collider_to_lua.remove(&collider_handle);
                     self.collider_set.remove(
                         collider_handle,
                         &mut self.island_manager,
@@ -239,14 +331,54 @@ impl PhysicsWorld {
                     );
                 }
 
-                // Add new collider with updated size (maintain static collision group)
-                let collider =
-                    ColliderBuilder::cuboid(size[0] / 2.0, size[1] / 2.0, size[2] / 2.0)
-                        .collision_groups(InteractionGroups::new(GROUP_STATIC, Group::ALL))
-                        .build();
-
-                self.collider_set
+                let collider = build_collider(size, shape, can_collide);
+                let new_ch = self.collider_set
                     .insert_with_parent(collider, handle, &mut self.rigid_body_set);
+                self.collider_to_lua.insert(new_ch, lua_id);
+            }
+        }
+    }
+
+    /// Toggles collider sensor mode (can_collide=false -> sensor, can_collide=true -> solid)
+    pub fn set_can_collide(&mut self, lua_id: u64, can_collide: bool) {
+        if let Some(&handle) = self.lua_to_body.get(&lua_id) {
+            if let Some(body) = self.rigid_body_set.get(handle) {
+                let colliders: Vec<_> = body.colliders().iter().cloned().collect();
+                for collider_handle in colliders {
+                    if let Some(collider) = self.collider_set.get_mut(collider_handle) {
+                        collider.set_sensor(!can_collide);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Updates the shape of a part's collider, rebuilding it with the current size
+    pub fn set_shape(&mut self, lua_id: u64, shape: PartType, size: [f32; 3]) {
+        self.lua_to_shape.insert(lua_id, shape);
+        if let Some(&handle) = self.lua_to_body.get(&lua_id) {
+            if let Some(body) = self.rigid_body_set.get(handle) {
+                let colliders: Vec<_> = body.colliders().iter().cloned().collect();
+
+                let can_collide = colliders.first()
+                    .and_then(|&ch| self.collider_set.get(ch))
+                    .map(|c| !c.is_sensor())
+                    .unwrap_or(true);
+
+                for collider_handle in colliders {
+                    self.collider_to_lua.remove(&collider_handle);
+                    self.collider_set.remove(
+                        collider_handle,
+                        &mut self.island_manager,
+                        &mut self.rigid_body_set,
+                        true,
+                    );
+                }
+
+                let collider = build_collider(size, shape, can_collide);
+                let new_ch = self.collider_set
+                    .insert_with_parent(collider, handle, &mut self.rigid_body_set);
+                self.collider_to_lua.insert(new_ch, lua_id);
             }
         }
     }
@@ -299,6 +431,7 @@ impl PhysicsWorld {
         self.character_controllers.insert(lua_id, state);
         self.lua_to_body.insert(lua_id, body_handle);
         self.body_to_lua.insert(body_handle, lua_id);
+        self.collider_to_lua.insert(collider_handle, lua_id);
 
         body_handle
     }
@@ -344,6 +477,7 @@ impl PhysicsWorld {
         if let Some(state) = self.character_controllers.remove(&lua_id) {
             self.lua_to_body.remove(&lua_id);
             self.body_to_lua.remove(&state.body_handle);
+            self.collider_to_lua.remove(&state.collider_handle);
             self.rigid_body_set.remove(
                 state.body_handle,
                 &mut self.island_manager,
@@ -406,6 +540,57 @@ impl PhysicsWorld {
         }
     }
 
+    /// Detects all overlapping pairs of bodies in the physics world.
+    /// Returns a set of normalized (min, max) Lua ID pairs that are currently overlapping.
+    /// Uses `intersections_with_shape` which works for all body type combinations
+    /// (including kinematic+kinematic which narrow_phase misses).
+    pub fn detect_overlaps(&self) -> HashSet<(u64, u64)> {
+        let mut overlaps = HashSet::new();
+
+        for (&lua_id, &body_handle) in &self.lua_to_body {
+            let Some(body) = self.rigid_body_set.get(body_handle) else {
+                continue;
+            };
+
+            // Get the collider shape and position for this body
+            let collider_handles: Vec<_> = body.colliders().iter().cloned().collect();
+            for ch in collider_handles {
+                let Some(collider) = self.collider_set.get(ch) else {
+                    continue;
+                };
+
+                let shape = collider.shape();
+                let pos = collider.position();
+
+                // Query all intersecting colliders, excluding self
+                let filter = QueryFilter::default().exclude_rigid_body(body_handle);
+
+                self.query_pipeline.intersections_with_shape(
+                    &self.rigid_body_set,
+                    &self.collider_set,
+                    pos,
+                    shape,
+                    filter,
+                    |other_collider_handle| {
+                        if let Some(&other_lua_id) = self.collider_to_lua.get(&other_collider_handle) {
+                            if other_lua_id != lua_id {
+                                let pair = if lua_id < other_lua_id {
+                                    (lua_id, other_lua_id)
+                                } else {
+                                    (other_lua_id, lua_id)
+                                };
+                                overlaps.insert(pair);
+                            }
+                        }
+                        true // continue searching
+                    },
+                );
+            }
+        }
+
+        overlaps
+    }
+
     /// Casts a ray downward from a position to detect ground
     /// Returns (hit_distance, hit_y) if ground is found within max_distance
     pub fn raycast_down(&self, origin: [f32; 3], max_distance: f32, exclude_body: Option<RigidBodyHandle>) -> Option<(f32, f32)> {
@@ -433,6 +618,43 @@ impl PhysicsWorld {
         } else {
             None
         }
+    }
+
+    /// Returns the linear velocity of the kinematic body directly supporting this character.
+    /// Used for Roblox-like moving platform carry behavior.
+    pub fn get_ground_kinematic_velocity(&self, lua_id: u64, max_distance: f32) -> Option<[f32; 3]> {
+        let state = self.character_controllers.get(&lua_id)?;
+        let body = self.rigid_body_set.get(state.body_handle)?;
+        let origin = body.translation();
+
+        let ray = Ray::new(
+            point![origin.x, origin.y, origin.z],
+            vector![0.0, -1.0, 0.0],
+        );
+
+        let filter = QueryFilter::default()
+            .exclude_rigid_body(state.body_handle)
+            .exclude_sensors()
+            .groups(InteractionGroups::new(GROUP_CHARACTER, GROUP_STATIC));
+
+        let (hit_collider, _toi) = self.query_pipeline.cast_ray(
+            &self.rigid_body_set,
+            &self.collider_set,
+            &ray,
+            max_distance,
+            true,
+            filter,
+        )?;
+
+        let collider = self.collider_set.get(hit_collider)?;
+        let parent = collider.parent()?;
+        let ground_body = self.rigid_body_set.get(parent)?;
+        if !ground_body.is_kinematic() {
+            return None;
+        }
+
+        let v = ground_body.linvel();
+        Some([v.x, v.y, v.z])
     }
 
     /// Moves a character using the kinematic controller for full 3D translation.
@@ -472,6 +694,7 @@ impl PhysicsWorld {
         let desired = vector![desired_translation[0], desired_translation[1], desired_translation[2]];
         let filter = QueryFilter::default()
             .exclude_rigid_body(body_handle)
+            .exclude_sensors()
             .groups(InteractionGroups::new(GROUP_STATIC, Group::ALL & !GROUP_CHARACTER));
 
         let movement = controller.move_shape(
@@ -523,10 +746,11 @@ mod tests {
         let handle = world.add_part(
             1,
             [0.0, 10.0, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [4.0, 1.0, 2.0],
             true,  // anchored
             true,  // can_collide
+            PartType::Block,
         );
 
         assert!(world.has_part(1));
@@ -541,10 +765,11 @@ mod tests {
         let handle = world.add_part(
             1,
             [0.0, 10.0, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [1.0, 1.0, 1.0],
             false, // not anchored - should fall
             true,
+            PartType::Block,
         );
 
         let initial_pos = world.get_position(handle).unwrap();
@@ -568,10 +793,11 @@ mod tests {
         world.add_part(
             1,
             [0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [100.0, 1.0, 100.0],
             true,
             true,
+            PartType::Block,
         );
 
         // Add character above floor
@@ -611,10 +837,11 @@ mod tests {
         world.add_part(
             1,
             [0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [100.0, 1.0, 100.0],
             true,
             true,
+            PartType::Block,
         );
 
         let char_id = 200;
@@ -631,6 +858,83 @@ mod tests {
     }
 
     #[test]
+    fn test_character_ignores_sensor_colliders() {
+        let mut world = PhysicsWorld::new();
+
+        // Floor so the character can move while grounded.
+        world.add_part(
+            1,
+            [0.0, -0.5, 0.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [100.0, 1.0, 100.0],
+            true,
+            true,
+            PartType::Block,
+        );
+
+        // Non-collidable "trigger" directly in the movement path.
+        world.add_part(
+            2,
+            [0.0, 1.0, -8.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [8.0, 2.0, 8.0],
+            true,
+            false, // sensor
+            PartType::Block,
+        );
+
+        let char_id = 300;
+        world.add_character(char_id, [0.0, 2.6, 8.0], 1.0, 5.0);
+
+        let dt = 1.0 / 60.0;
+        for _ in 0..120 {
+            world.query_pipeline.update(&world.collider_set);
+            world.move_character(char_id, [0.0, 0.0, -0.3], dt).unwrap();
+            world.step(dt);
+        }
+
+        let final_pos = world.get_character_position(char_id).unwrap();
+        assert!(
+            final_pos[2] < -6.0,
+            "Character should pass through CanCollide=false sensor. Final z={}",
+            final_pos[2]
+        );
+    }
+
+    #[test]
+    fn test_get_ground_kinematic_velocity() {
+        let mut world = PhysicsWorld::new();
+
+        // Moving platform under the character.
+        let platform = world.add_part(
+            1,
+            [0.0, 0.0, 0.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [10.0, 1.0, 10.0],
+            true,
+            true,
+            PartType::Block,
+        );
+
+        let char_id = 301;
+        world.add_character(char_id, [0.0, 2.6, 0.0], 1.0, 5.0);
+
+        let dt = 1.0 / 60.0;
+        world.step(dt);
+        world.query_pipeline.update(&world.collider_set);
+
+        // Move the kinematic platform upward one step.
+        world.set_kinematic_position(platform, [0.0, 0.2, 0.0]);
+        world.step(dt);
+        world.query_pipeline.update(&world.collider_set);
+
+        let v = world
+            .get_ground_kinematic_velocity(char_id, 4.0)
+            .expect("Expected supporting kinematic velocity");
+        assert!(v[1] > 0.0, "Platform upward velocity should be positive, got {:?}", v);
+    }
+
+    #[test]
     fn test_character_movement_after_landing_on_thin_platform() {
         let mut world = PhysicsWorld::new();
 
@@ -638,20 +942,22 @@ mod tests {
         world.add_part(
             1,
             [0.0, -1.0, 0.0],       // center at Y=-1
-            [0.0, 0.0, 0.0, 1.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [100.0, 2.0, 100.0],    // top at Y=0
             true,
             true,
+            PartType::Block,
         );
 
         // Thin platform at Y=0.1 (like base platform in tsunami game)
         world.add_part(
             2,
             [0.0, 0.1, 0.0],        // center at Y=0.1
-            [0.0, 0.0, 0.0, 1.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [30.0, 0.2, 30.0],      // top at Y=0.2
             true,
             true,
+            PartType::Block,
         );
 
         // Character spawns at Y=3 (above platform)
@@ -693,10 +999,11 @@ mod tests {
         world.add_part(
             1,
             [0.0, -1.0, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [200.0, 2.0, 200.0],
             true,
             true,
+            PartType::Block,
         );
 
         // Character with radius=1.0, height=5.0 (same as game)
@@ -773,20 +1080,22 @@ mod tests {
         world.add_part(
             1,
             [0.0, -0.5, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [100.0, 1.0, 100.0],  // top at Y=0
             true,
             true,
+            PartType::Block,
         );
 
         // Small obstacle (0.3 studs tall, should be steppable with max_height=0.5)
         world.add_part(
             2,
             [5.0, 0.15, 0.0],      // center at Y=0.15
-            [0.0, 0.0, 0.0, 1.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [1.0, 0.3, 4.0],       // top at Y=0.3
             true,
             true,
+            PartType::Block,
         );
 
         // Character starts at X=0, grounded
@@ -832,20 +1141,22 @@ mod tests {
         world.add_part(
             1,
             [0.0, -0.5, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [100.0, 1.0, 100.0],
             true,
             true,
+            PartType::Block,
         );
 
         // Tall obstacle (1.0 stud tall, should block with max_height=0.5)
         world.add_part(
             2,
             [5.0, 0.5, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [1.0, 1.0, 4.0],       // top at Y=1.0
             true,
             true,
+            PartType::Block,
         );
 
         let char_id = 100;
@@ -882,20 +1193,22 @@ mod tests {
         world.add_part(
             1,
             [0.0, -0.5, 0.0],        // center
-            [0.0, 0.0, 0.0, 1.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [200.0, 1.0, 100.0],     // top at Y=0, extends from X=-100 to X=100
             true,
             true,
+            PartType::Block,
         );
 
         // Raised platform (like tsunami base) - sits ON TOP of ground
         world.add_part(
             2,
             [50.0, 0.1, 0.0],        // center at Y=0.1
-            [0.0, 0.0, 0.0, 1.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [100.0, 0.2, 100.0],     // top at Y=0.2, bottom at Y=0, X from 0 to 100
             true,
             true,
+            PartType::Block,
         );
 
         // Character starts on ground (left side), will try to step up onto platform

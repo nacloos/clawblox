@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use super::async_bridge::AsyncBridge;
 use super::constants::physics as consts;
+use super::humanoid_movement::{build_motion_plan, resolve_vertical_velocity_after_move};
 use super::lua::instance::{
     attributes_to_json, AttributeValue, ClassName, Instance, TextXAlignment, TextYAlignment,
 };
@@ -71,6 +72,8 @@ pub struct GameInstance {
     pub error_mode: ErrorMode,
     /// Set when error_mode is Halt and a Lua error occurs; prevents further ticking
     pub halted_error: Option<String>,
+    /// Previous frame's touch pairs for Touched/TouchEnded event detection
+    prev_touches: HashSet<(u64, u64)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -145,6 +148,7 @@ impl GameInstance {
             empty_since: Some(Instant::now()), // Starts empty
             error_mode,
             halted_error: None,
+            prev_touches: HashSet::new(),
         }
     }
 
@@ -362,6 +366,9 @@ impl GameInstance {
         // Step physics simulation
         self.physics.step(dt);
 
+        // Detect touch overlaps and fire Touched/TouchEnded events
+        self.fire_touch_events();
+
         // Sync physics results back to Lua (for Anchored=false parts and characters)
         self.sync_physics_to_lua();
 
@@ -530,18 +537,15 @@ impl GameInstance {
                 }
 
                 if !self.physics.has_part(lua_id) {
-                    // Skip parts with CanCollide=false - they don't need physics
-                    if !part_data.can_collide {
-                        continue;
-                    }
-                    // New part - add to physics
+                    // New part - add to physics (even CanCollide=false as sensor)
                     self.physics.add_part(
                         lua_id,
                         [part_data.position.x, part_data.position.y, part_data.position.z],
-                        [0.0, 0.0, 0.0, 1.0], // TODO: extract rotation from CFrame
+                        &part_data.cframe.rotation,
                         [part_data.size.x, part_data.size.y, part_data.size.z],
                         part_data.anchored,
                         part_data.can_collide,
+                        part_data.shape,
                     );
 
                     // Apply initial velocity for dynamic parts
@@ -553,13 +557,60 @@ impl GameInstance {
                             );
                         }
                     }
-                } else if part_data.anchored {
-                    // Anchored part - update physics position from Lua
-                    if let Some(handle) = self.physics.get_handle(lua_id) {
-                        self.physics.set_kinematic_position(
-                            handle,
-                            [part_data.position.x, part_data.position.y, part_data.position.z],
+
+                    // Clear all dirty flags since we just created the body
+                    part_data.size_dirty = false;
+                    part_data.anchored_dirty = false;
+                    part_data.can_collide_dirty = false;
+                    part_data.velocity_dirty = false;
+                    part_data.shape_dirty = false;
+                } else {
+                    // Existing part - process dirty flags
+                    if part_data.anchored_dirty {
+                        self.physics.set_anchored(lua_id, part_data.anchored);
+                        part_data.anchored_dirty = false;
+                    }
+                    if part_data.size_dirty {
+                        self.physics.set_size(
+                            lua_id,
+                            [part_data.size.x, part_data.size.y, part_data.size.z],
                         );
+                        part_data.size_dirty = false;
+                    }
+                    if part_data.can_collide_dirty {
+                        self.physics.set_can_collide(lua_id, part_data.can_collide);
+                        part_data.can_collide_dirty = false;
+                    }
+                    if part_data.velocity_dirty {
+                        if let Some(handle) = self.physics.get_handle(lua_id) {
+                            self.physics.set_velocity(
+                                handle,
+                                [part_data.velocity.x, part_data.velocity.y, part_data.velocity.z],
+                            );
+                        }
+                        part_data.velocity_dirty = false;
+                    }
+                    if part_data.shape_dirty {
+                        self.physics.set_shape(
+                            lua_id,
+                            part_data.shape,
+                            [part_data.size.x, part_data.size.y, part_data.size.z],
+                        );
+                        part_data.shape_dirty = false;
+                    }
+
+                    // Anchored parts - always sync position/rotation from Lua
+                    if part_data.anchored {
+                        if let Some(handle) = self.physics.get_handle(lua_id) {
+                            self.physics.set_kinematic_position(
+                                handle,
+                                [part_data.position.x, part_data.position.y, part_data.position.z],
+                            );
+                            self.physics.set_kinematic_rotation(
+                                handle,
+                                &part_data.cframe.rotation,
+                            );
+                        }
                     }
                 }
             }
@@ -610,6 +661,11 @@ impl GameInstance {
                             part_data.cframe.position = part_data.position;
                         }
 
+                        // Update rotation from physics
+                        if let Some(rot) = self.physics.get_rotation_matrix(handle) {
+                            part_data.cframe.rotation = rot;
+                        }
+
                         // Update velocity from physics
                         if let Some(vel) = self.physics.get_velocity(handle) {
                             part_data.velocity.x = vel[0];
@@ -620,6 +676,167 @@ impl GameInstance {
                 }
             }
         }
+    }
+
+    /// Detects touch overlaps and fires Touched / TouchEnded signals.
+    /// Compares current-frame overlaps against previous-frame overlaps.
+    ///
+    /// Matches Roblox semantics:
+    /// - Both parts must have CanTouch=true for events to fire on either
+    /// - Two anchored (non-character) parts never fire Touched on each other
+    /// - Touched fires once on first overlap, TouchEnded fires once when overlap ends
+    fn fire_touch_events(&mut self) {
+        // Refresh query pipeline after physics step
+        self.physics
+            .query_pipeline
+            .update(&self.physics.collider_set);
+
+        // Detect current overlaps
+        let current = self.physics.detect_overlaps();
+
+        // Do all Lua work in a block to scope the runtime borrow,
+        // collecting errors to handle afterward (split-borrow pattern).
+        let mut errors: Vec<(&str, mlua::Error)> = Vec::new();
+
+        if let Some(runtime) = &self.lua_runtime {
+            let lua = runtime.lua();
+
+            // Build lua_id -> Instance lookup from workspace descendants
+            let descendants = runtime.workspace().get_descendants();
+            let mut id_to_instance: HashMap<u64, Instance> = HashMap::new();
+            for inst in &descendants {
+                let data = inst.data.lock().unwrap();
+                let lua_id = data.id.0;
+                if data.part_data.is_some() {
+                    id_to_instance.insert(lua_id, inst.clone());
+                }
+            }
+
+            // Helper: check if a lua_id is an anchored non-character part
+            let is_anchored_non_character = |lua_id: u64| -> bool {
+                if self.physics.has_character(lua_id) {
+                    return false;
+                }
+                id_to_instance
+                    .get(&lua_id)
+                    .and_then(|inst| {
+                        let data = inst.data.lock().unwrap();
+                        data.part_data.as_ref().map(|p| p.anchored)
+                    })
+                    .unwrap_or(false)
+            };
+
+            // Helper: fire a signal on one part with the other as argument
+            let mut fire_signal = |signal: &super::lua::events::RBXScriptSignal,
+                                    other: &Instance| {
+                match lua.create_userdata(other.clone()) {
+                    Ok(ud) => {
+                        match signal.fire_as_coroutines(
+                            lua,
+                            mlua::MultiValue::from_iter([mlua::Value::UserData(ud)]),
+                        ) {
+                            Ok(threads) => {
+                                if let Err(e) =
+                                    super::lua::events::track_yielded_threads(lua, threads)
+                                {
+                                    errors.push(("Touch track threads", e));
+                                }
+                            }
+                            Err(e) => errors.push(("Touch event", e)),
+                        }
+                    }
+                    Err(e) => errors.push(("Touch userdata", e)),
+                }
+            };
+
+            // New touches = current - prev
+            for &(a, b) in &current {
+                if self.prev_touches.contains(&(a, b)) {
+                    continue;
+                }
+
+                // Roblox: two anchored (non-character) parts never fire Touched
+                if is_anchored_non_character(a) && is_anchored_non_character(b) {
+                    continue;
+                }
+
+                let (inst_a, inst_b) = match (
+                    id_to_instance.get(&a).cloned(),
+                    id_to_instance.get(&b).cloned(),
+                ) {
+                    (Some(a), Some(b)) => (a, b),
+                    _ => continue,
+                };
+
+                // Roblox: both parts must have CanTouch=true for events to fire
+                let (a_can_touch, a_signal) = {
+                    let data = inst_a.data.lock().unwrap();
+                    match data.part_data.as_ref() {
+                        Some(p) => (p.can_touch, p.touched.clone()),
+                        None => continue,
+                    }
+                };
+                let (b_can_touch, b_signal) = {
+                    let data = inst_b.data.lock().unwrap();
+                    match data.part_data.as_ref() {
+                        Some(p) => (p.can_touch, p.touched.clone()),
+                        None => continue,
+                    }
+                };
+
+                if !a_can_touch || !b_can_touch {
+                    continue;
+                }
+
+                // Fire Touched on A with B as argument, and B with A
+                fire_signal(&a_signal, &inst_b);
+                fire_signal(&b_signal, &inst_a);
+            }
+
+            // Ended touches = prev - current
+            for &(a, b) in &self.prev_touches {
+                if current.contains(&(a, b)) {
+                    continue;
+                }
+
+                let (inst_a, inst_b) = match (
+                    id_to_instance.get(&a).cloned(),
+                    id_to_instance.get(&b).cloned(),
+                ) {
+                    (Some(a), Some(b)) => (a, b),
+                    _ => continue,
+                };
+
+                let (a_can_touch, a_signal) = {
+                    let data = inst_a.data.lock().unwrap();
+                    match data.part_data.as_ref() {
+                        Some(p) => (p.can_touch, p.touch_ended.clone()),
+                        None => continue,
+                    }
+                };
+                let (b_can_touch, b_signal) = {
+                    let data = inst_b.data.lock().unwrap();
+                    match data.part_data.as_ref() {
+                        Some(p) => (p.can_touch, p.touch_ended.clone()),
+                        None => continue,
+                    }
+                };
+
+                if !a_can_touch || !b_can_touch {
+                    continue;
+                }
+
+                fire_signal(&a_signal, &inst_b);
+                fire_signal(&b_signal, &inst_a);
+            }
+        }
+
+        // Handle collected errors after runtime borrow is released
+        for (context, err) in errors {
+            self.handle_lua_error(context, &err);
+        }
+
+        self.prev_touches = current;
     }
 
     /// Process weld constraints - update Part1 position based on Part0's CFrame
@@ -685,12 +902,19 @@ impl GameInstance {
 
     /// Syncs Lua humanoid MoveTo targets to physics character controllers
     fn sync_humanoid_move_targets(&mut self) {
-        let Some(runtime) = &self.lua_runtime else {
+        if self.lua_runtime.is_none() {
             return;
-        };
+        }
 
-        // For each player, check if their humanoid has a move target
-        for (&agent_id, &user_id) in &self.players {
+        // For each player, check if their humanoid has a move target.
+        // Copy pairs first so we can emit callbacks mutably inside the loop.
+        let player_pairs: Vec<(Uuid, u64)> = self
+            .players
+            .iter()
+            .map(|(&agent_id, &user_id)| (agent_id, user_id))
+            .collect();
+
+        for (agent_id, user_id) in player_pairs {
             let Some(&hrp_id) = self.player_hrp_ids.get(&agent_id) else {
                 if let Ok(mut counts) = self.humanoid_warn_counts.lock() {
                     let count = counts.entry(agent_id).or_insert(0);
@@ -703,6 +927,7 @@ impl GameInstance {
             };
 
             // Get player's character and humanoid
+            let runtime = self.lua_runtime.as_ref().unwrap();
             let Some(player) = runtime.players().get_player_by_user_id(user_id) else {
                 if let Ok(mut counts) = self.humanoid_warn_counts.lock() {
                     let count = counts.entry(agent_id).or_insert(0);
@@ -740,6 +965,7 @@ impl GameInstance {
             // Find humanoid in character and process move target
             let character_data = character_ref.lock().unwrap();
             let mut found_humanoid = false;
+            let mut cancelled_move_to = false;
             for child_ref in &character_data.children {
                 let mut child_data = child_ref.lock().unwrap();
                 if let Some(humanoid) = &mut child_data.humanoid_data {
@@ -748,11 +974,18 @@ impl GameInstance {
                     if humanoid.cancel_move_to {
                         humanoid.cancel_move_to = false;
                         self.physics.set_character_target(hrp_id, None);
+                        cancelled_move_to = true;
                     } else if let Some(target) = humanoid.move_to_target.take() {
                         self.physics.set_character_target(hrp_id, Some([target.x, target.y, target.z]));
                     }
                 }
             }
+            drop(character_data);
+
+            if cancelled_move_to {
+                self.fire_humanoid_move_to_finished(agent_id, false);
+            }
+
             if !found_humanoid {
                 if let Ok(mut counts) = self.humanoid_warn_counts.lock() {
                     let count = counts.entry(agent_id).or_insert(0);
@@ -791,49 +1024,44 @@ impl GameInstance {
 
             // Look up the humanoid's walk_speed from Lua instance data
             let walk_speed = self.get_humanoid_walk_speed(agent_id).unwrap_or(WALK_SPEED);
-
+            let jump_power = self.consume_humanoid_jump_request(agent_id);
             let gravity = self.physics.gravity.y;
-            let mut new_vertical_velocity = vertical_velocity + gravity * dt;
+            let platform_velocity = if grounded {
+                self.physics.get_ground_kinematic_velocity(hrp_id, 4.0)
+            } else {
+                None
+            };
+            let motion_plan = build_motion_plan(
+                current_pos,
+                target,
+                walk_speed,
+                vertical_velocity,
+                gravity,
+                dt,
+                grounded,
+                jump_power,
+                platform_velocity,
+            );
 
-            // Calculate horizontal movement towards target
-            let mut dx = 0.0f32;
-            let mut dz = 0.0f32;
-
-            if let Some(target) = target {
-                let tx = target[0] - current_pos[0];
-                let tz = target[2] - current_pos[2];
-                let dist_xz = (tx * tx + tz * tz).sqrt();
-
-                if dist_xz > 0.5 {
-                    let speed = walk_speed * dt;
-                    dx = (tx / dist_xz) * speed;
-                    dz = (tz / dist_xz) * speed;
-                } else {
-                    // Reached target, clear it
-                    self.physics.set_character_target(hrp_id, None);
-                }
+            let mut new_vertical_velocity = motion_plan.new_vertical_velocity;
+            if motion_plan.reached_move_to {
+                self.physics.set_character_target(hrp_id, None);
             }
 
-            // When grounded, use zero vertical component - snap_to_ground handles staying grounded
-            // Only apply gravity when airborne
-            // Note: The -0.001 epsilon was causing floor collisions that blocked horizontal movement
-            let desired_y = if grounded && new_vertical_velocity <= 0.0 {
-                0.0 // snap_to_ground keeps character on ground; no downward component needed
-            } else {
-                new_vertical_velocity * dt
-            };
-            let desired = [dx, desired_y, dz];
-            if let Some(movement) = self.physics.move_character(hrp_id, desired, dt) {
-                if movement.grounded && new_vertical_velocity < 0.0 {
-                    new_vertical_velocity = 0.0;
-                }
-                if desired[1] > 0.0 && movement.translation.y + 1.0e-4 < desired[1] {
-                    new_vertical_velocity = 0.0;
-                }
+            if let Some(movement) = self.physics.move_character(hrp_id, motion_plan.desired, dt) {
+                new_vertical_velocity = resolve_vertical_velocity_after_move(
+                    new_vertical_velocity,
+                    motion_plan.desired[1],
+                    movement.translation.y,
+                    movement.grounded,
+                );
             }
 
             if let Some(state) = self.physics.get_character_state_mut(hrp_id) {
                 state.vertical_velocity = new_vertical_velocity;
+            }
+            if motion_plan.reached_move_to {
+                self.fire_humanoid_move_to_finished(agent_id, true);
             }
         }
     }
@@ -963,6 +1191,89 @@ impl GameInstance {
         None
     }
 
+    /// Consume one pending jump request from the player's Humanoid.
+    fn consume_humanoid_jump_request(&mut self, agent_id: Uuid) -> Option<f32> {
+        let user_id = *self.players.get(&agent_id)?;
+        let runtime = self.lua_runtime.as_ref()?;
+        let player = runtime.players().get_player_by_user_id(user_id)?;
+
+        let player_data = player.data.lock().unwrap();
+        let character = player_data
+            .player_data
+            .as_ref()?
+            .character
+            .as_ref()?
+            .upgrade()?;
+        drop(player_data);
+
+        let char_data = character.lock().unwrap();
+        for child in &char_data.children {
+            let mut child_data = child.lock().unwrap();
+            if let Some(humanoid) = &mut child_data.humanoid_data {
+                if humanoid.jump_requested {
+                    humanoid.jump_requested = false;
+                    return Some(humanoid.jump_power);
+                }
+                return None;
+            }
+        }
+        None
+    }
+
+    /// Fire Humanoid.MoveToFinished(reached) for this player if a humanoid is available.
+    fn fire_humanoid_move_to_finished(&mut self, agent_id: Uuid, reached: bool) {
+        let result: Result<(), mlua::Error> = (|| {
+            let Some(user_id) = self.players.get(&agent_id).copied() else {
+                return Ok(());
+            };
+            let Some(runtime) = &self.lua_runtime else {
+                return Ok(());
+            };
+            let Some(player) = runtime.players().get_player_by_user_id(user_id) else {
+                return Ok(());
+            };
+
+            let signal = {
+                let player_data = player.data.lock().unwrap();
+                let Some(character) = player_data
+                    .player_data
+                    .as_ref()
+                    .and_then(|p| p.character.as_ref())
+                    .and_then(|w| w.upgrade()) else {
+                    return Ok(());
+                };
+                drop(player_data);
+
+                let char_data = character.lock().unwrap();
+                let mut result = None;
+                for child in &char_data.children {
+                    let child_data = child.lock().unwrap();
+                    if let Some(humanoid) = &child_data.humanoid_data {
+                        result = Some(humanoid.move_to_finished.clone());
+                        break;
+                    }
+                }
+                result
+            };
+
+            let Some(signal) = signal else {
+                return Ok(());
+            };
+
+            let lua = runtime.lua();
+            let threads = signal.fire_as_coroutines(
+                lua,
+                mlua::MultiValue::from_iter([mlua::Value::Boolean(reached)]),
+            )?;
+            super::lua::events::track_yielded_threads(lua, threads)?;
+            Ok(())
+        })();
+
+        if let Err(e) = result {
+            self.handle_lua_error("MoveToFinished event", &e);
+        }
+    }
+
     /// Get static map geometry (entities with "Static" tag)
     /// Used for one-time fetch via /map endpoint
     pub fn get_map_info(&self) -> MapInfo {
@@ -985,8 +1296,11 @@ impl GameInstance {
                         entity_type: Some("part".to_string()),
                         position: [part_data.position.x, part_data.position.y, part_data.position.z],
                         size: [part_data.size.x, part_data.size.y, part_data.size.z],
+                        rotation: Some(part_data.cframe.rotation),
                         color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
                         material: Some(part_data.material.name().to_string()),
+                        shape: Some(part_data.shape.name().to_string()),
+                        transparency: if part_data.transparency != 0.0 { Some(part_data.transparency) } else { None },
                         anchored: part_data.anchored,
                         attributes: if attrs.is_empty() { None } else { Some(attrs) },
                     });
@@ -1019,8 +1333,11 @@ impl GameInstance {
                             entity_type: Some("part".to_string()),
                             position: round_position([part_data.position.x, part_data.position.y, part_data.position.z]),
                             size: round_position([part_data.size.x, part_data.size.y, part_data.size.z]),
+                            rotation: Some(part_data.cframe.rotation),
                             color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
                             material: Some(part_data.material.name().to_string()),
+                            shape: Some(part_data.shape.name().to_string()),
+                            transparency: if part_data.transparency != 0.0 { Some(part_data.transparency) } else { None },
                             anchored: part_data.anchored,
                             attributes: if attrs.is_empty() { None } else { Some(attrs) },
                         });
@@ -1035,8 +1352,11 @@ impl GameInstance {
                             entity_type: Some("folder".to_string()),
                             position: [0.0, 0.0, 0.0],
                             size: [0.0, 0.0, 0.0],
+                            rotation: None,
                             color: None,
                             material: None,
+                            shape: None,
+                            transparency: None,
                             anchored: true,
                             attributes: Some(attrs),
                         });
@@ -1065,8 +1385,11 @@ impl GameInstance {
                         entity_type: Some("part".to_string()),
                         position: [part_data.position.x, part_data.position.y, part_data.position.z],
                         size: [part_data.size.x, part_data.size.y, part_data.size.z],
+                        rotation: Some(part_data.cframe.rotation),
                         color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
                         material: Some(part_data.material.name().to_string()),
+                        shape: Some(part_data.shape.name().to_string()),
+                        transparency: if part_data.transparency != 0.0 { Some(part_data.transparency) } else { None },
                         anchored: part_data.anchored,
                         attributes: if attrs.is_empty() { None } else { Some(attrs) },
                     });
@@ -1080,8 +1403,11 @@ impl GameInstance {
                             entity_type: Some("folder".to_string()),
                             position: [0.0, 0.0, 0.0],
                             size: [0.0, 0.0, 0.0],
+                            rotation: None,
                             color: None,
                             material: None,
+                            shape: None,
+                            transparency: None,
                             anchored: true,
                             attributes: Some(attrs),
                         });
@@ -1467,9 +1793,15 @@ pub struct WorldEntity {
     pub position: [f32; 3],
     pub size: [f32; 3],
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<[[f32; 3]; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<[f32; 3]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub material: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transparency: Option<f32>,
     pub anchored: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attributes: Option<std::collections::HashMap<String, serde_json::Value>>,
@@ -1764,6 +2096,217 @@ mod tests {
 
         // Should move significantly (at 16 studs/sec, should move ~32 studs in 2 sec)
         assert!(horizontal_distance > 10.0, "Player should have moved towards target via Lua MoveTo");
+    }
+
+    #[test]
+    fn test_humanoid_jump_input_moves_character_upward() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(r#"
+            local AgentInputService = game:GetService("AgentInputService")
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(100, 1, 100)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            if AgentInputService then
+                AgentInputService.InputReceived:Connect(function(player, inputType, data)
+                    if inputType == "Jump" then
+                        local humanoid = player.Character and player.Character:FindFirstChild("Humanoid")
+                        if humanoid then
+                            humanoid.Jump = true
+                        end
+                    end
+                end)
+            end
+        "#);
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "TestPlayer"));
+        let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+        let user_id = *instance.players.get(&agent_id).unwrap();
+
+        for _ in 0..30 {
+            instance.tick();
+        }
+
+        let start = instance.physics.get_character_position(hrp_id).unwrap();
+        instance.queue_agent_input(user_id, "Jump".to_string(), serde_json::json!({}));
+
+        let mut max_y = start[1];
+        for _ in 0..60 {
+            instance.tick();
+            let pos = instance.physics.get_character_position(hrp_id).unwrap();
+            max_y = max_y.max(pos[1]);
+        }
+
+        assert!(
+            max_y > start[1] + 1.0,
+            "Jump should move the character upward. start_y={}, max_y={}",
+            start[1],
+            max_y
+        );
+    }
+
+    #[test]
+    fn test_moveto_finished_fires_for_reach_and_cancel() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(r#"
+            local AgentInputService = game:GetService("AgentInputService")
+            local Players = game:GetService("Players")
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(200, 1, 200)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            local state = Instance.new("Part")
+            state.Name = "SignalState"
+            state.Size = Vector3.new(2, 2, 2)
+            state.Position = Vector3.new(0, 2, 20)
+            state.Anchored = true
+            state.Parent = Workspace
+            state:SetAttribute("ReachCount", 0)
+            state:SetAttribute("CancelCount", 0)
+            state:SetAttribute("LastReached", false)
+
+            local function bindHumanoid(player)
+                local character = player.Character
+                if not character then return end
+                local humanoid = character:FindFirstChild("Humanoid")
+                if not humanoid then return end
+
+                humanoid.MoveToFinished:Connect(function(reached)
+                    if reached then
+                        state:SetAttribute("ReachCount", (state:GetAttribute("ReachCount") or 0) + 1)
+                    else
+                        state:SetAttribute("CancelCount", (state:GetAttribute("CancelCount") or 0) + 1)
+                    end
+                    state:SetAttribute("LastReached", reached)
+                end)
+            end
+
+            Players.PlayerAdded:Connect(function(player)
+                player.CharacterAdded:Connect(function()
+                    bindHumanoid(player)
+                end)
+                bindHumanoid(player)
+            end)
+
+            if AgentInputService then
+                AgentInputService.InputReceived:Connect(function(player, inputType, data)
+                    local humanoid = player.Character and player.Character:FindFirstChild("Humanoid")
+                    if not humanoid then return end
+
+                    if inputType == "MoveTo" and data and data.position then
+                        local pos = data.position
+                        humanoid:MoveTo(Vector3.new(pos[1], pos[2], pos[3]))
+                    elseif inputType == "Stop" then
+                        humanoid:CancelMoveTo()
+                    end
+                end)
+            end
+        "#);
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "TestPlayer"));
+        let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+        let user_id = *instance.players.get(&agent_id).unwrap();
+
+        for _ in 0..20 {
+            instance.tick();
+        }
+
+        let start = instance.physics.get_character_position(hrp_id).unwrap();
+        instance.queue_agent_input(
+            user_id,
+            "MoveTo".to_string(),
+            serde_json::json!({"position": [start[0] + 8.0, start[1], start[2]]}),
+        );
+        for _ in 0..180 {
+            instance.tick();
+        }
+
+        let reach_count = get_trigger_attr(&instance, "SignalState", "ReachCount");
+        assert!(reach_count >= 1.0, "MoveToFinished(true) should fire on reach");
+
+        let mid = instance.physics.get_character_position(hrp_id).unwrap();
+        instance.queue_agent_input(
+            user_id,
+            "MoveTo".to_string(),
+            serde_json::json!({"position": [mid[0] + 40.0, mid[1], mid[2]]}),
+        );
+        for _ in 0..20 {
+            instance.tick();
+        }
+        instance.queue_agent_input(user_id, "Stop".to_string(), serde_json::json!({}));
+        for _ in 0..10 {
+            instance.tick();
+        }
+
+        let cancel_count = get_trigger_attr(&instance, "SignalState", "CancelCount");
+        assert!(cancel_count >= 1.0, "MoveToFinished(false) should fire on cancel");
+
+        let last_reached = get_trigger_bool_attr(&instance, "SignalState", "LastReached");
+        assert!(!last_reached, "LastReached should be false after cancel");
+    }
+
+    #[test]
+    fn test_grounded_character_carried_by_moving_platform() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(r#"
+            local RunService = game:GetService("RunService")
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(300, 1, 300)
+            floor.Position = Vector3.new(0, -1, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            local elevator = Instance.new("Part")
+            elevator.Name = "Elevator"
+            elevator.Size = Vector3.new(30, 1, 30)
+            elevator.Position = Vector3.new(-1.5, 1.0, 0.0)
+            elevator.Anchored = true
+            elevator.Parent = Workspace
+
+            local elapsed = 0
+            RunService.Heartbeat:Connect(function(dt)
+                elapsed = elapsed + dt
+                if elapsed < 1.0 then
+                    elevator.Position = elevator.Position + Vector3.new(0, 0.12, 0)
+                end
+            end)
+        "#);
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "TestPlayer"));
+        let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+
+        for _ in 0..20 {
+            instance.tick();
+        }
+        let y_before = instance.physics.get_character_position(hrp_id).unwrap()[1];
+
+        for _ in 0..60 {
+            instance.tick();
+        }
+        let y_after = instance.physics.get_character_position(hrp_id).unwrap()[1];
+
+        assert!(
+            y_after > y_before + 1.0,
+            "Character should be carried upward by moving platform. before_y={}, after_y={}",
+            y_before,
+            y_after
+        );
     }
 
     #[test]
@@ -2284,5 +2827,288 @@ mod tests {
             distance_default,
             distance_fast
         );
+    }
+
+    #[test]
+    fn test_touched_events_fire_on_overlap() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        // Script: floor + trigger zone that sets an attribute when Touched fires
+        instance.load_script(r#"
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(200, 1, 200)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            -- Trigger zone: CanCollide=false, CanTouch=true
+            local trigger = Instance.new("Part")
+            trigger.Name = "Trigger"
+            trigger.Size = Vector3.new(6, 6, 6)
+            trigger.Position = Vector3.new(10, 3, 0)
+            trigger.Anchored = true
+            trigger.CanCollide = false
+            trigger.Parent = Workspace
+
+            trigger.Touched:Connect(function(otherPart)
+                trigger:SetAttribute("TouchCount",
+                    (trigger:GetAttribute("TouchCount") or 0) + 1)
+                trigger:SetAttribute("LastTouched", otherPart.Name)
+            end)
+
+            trigger.TouchEnded:Connect(function(otherPart)
+                trigger:SetAttribute("EndedCount",
+                    (trigger:GetAttribute("EndedCount") or 0) + 1)
+            end)
+        "#);
+
+        // Add player — spawns away from trigger
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "TestPlayer"));
+        let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+
+        // Run a few ticks to settle
+        for _ in 0..10 {
+            instance.tick();
+        }
+
+        // Verify no touches yet
+        let touch_count = get_trigger_attr(&instance, "Trigger", "TouchCount");
+        assert_eq!(touch_count, 0.0, "No touches before moving to trigger");
+
+        // Teleport player into the trigger zone
+        instance.physics.set_character_position(hrp_id, [10.0, 3.0, 0.0]);
+
+        // Tick to detect the overlap
+        for _ in 0..3 {
+            instance.tick();
+        }
+
+        let touch_count = get_trigger_attr(&instance, "Trigger", "TouchCount");
+        assert!(touch_count >= 1.0, "Touched should have fired. Got count={}", touch_count);
+
+        let last_touched = get_trigger_str_attr(&instance, "Trigger", "LastTouched");
+        assert_eq!(last_touched, "HumanoidRootPart", "Touched arg should be the character's HRP");
+
+        // Now teleport player away from trigger
+        instance.physics.set_character_position(hrp_id, [50.0, 3.0, 0.0]);
+
+        for _ in 0..3 {
+            instance.tick();
+        }
+
+        let ended_count = get_trigger_attr(&instance, "Trigger", "EndedCount");
+        assert!(ended_count >= 1.0, "TouchEnded should have fired. Got count={}", ended_count);
+    }
+
+    #[test]
+    fn test_moveto_reaches_non_collidable_trigger() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(r#"
+            local AgentInputService = game:GetService("AgentInputService")
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(200, 2, 200)
+            floor.Position = Vector3.new(0, -1, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            local trigger = Instance.new("Part")
+            trigger.Name = "Trigger"
+            trigger.Size = Vector3.new(6, 6, 6)
+            trigger.Position = Vector3.new(0, 3, -30)
+            trigger.Anchored = true
+            trigger.CanCollide = false
+            trigger.Parent = Workspace
+
+            trigger.Touched:Connect(function(otherPart)
+                trigger:SetAttribute("TouchCount",
+                    (trigger:GetAttribute("TouchCount") or 0) + 1)
+            end)
+
+            if AgentInputService then
+                AgentInputService.InputReceived:Connect(function(player, inputType, data)
+                    if inputType == "MoveTo" and data and data.position then
+                        local humanoid = player.Character and player.Character:FindFirstChild("Humanoid")
+                        if humanoid then
+                            local pos = data.position
+                            humanoid:MoveTo(Vector3.new(pos[1], pos[2], pos[3]))
+                        end
+                    end
+                end)
+            end
+        "#);
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "TestPlayer"));
+        let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+        let user_id = *instance.players.get(&agent_id).unwrap();
+
+        for _ in 0..10 {
+            instance.tick();
+        }
+
+        let start = instance.physics.get_character_position(hrp_id).unwrap();
+        instance.queue_agent_input(
+            user_id,
+            "MoveTo".to_string(),
+            serde_json::json!({"position": [0.0, start[1], -30.0]}),
+        );
+
+        for _ in 0..240 {
+            instance.tick();
+        }
+
+        let final_pos = instance.physics.get_character_position(hrp_id).unwrap();
+        let dx = final_pos[0] - 0.0;
+        let dz = final_pos[2] - (-30.0);
+        let dist_xz = (dx * dx + dz * dz).sqrt();
+        assert!(
+            dist_xz < 4.0,
+            "MoveTo should reach the non-collidable trigger. Final pos={:?}, dist_xz={}",
+            final_pos,
+            dist_xz
+        );
+
+        let touch_count = get_trigger_attr(&instance, "Trigger", "TouchCount");
+        assert!(
+            touch_count >= 1.0,
+            "Touched should fire when entering trigger via MoveTo. Got count={}",
+            touch_count
+        );
+    }
+
+    #[test]
+    fn test_touched_requires_both_can_touch() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        // Script: trigger with CanTouch=false — Touched should NOT fire
+        instance.load_script(r#"
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(200, 1, 200)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            local trigger = Instance.new("Part")
+            trigger.Name = "Trigger"
+            trigger.Size = Vector3.new(6, 6, 6)
+            trigger.Position = Vector3.new(10, 3, 0)
+            trigger.Anchored = true
+            trigger.CanCollide = false
+            trigger.CanTouch = false
+            trigger.Parent = Workspace
+
+            trigger.Touched:Connect(function(otherPart)
+                trigger:SetAttribute("TouchCount",
+                    (trigger:GetAttribute("TouchCount") or 0) + 1)
+            end)
+        "#);
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "TestPlayer"));
+        let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+
+        for _ in 0..10 {
+            instance.tick();
+        }
+
+        // Teleport into trigger
+        instance.physics.set_character_position(hrp_id, [10.0, 3.0, 0.0]);
+
+        for _ in 0..5 {
+            instance.tick();
+        }
+
+        let touch_count = get_trigger_attr(&instance, "Trigger", "TouchCount");
+        assert_eq!(touch_count, 0.0,
+            "Touched should NOT fire when CanTouch=false. Got count={}", touch_count);
+    }
+
+    #[test]
+    fn test_touched_skips_anchored_anchored() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        // Two overlapping anchored parts — Roblox never fires Touched for these
+        instance.load_script(r#"
+            local partA = Instance.new("Part")
+            partA.Name = "PartA"
+            partA.Size = Vector3.new(4, 4, 4)
+            partA.Position = Vector3.new(0, 2, 0)
+            partA.Anchored = true
+            partA.Parent = Workspace
+
+            local partB = Instance.new("Part")
+            partB.Name = "PartB"
+            partB.Size = Vector3.new(4, 4, 4)
+            partB.Position = Vector3.new(1, 2, 0)
+            partB.Anchored = true
+            partB.Parent = Workspace
+
+            partA.Touched:Connect(function(otherPart)
+                partA:SetAttribute("TouchCount",
+                    (partA:GetAttribute("TouchCount") or 0) + 1)
+            end)
+        "#);
+
+        // No players needed — just tick to detect overlaps
+        for _ in 0..10 {
+            instance.tick();
+        }
+
+        let touch_count = get_trigger_attr(&instance, "PartA", "TouchCount");
+        assert_eq!(touch_count, 0.0,
+            "Anchored+Anchored should never fire Touched. Got count={}", touch_count);
+    }
+
+    /// Helper: get a numeric attribute from a named part in workspace
+    fn get_trigger_attr(instance: &GameInstance, name: &str, attr: &str) -> f64 {
+        let runtime = instance.lua_runtime.as_ref().unwrap();
+        let descendants = runtime.workspace().get_descendants();
+        for inst in &descendants {
+            let data = inst.data.lock().unwrap();
+            if data.name == name {
+                if let Some(AttributeValue::Number(v)) = data.attributes.get(attr) {
+                    return *v;
+                }
+                return 0.0;
+            }
+        }
+        0.0
+    }
+
+    /// Helper: get a string attribute from a named part in workspace
+    fn get_trigger_str_attr(instance: &GameInstance, name: &str, attr: &str) -> String {
+        let runtime = instance.lua_runtime.as_ref().unwrap();
+        let descendants = runtime.workspace().get_descendants();
+        for inst in &descendants {
+            let data = inst.data.lock().unwrap();
+            if data.name == name {
+                if let Some(AttributeValue::String(v)) = data.attributes.get(attr) {
+                    return v.clone();
+                }
+                return String::new();
+            }
+        }
+        String::new()
+    }
+
+    /// Helper: get a bool attribute from a named part in workspace
+    fn get_trigger_bool_attr(instance: &GameInstance, name: &str, attr: &str) -> bool {
+        let runtime = instance.lua_runtime.as_ref().unwrap();
+        let descendants = runtime.workspace().get_descendants();
+        for inst in &descendants {
+            let data = inst.data.lock().unwrap();
+            if data.name == name {
+                if let Some(AttributeValue::Bool(v)) = data.attributes.get(attr) {
+                    return *v;
+                }
+                return false;
+            }
+        }
+        false
     }
 }
