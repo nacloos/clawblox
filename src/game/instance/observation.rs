@@ -154,7 +154,7 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
                 let player_data = player.data.lock().unwrap();
 
                 // Get position and health in one pass (avoid redundant locking)
-                let (position, health) = player_data
+                let (position, health, root_part_id, animator_id) = player_data
                     .player_data
                     .as_ref()
                     .and_then(|pd| pd.character.as_ref())
@@ -163,36 +163,68 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
                         let char = char_ref.lock().unwrap();
 
                         // Get position from HumanoidRootPart
-                        let pos = char
+                        let primary_part = char
                             .model_data
                             .as_ref()
                             .and_then(|m| m.primary_part.as_ref())
-                            .and_then(|weak| weak.upgrade())
+                            .and_then(|weak| weak.upgrade());
+                        let (pos, root_part_id) = primary_part
+                            .as_ref()
                             .and_then(|hrp_data| {
                                 let hrp = hrp_data.lock().unwrap();
-                                hrp.part_data
-                                    .as_ref()
-                                    .map(|p| [p.position.x, p.position.y, p.position.z])
+                                hrp.part_data.as_ref().map(|p| {
+                                    (
+                                        [p.position.x, p.position.y, p.position.z],
+                                        Some(hrp.id.0 as u32),
+                                    )
+                                })
                             })
-                            .unwrap_or([0.0, 3.0, 0.0]);
+                            .unwrap_or(([0.0, 3.0, 0.0], None));
 
                         // Get health from Humanoid (while we have character locked)
-                        let hp = char
-                            .children
-                            .iter()
-                            .find_map(|child| {
-                                let child_data = child.lock().unwrap();
-                                if child_data.name == "Humanoid" {
-                                    child_data.humanoid_data.as_ref().map(|h| h.health as i32)
-                                } else {
-                                    None
+                        let mut hp = 100;
+                        let mut animator_id: Option<u64> = None;
+                        for child in &char.children {
+                            let child_data = child.lock().unwrap();
+                            if child_data.name == "Humanoid" {
+                                if let Some(humanoid) = &child_data.humanoid_data {
+                                    hp = humanoid.health as i32;
                                 }
-                            })
-                            .unwrap_or(100);
+                                animator_id = child_data.children.iter().find_map(|anim_child| {
+                                    let anim_data = anim_child.lock().unwrap();
+                                    if anim_data.class_name == ClassName::Animator {
+                                        Some(anim_data.id.0)
+                                    } else {
+                                        None
+                                    }
+                                });
+                                break;
+                            }
+                        }
 
-                        (pos, hp)
+                        (pos, hp, root_part_id, animator_id)
                     })
-                    .unwrap_or(([0.0, 3.0, 0.0], 100));
+                    .unwrap_or(([0.0, 3.0, 0.0], 100, None, None));
+
+                let active_animations = animator_id.and_then(|id| {
+                    runtime
+                        .lua()
+                        .app_data_ref::<crate::game::lua::instance::AnimationScheduler>()
+                        .map(|scheduler| {
+                            let tracks = scheduler.active_tracks_for_animator(id);
+                            tracks
+                                .into_iter()
+                                .map(|track| SpectatorPlayerAnimation {
+                                    animation_id: track.animation_id,
+                                    time_position: round_f32(track.time_position),
+                                    speed: round_f32(track.speed),
+                                    looped: track.looped,
+                                    is_playing: track.is_playing,
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .filter(|tracks| !tracks.is_empty())
+                });
 
                 // Get player name from our cache, or fall back to Player_<uuid>
                 let name = instance
@@ -230,9 +262,11 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
                     id: agent_id,
                     name,
                     position: round_position(position),
+                    root_part_id,
                     health,
                     attributes,
                     gui,
+                    active_animations,
                 });
                 drop(player_data);
             }
@@ -252,4 +286,3 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
         entities,
     }
 }
-

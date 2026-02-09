@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::game::instance::ErrorMode;
 
-use super::instance::{AttributeValue, Instance, InstanceData};
+use super::instance::{AnimationScheduler, AttributeValue, Instance, InstanceData};
 use super::services::{
     register_overlap_params, register_raycast_params, AgentInput, AgentInputService,
     DataStoreService, HttpService,
@@ -429,6 +429,7 @@ impl LuaRuntime {
         let executed_scripts = Arc::new(Mutex::new(HashSet::new()));
         let module_cache = Arc::new(Mutex::new(HashMap::new()));
         let loading_modules = Arc::new(Mutex::new(HashSet::new()));
+        lua.set_app_data(AnimationScheduler::default());
 
         Self::register_require(
             &lua,
@@ -753,6 +754,44 @@ mod tests {
         assert_eq!(default_offset, 0);
         assert_eq!(updated_scale, 0.0);
         assert_eq!(updated_offset, 12);
+    }
+
+    #[test]
+    fn test_humanoid_load_animation_and_track_playback() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local humanoid = Instance.new("Humanoid")
+            local animation = Instance.new("Animation")
+            animation.AnimationId = "local://fire_rifle"
+            local track = humanoid:LoadAnimation(animation)
+            _G.track = track
+            _G.length = track.Length
+            _G.playingBefore = track.IsPlaying
+            track:Play()
+            _G.playingAfter = track.IsPlaying
+        "#,
+            )
+            .expect("Failed to load script");
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let length: f64 = globals.get("length").unwrap();
+        let playing_before: bool = globals.get("playingBefore").unwrap();
+        let playing_after: bool = globals.get("playingAfter").unwrap();
+        assert!(length > 0.0);
+        assert!(!playing_before);
+        assert!(playing_after);
+
+        for _ in 0..20 {
+            runtime.tick(1.0 / 60.0).expect("Failed to tick");
+        }
+
+        let track: mlua::AnyUserData = globals.get("track").unwrap();
+        let is_playing: bool = track.get("IsPlaying").unwrap();
+        let time_position: f64 = track.get("TimePosition").unwrap();
+        assert!(!is_playing, "Track should auto-stop after clip length");
+        assert!(time_position > 0.0, "Track time should advance while playing");
     }
 
     #[test]

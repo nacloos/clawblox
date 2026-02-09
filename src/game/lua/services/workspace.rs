@@ -994,6 +994,38 @@ impl UserData for WorkspaceService {
             },
         );
 
+        methods.add_async_method(
+            "WaitForChild",
+            |lua, this, (name, timeout): (String, Option<f64>)| {
+                let root = this.instance.clone();
+                async move {
+                    let start = std::time::Instant::now();
+                    let timeout = timeout.map(|t| t.max(0.0));
+                    let name_for_poll = name.clone();
+
+                    let child = futures_util::future::poll_fn(move |_cx| {
+                        if let Some(child) = root.find_first_child(&name_for_poll, false) {
+                            return std::task::Poll::Ready(Some(child));
+                        }
+
+                        if let Some(t) = timeout {
+                            if start.elapsed().as_secs_f64() >= t {
+                                return std::task::Poll::Ready(None);
+                            }
+                        }
+
+                        std::task::Poll::Pending
+                    })
+                    .await;
+
+                    match child {
+                        Some(child) => Ok(Value::UserData(lua.create_userdata(child)?)),
+                        None => Ok(Value::Nil),
+                    }
+                }
+            },
+        );
+
         methods.add_method("FindFirstChildOfClass", |_, this, class_name: String| {
             Ok(this.instance.find_first_child_of_class(&class_name))
         });

@@ -42,6 +42,8 @@ pub enum ClassName {
     Players,
     RunService,
     Camera,
+    Animation,
+    Animator,
     Script,
     ModuleScript,
     ServerScriptService,
@@ -73,6 +75,8 @@ impl ClassName {
             ClassName::Players => "Players",
             ClassName::RunService => "RunService",
             ClassName::Camera => "Camera",
+            ClassName::Animation => "Animation",
+            ClassName::Animator => "Animator",
             ClassName::Script => "Script",
             ClassName::ModuleScript => "ModuleScript",
             ClassName::ServerScriptService => "ServerScriptService",
@@ -102,6 +106,8 @@ impl ClassName {
             "Players" => matches!(self, ClassName::Players),
             "RunService" => matches!(self, ClassName::RunService),
             "Camera" => matches!(self, ClassName::Camera),
+            "Animation" => matches!(self, ClassName::Animation),
+            "Animator" => matches!(self, ClassName::Animator),
             "Script" => matches!(self, ClassName::Script),
             "ModuleScript" => matches!(self, ClassName::ModuleScript),
             "ServerScriptService" => matches!(self, ClassName::ServerScriptService),
@@ -191,6 +197,8 @@ pub struct InstanceData {
     pub part_data: Option<PartData>,
     pub humanoid_data: Option<HumanoidData>,
     pub player_data: Option<PlayerData>,
+    pub animation_data: Option<AnimationData>,
+    pub animator_data: Option<AnimatorData>,
     pub model_data: Option<ModelData>,
     pub gui_data: Option<GuiObjectData>,
     pub weld_data: Option<WeldData>,
@@ -232,6 +240,198 @@ pub fn attributes_to_json(
     attrs: &std::collections::HashMap<String, AttributeValue>,
 ) -> std::collections::HashMap<String, serde_json::Value> {
     attrs.iter().map(|(k, v)| (k.clone(), v.to_json())).collect()
+}
+
+fn default_animation_length_seconds(animation_id: &str) -> f32 {
+    match animation_id {
+        "local://fire_rifle" => 0.16,
+        "local://fire_shotgun" => 0.22,
+        "local://reload_rifle" => 1.15,
+        "local://reload_shotgun" => 1.35,
+        "local://idle_default" => 0.9,
+        _ => 0.5,
+    }
+}
+
+#[derive(Clone)]
+pub struct AnimationTrack {
+    pub data: Arc<Mutex<AnimationTrackData>>,
+}
+
+pub struct AnimationTrackData {
+    pub animation_id: String,
+    pub owner_animator_id: u64,
+    pub length: f32,
+    pub looped: bool,
+    pub speed: f32,
+    pub time_position: f32,
+    pub is_playing: bool,
+    pub stopped: RBXScriptSignal,
+    pub ended: RBXScriptSignal,
+}
+
+impl AnimationTrack {
+    pub fn new(animation_id: String, owner_animator_id: u64, length: f32) -> Self {
+        Self {
+            data: Arc::new(Mutex::new(AnimationTrackData {
+                animation_id,
+                owner_animator_id,
+                length: length.max(0.01),
+                looped: false,
+                speed: 1.0,
+                time_position: 0.0,
+                is_playing: false,
+                stopped: create_signal("Stopped"),
+                ended: create_signal("Ended"),
+            })),
+        }
+    }
+
+    pub fn tick(&self, lua: &Lua, delta_time: f32) -> Result<()> {
+        let mut fire_stopped = None;
+        let mut fire_ended = None;
+
+        {
+            let mut data = self.data.lock().unwrap();
+            if !data.is_playing {
+                return Ok(());
+            }
+            data.time_position += delta_time.max(0.0) * data.speed.max(0.0);
+            if data.time_position >= data.length {
+                if data.looped {
+                    data.time_position = 0.0;
+                } else {
+                    data.time_position = data.length;
+                    data.is_playing = false;
+                    fire_stopped = Some(data.stopped.clone());
+                    fire_ended = Some(data.ended.clone());
+                }
+            }
+        }
+
+        if let Some(stopped) = fire_stopped {
+            let threads = stopped.fire_as_coroutines(lua, MultiValue::new())?;
+            crate::game::lua::events::track_yielded_threads(lua, threads)?;
+        }
+        if let Some(ended) = fire_ended {
+            let threads = ended.fire_as_coroutines(lua, MultiValue::new())?;
+            crate::game::lua::events::track_yielded_threads(lua, threads)?;
+        }
+        Ok(())
+    }
+}
+
+impl UserData for AnimationTrack {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("Length", |_, this| Ok(this.data.lock().unwrap().length));
+        fields.add_field_method_get("Looped", |_, this| Ok(this.data.lock().unwrap().looped));
+        fields.add_field_method_set("Looped", |_, this, looped: bool| {
+            this.data.lock().unwrap().looped = looped;
+            Ok(())
+        });
+        fields.add_field_method_get("Speed", |_, this| Ok(this.data.lock().unwrap().speed));
+        fields.add_field_method_set("Speed", |_, this, speed: f32| {
+            this.data.lock().unwrap().speed = speed.max(0.0);
+            Ok(())
+        });
+        fields.add_field_method_get("TimePosition", |_, this| {
+            Ok(this.data.lock().unwrap().time_position)
+        });
+        fields.add_field_method_set("TimePosition", |_, this, time_position: f32| {
+            let mut data = this.data.lock().unwrap();
+            data.time_position = time_position.clamp(0.0, data.length);
+            Ok(())
+        });
+        fields.add_field_method_get("IsPlaying", |_, this| {
+            Ok(this.data.lock().unwrap().is_playing)
+        });
+        fields.add_field_method_get("Stopped", |_, this| {
+            Ok(this.data.lock().unwrap().stopped.clone())
+        });
+        fields.add_field_method_get("Ended", |_, this| Ok(this.data.lock().unwrap().ended.clone()));
+    }
+
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("Play", |_, this, (_fade_time, _weight, speed): (Option<f32>, Option<f32>, Option<f32>)| {
+            let mut data = this.data.lock().unwrap();
+            data.time_position = 0.0;
+            data.is_playing = true;
+            if let Some(s) = speed {
+                data.speed = s.max(0.0);
+            }
+            Ok(())
+        });
+        methods.add_method("Stop", |lua, this, _fade_time: Option<f32>| {
+            let stopped = {
+                let mut data = this.data.lock().unwrap();
+                if !data.is_playing {
+                    None
+                } else {
+                    data.is_playing = false;
+                    Some(data.stopped.clone())
+                }
+            };
+            if let Some(stopped) = stopped {
+                let threads = stopped.fire_as_coroutines(lua, MultiValue::new())?;
+                crate::game::lua::events::track_yielded_threads(lua, threads)?;
+            }
+            Ok(())
+        });
+        methods.add_method("AdjustSpeed", |_, this, speed: f32| {
+            this.data.lock().unwrap().speed = speed.max(0.0);
+            Ok(())
+        });
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct AnimationScheduler {
+    pub tracks: Arc<Mutex<Vec<AnimationTrack>>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AnimationTrackSnapshot {
+    pub animation_id: String,
+    pub owner_animator_id: u64,
+    pub time_position: f32,
+    pub speed: f32,
+    pub looped: bool,
+    pub is_playing: bool,
+}
+
+impl AnimationScheduler {
+    pub fn register(&self, track: AnimationTrack) {
+        self.tracks.lock().unwrap().push(track);
+    }
+
+    pub fn tick(&self, lua: &Lua, delta_time: f32) -> Result<()> {
+        let tracks = self.tracks.lock().unwrap().clone();
+        for track in tracks {
+            track.tick(lua, delta_time)?;
+        }
+        Ok(())
+    }
+
+    pub fn active_tracks_for_animator(&self, animator_id: u64) -> Vec<AnimationTrackSnapshot> {
+        let tracks = self.tracks.lock().unwrap().clone();
+        tracks
+            .into_iter()
+            .filter_map(|track| {
+                let data = track.data.lock().ok()?;
+                if data.owner_animator_id != animator_id || !data.is_playing {
+                    return None;
+                }
+                Some(AnimationTrackSnapshot {
+                    animation_id: data.animation_id.clone(),
+                    owner_animator_id: data.owner_animator_id,
+                    time_position: data.time_position,
+                    speed: data.speed,
+                    looped: data.looped,
+                    is_playing: data.is_playing,
+                })
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -356,6 +556,24 @@ impl PlayerData {
 #[derive(Debug, Clone)]
 pub struct ModelData {
     pub primary_part: Option<WeakInstanceRef>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AnimationData {
+    pub animation_id: String,
+}
+
+impl Default for AnimationData {
+    fn default() -> Self {
+        Self {
+            animation_id: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AnimatorData {
+    pub loaded_tracks: u32,
 }
 
 impl Default for ModelData {
@@ -634,6 +852,8 @@ impl InstanceData {
             part_data: None,
             humanoid_data: None,
             player_data: None,
+            animation_data: None,
+            animator_data: None,
             model_data: None,
             gui_data: None,
             weld_data: None,
@@ -679,6 +899,18 @@ impl InstanceData {
     pub fn new_player(user_id: u64, name: &str) -> Self {
         let mut inst = Self::new(ClassName::Player, name);
         inst.player_data = Some(PlayerData::new(user_id, name));
+        inst
+    }
+
+    pub fn new_animation(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::Animation, name);
+        inst.animation_data = Some(AnimationData::default());
+        inst
+    }
+
+    pub fn new_animator(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::Animator, name);
+        inst.animator_data = Some(AnimatorData::default());
         inst
     }
 
@@ -801,6 +1033,57 @@ impl Instance {
             Self::fire_signal(lua, &signal, MultiValue::new())?;
         }
         Ok(())
+    }
+
+    fn ensure_animator_child_for_humanoid(&self) -> Instance {
+        if let Some(existing) = self
+            .get_children()
+            .into_iter()
+            .find(|child| child.class_name() == ClassName::Animator)
+        {
+            return existing;
+        }
+
+        let animator = Instance::from_data(InstanceData::new_animator("Animator"));
+        animator.set_parent(Some(self));
+        animator
+    }
+
+    fn load_animation_track_for_animator(
+        &self,
+        lua: &Lua,
+        animation: &Instance,
+    ) -> Result<AnimationTrack> {
+        let animation_id = {
+            let data = animation.data.lock().unwrap();
+            if data.class_name != ClassName::Animation {
+                return Err(mlua::Error::runtime("LoadAnimation expects an Animation instance"));
+            }
+            data.animation_data
+                .as_ref()
+                .map(|a| a.animation_id.clone())
+                .unwrap_or_default()
+        };
+
+        if animation_id.is_empty() {
+            return Err(mlua::Error::runtime("AnimationId is empty"));
+        }
+
+        let length = default_animation_length_seconds(&animation_id);
+        let track = AnimationTrack::new(animation_id, self.id().0, length);
+
+        if let Some(scheduler) = lua.app_data_ref::<AnimationScheduler>() {
+            scheduler.register(track.clone());
+        }
+
+        {
+            let mut data = self.data.lock().unwrap();
+            if let Some(animator_data) = &mut data.animator_data {
+                animator_data.loaded_tracks += 1;
+            }
+        }
+
+        Ok(track)
     }
 
     pub fn class_name(&self) -> ClassName {
@@ -1485,6 +1768,18 @@ impl UserData for Instance {
                 .and_then(|p| p.character.as_ref())
                 .and_then(|w| w.upgrade())
                 .map(Instance::from_ref))
+        });
+
+        fields.add_field_method_get("AnimationId", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.animation_data.as_ref().map(|a| a.animation_id.clone()))
+        });
+        fields.add_field_method_set("AnimationId", |_, this, animation_id: String| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(animation) = &mut data.animation_data {
+                animation.animation_id = animation_id;
+            }
+            Ok(())
         });
 
         fields.add_field_method_get("CharacterAdded", |_, this| {
@@ -2293,6 +2588,20 @@ impl UserData for Instance {
             Ok(())
         });
 
+        methods.add_method("LoadAnimation", |lua, this, animation: Instance| {
+            let class_name = this.class_name();
+            if class_name == ClassName::Animator {
+                return this.load_animation_track_for_animator(lua, &animation);
+            }
+            if class_name == ClassName::Humanoid {
+                let animator = this.ensure_animator_child_for_humanoid();
+                return animator.load_animation_track_for_animator(lua, &animation);
+            }
+            Err(mlua::Error::runtime(
+                "LoadAnimation is supported on Humanoid and Animator",
+            ))
+        });
+
         methods.add_method("GetPrimaryPartCFrame", |_, this, ()| {
             let data = this.data.lock().unwrap();
             if let Some(model) = &data.model_data {
@@ -2394,6 +2703,8 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
                     "Part" => Instance::from_data(InstanceData::new_part("Part")),
                     "Model" => Instance::from_data(InstanceData::new_model("Model")),
                     "Humanoid" => Instance::from_data(InstanceData::new_humanoid("Humanoid")),
+                    "Animation" => Instance::from_data(InstanceData::new_animation("Animation")),
+                    "Animator" => Instance::from_data(InstanceData::new_animator("Animator")),
                     "Folder" => Instance::new(ClassName::Folder, "Folder"),
                     "Script" => Instance::from_data(InstanceData::new_script("Script")),
                     "ModuleScript" => {

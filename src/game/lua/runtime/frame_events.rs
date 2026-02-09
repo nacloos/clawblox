@@ -1,4 +1,5 @@
 use super::*;
+use crate::game::lua::instance::AnimationScheduler;
 
 impl LuaRuntime {
     pub fn tick(&self, delta_time: f32) -> Result<()> {
@@ -8,8 +9,10 @@ impl LuaRuntime {
 
     /// Runs start-of-frame Lua work before physics (pending coroutines + Stepped event).
     pub fn begin_frame(&self, delta_time: f32) -> Result<()> {
-        if !self.script_loaded {
-            return Ok(());
+        self.discover_and_run_scripts()?;
+
+        if let Some(scheduler) = self.lua.app_data_ref::<AnimationScheduler>() {
+            scheduler.tick(&self.lua, delta_time)?;
         }
 
         // 1. Resume pending coroutines (callbacks that yielded on DataStore operations, etc.)
@@ -31,10 +34,6 @@ impl LuaRuntime {
 
     /// Runs end-of-frame Lua work after physics (Heartbeat event).
     pub fn end_frame(&self, delta_time: f32) -> Result<()> {
-        if !self.script_loaded {
-            return Ok(());
-        }
-
         // Fire Heartbeat as coroutines (allows callbacks to yield)
         let heartbeat = self.game.run_service().heartbeat();
         let yielded_threads = heartbeat.fire_as_coroutines(

@@ -1366,11 +1366,24 @@ pub struct SpectatorPlayerInfo {
     pub id: Uuid,
     pub name: String,
     pub position: [f32; 3],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_part_id: Option<u32>,
     pub health: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attributes: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gui: Option<Vec<GuiElement>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_animations: Option<Vec<SpectatorPlayerAnimation>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SpectatorPlayerAnimation {
+    pub animation_id: String,
+    pub time_position: f32,
+    pub speed: f32,
+    pub looped: bool,
+    pub is_playing: bool,
 }
 
 /// Serialized GUI element for frontend rendering
@@ -2663,6 +2676,88 @@ mod tests {
         let touch_count = get_trigger_attr(&instance, "PartA", "TouchCount");
         assert_eq!(touch_count, 0.0,
             "Anchored+Anchored should never fire Touched. Got count={}", touch_count);
+    }
+
+    #[test]
+    fn test_game_instance_serverscriptservice_require_smoke() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        // Root script creates module + server script in ServerScriptService.
+        instance.load_script(
+            r#"
+            local module = Instance.new("ModuleScript")
+            module.Name = "SharedModule"
+            module.Source = [[
+                _G.module_runs = (_G.module_runs or 0) + 1
+                return { value = 123 }
+            ]]
+            module.Parent = ServerScriptService
+
+            local boot = Instance.new("Script")
+            boot.Name = "BootScript"
+            boot.Source = [[
+                local m = ServerScriptService:FindFirstChild("SharedModule")
+                local data = require(m)
+
+                local marker = Instance.new("Folder")
+                marker.Name = "ServerScriptMarker"
+                marker:SetAttribute("Ran", true)
+                marker:SetAttribute("ModuleValue", data.value)
+                marker.Parent = Workspace
+            ]]
+            boot.Parent = ServerScriptService
+        "#,
+        );
+
+        for _ in 0..4 {
+            instance.tick();
+        }
+
+        assert!(
+            get_trigger_bool_attr(&instance, "ServerScriptMarker", "Ran"),
+            "ServerScriptService script should have executed in real game loop"
+        );
+        assert_eq!(
+            get_trigger_attr(&instance, "ServerScriptMarker", "ModuleValue"),
+            123.0,
+            "Script should read value from ModuleScript require()"
+        );
+    }
+
+    #[test]
+    fn test_game_instance_waitforchild_smoke() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(
+            r#"
+            local waiter = Instance.new("Script")
+            waiter.Name = "WaiterScript"
+            waiter.Source = [[
+                local part = Workspace:WaitForChild("DelayedPart", 1.0)
+                local marker = Instance.new("Folder")
+                marker.Name = "WaitForChildMarker"
+                marker:SetAttribute("Found", part ~= nil)
+                marker.Parent = Workspace
+            ]]
+            waiter.Parent = ServerScriptService
+
+            task.delay(0.05, function()
+                local p = Instance.new("Part")
+                p.Name = "DelayedPart"
+                p.Parent = Workspace
+            end)
+        "#,
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        for _ in 0..6 {
+            instance.tick();
+        }
+
+        assert!(
+            get_trigger_bool_attr(&instance, "WaitForChildMarker", "Found"),
+            "WaitForChild should resolve in game loop when child appears"
+        );
     }
 
     /// Helper: get a numeric attribute from a named part in workspace
