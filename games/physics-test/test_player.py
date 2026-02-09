@@ -34,6 +34,8 @@ JUMP_ZONE_REACH_THRESHOLD = 4.5
 JUMP_APPROACH_THRESHOLD = 1.5
 JUMP_PLATFORM_REACH_XZ = 2.2
 JUMP_ATTEMPT_TIMEOUT = 6.0
+JUMP_TRIGGER_DIST = 10.0
+JUMP_OVERTRAVEL_X = 44.0
 
 
 def distance_xz(a: list, b: list) -> float:
@@ -357,7 +359,7 @@ def test_jump(headers: dict):
     """Test 5: Verify jump reachability for low/med/high platforms."""
     print("\n--- TEST 5: Jump Platforms (X=40) ---")
     # Stage near the jump lane before attempting climbs.
-    target = [36, 3, 0]
+    target = [33, 3, 0]
 
     pos = wait_until_near(headers, target, threshold=JUMP_APPROACH_THRESHOLD)
     if not pos:
@@ -379,6 +381,7 @@ def test_jump(headers: dict):
         best_dist = float("inf")
         last_pos = None
         jump_cooldown = 0.0
+        first_jump_sent = False
 
         while time.time() - start < JUMP_ATTEMPT_TIMEOUT:
             obs = observe(headers)
@@ -392,12 +395,16 @@ def test_jump(headers: dict):
             best_dist = min(best_dist, dist)
             best_y = max(best_y, p[1])
 
-            move_to(headers, [40, 10, z])
+            # Aim slightly past the platform once close to avoid stopping on the front face.
+            move_x = JUMP_OVERTRAVEL_X if dist < JUMP_TRIGGER_DIST else 39.0
+            move_to(headers, [move_x, 10, z])
 
-            # Keep issuing jump while approaching target, this avoids one-frame timing misses.
+            # Trigger the first jump earlier (before nose-to-wall contact),
+            # then allow periodic retries if we did not get on top.
             now = time.time()
-            if dist < 5.0 and now >= jump_cooldown:
+            if dist < JUMP_TRIGGER_DIST and (not first_jump_sent or now >= jump_cooldown):
                 send_input(headers, "Jump")
+                first_jump_sent = True
                 jump_cooldown = now + 0.35
 
             if dist <= JUMP_PLATFORM_REACH_XZ and p[1] >= required_hrp_y:
@@ -416,7 +423,7 @@ def test_jump(headers: dict):
         results.append((height_label, success))
 
         # Re-stage before next platform attempt.
-        wait_until_near(headers, [36, 3, z], threshold=JUMP_APPROACH_THRESHOLD, timeout=8.0)
+        wait_until_near(headers, [33, 3, z], threshold=JUMP_APPROACH_THRESHOLD, timeout=8.0)
 
     passed = sum(1 for _, ok in results if ok)
     print(f"  RESULT: {passed}/3 platforms reached")
