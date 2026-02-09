@@ -584,6 +584,40 @@ fn login(name: Option<String>, api_key: Option<String>, server: String) {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
+
+            // Idempotent login behavior: if name already exists, reuse existing credentials
+            // for this server when possible.
+            if status == reqwest::StatusCode::CONFLICT {
+                if let Some(stored) = load_credentials() {
+                    if stored.server == server {
+                        let me_url = format!("{}/api/v1/agents/me", server);
+                        let me_resp = client
+                            .get(&me_url)
+                            .header("Authorization", format!("Bearer {}", stored.api_key))
+                            .send()
+                            .await;
+
+                        if let Ok(me_resp) = me_resp {
+                            if me_resp.status().is_success() {
+                                let me_body: serde_json::Value =
+                                    me_resp.json().await.unwrap_or_default();
+                                let stored_name =
+                                    me_body["name"].as_str().unwrap_or_default().to_string();
+                                if stored_name == name {
+                                    println!("Already registered as: {}", name);
+                                    println!("Using existing API key from {}", credentials_path().display());
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                eprintln!("Registration failed ({}): {}", status, body);
+                eprintln!("Name '{}' already exists. Re-run with --api-key or use a different name.", name);
+                std::process::exit(1);
+            }
+
             eprintln!("Registration failed ({}): {}", status, body);
             std::process::exit(1);
         }
