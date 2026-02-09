@@ -51,8 +51,9 @@ pub mod humanoid {
     /// Default walk speed (studs/second)
     pub const DEFAULT_WALK_SPEED: f32 = 16.0;
 
-    /// Default jump power
-    pub const DEFAULT_JUMP_POWER: f32 = 50.0;
+    /// Default jump power tuned for `physics::DEFAULT_GRAVITY` (30 studs/s²).
+    /// This yields roughly `DEFAULT_JUMP_HEIGHT` of vertical travel.
+    pub const DEFAULT_JUMP_POWER: f32 = 20.8;
 
     /// Default jump height
     pub const DEFAULT_JUMP_HEIGHT: f32 = 7.2;
@@ -65,4 +66,7 @@ pub mod humanoid {
 
     /// Horizontal distance threshold at which a MoveTo target is considered reached.
     pub const MOVE_TO_REACHED_EPSILON_XZ: f32 = 0.5;
+
+    /// Jump input buffer window in seconds.
+    pub const JUMP_BUFFER_SECS: f32 = 0.20;
 }

@@ -50,6 +50,13 @@ pub(super) fn sync_move_targets(instance: &mut GameInstance) {
             let mut child_data = child_ref.lock().unwrap();
             if let Some(humanoid) = &mut child_data.humanoid_data {
                 found_humanoid = true;
+                instance.physics.set_character_walk_speed(hrp_id, humanoid.walk_speed);
+                if humanoid.jump_requested {
+                    humanoid.jump_requested = false;
+                    instance
+                        .physics
+                        .request_character_jump(hrp_id, humanoid.jump_power);
+                }
                 if humanoid.cancel_move_to {
                     humanoid.cancel_move_to = false;
                     instance.physics.set_character_target(hrp_id, None);
@@ -98,8 +105,10 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             )
         };
 
-        let walk_speed = get_humanoid_walk_speed(instance, agent_id).unwrap_or(consts::WALK_SPEED);
-        let jump_power = consume_humanoid_jump_request(instance, agent_id);
+        let walk_speed = instance
+            .physics
+            .get_character_walk_speed(hrp_id)
+            .unwrap_or(consts::WALK_SPEED);
         let gravity = instance.physics.gravity.y;
         let controller_config = ControllerManagerConfig {
             ground_query_distance: consts::CHARACTER_GROUND_QUERY_DISTANCE,
@@ -107,6 +116,18 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
         };
         let ground_sample = sample_ground_sensor(&instance.physics, hrp_id, grounded, controller_config);
         let ground_decision = evaluate_ground_controller(ground_sample, controller_config);
+        instance.physics.tick_character_jump_buffer(hrp_id, dt);
+        let near_ground = ground_sample
+            .support_distance
+            .map(|d| d <= consts::SNAP_TO_GROUND + 0.05)
+            .unwrap_or(false);
+        let can_jump = grounded || near_ground;
+        let jump_power = instance
+            .physics
+            .try_consume_character_jump(hrp_id, can_jump, vertical_velocity);
+        let contact_velocity = instance
+            .physics
+            .get_character_contact_kinematic_velocity(hrp_id);
         let motion_plan = build_motion_plan(
             current_pos,
             target,
@@ -118,6 +139,7 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             ground_decision.carry_by_platform,
             jump_power,
             ground_decision.platform_velocity,
+            contact_velocity,
         );
 
         let mut new_vertical_velocity = motion_plan.new_vertical_velocity;
@@ -168,56 +190,10 @@ fn warn_once_move_to(instance: &GameInstance, agent_id: Uuid, reason: &str) {
     }
 }
 
+#[cfg(test)]
 pub(super) fn get_humanoid_walk_speed(instance: &GameInstance, agent_id: Uuid) -> Option<f32> {
-    let user_id = *instance.players.get(&agent_id)?;
-    let runtime = instance.lua_runtime.as_ref()?;
-    let player = runtime.players().get_player_by_user_id(user_id)?;
-
-    let player_data = player.data.lock().unwrap();
-    let character = player_data
-        .player_data
-        .as_ref()?
-        .character
-        .as_ref()?
-        .upgrade()?;
-    drop(player_data);
-
-    let char_data = character.lock().unwrap();
-    for child in &char_data.children {
-        let child_data = child.lock().unwrap();
-        if let Some(humanoid) = &child_data.humanoid_data {
-            return Some(humanoid.walk_speed);
-        }
-    }
-    None
-}
-
-fn consume_humanoid_jump_request(instance: &mut GameInstance, agent_id: Uuid) -> Option<f32> {
-    let user_id = *instance.players.get(&agent_id)?;
-    let runtime = instance.lua_runtime.as_ref()?;
-    let player = runtime.players().get_player_by_user_id(user_id)?;
-
-    let player_data = player.data.lock().unwrap();
-    let character = player_data
-        .player_data
-        .as_ref()?
-        .character
-        .as_ref()?
-        .upgrade()?;
-    drop(player_data);
-
-    let char_data = character.lock().unwrap();
-    for child in &char_data.children {
-        let mut child_data = child.lock().unwrap();
-        if let Some(humanoid) = &mut child_data.humanoid_data {
-            if humanoid.jump_requested {
-                humanoid.jump_requested = false;
-                return Some(humanoid.jump_power);
-            }
-            return None;
-        }
-    }
-    None
+    let hrp_id = *instance.player_hrp_ids.get(&agent_id)?;
+    instance.physics.get_character_walk_speed(hrp_id)
 }
 
 fn fire_move_to_finished(instance: &mut GameInstance, agent_id: Uuid, reached: bool) {

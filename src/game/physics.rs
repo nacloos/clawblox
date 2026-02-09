@@ -5,6 +5,7 @@ use rapier3d::control::{
 use rapier3d::prelude::*;
 use std::collections::{HashMap, HashSet};
 
+use super::constants::humanoid as humanoid_consts;
 use super::constants::physics as consts;
 use super::lua::types::PartType;
 
@@ -43,6 +44,11 @@ pub struct CharacterControllerState {
     pub body_handle: RigidBodyHandle,
     pub vertical_velocity: f32,
     pub target_position: Option<[f32; 3]>,
+    pub walk_speed: f32,
+    pub jump_power: f32,
+    pub jump_requested: bool,
+    pub jump_buffer_remaining: f32,
+    pub jump_cooldown_remaining: f32,
     /// Seconds elapsed since current MoveTo target was set.
     pub move_to_elapsed: f32,
     pub grounded: bool,
@@ -433,6 +439,11 @@ impl PhysicsWorld {
             body_handle,
             vertical_velocity: 0.0,
             target_position: None,
+            walk_speed: consts::WALK_SPEED,
+            jump_power: humanoid_consts::DEFAULT_JUMP_POWER,
+            jump_requested: false,
+            jump_buffer_remaining: 0.0,
+            jump_cooldown_remaining: 0.0,
             move_to_elapsed: 0.0,
             grounded: false,
         };
@@ -453,6 +464,68 @@ impl PhysicsWorld {
         }
     }
 
+    /// Sets locomotion walk speed for a character controller.
+    pub fn set_character_walk_speed(&mut self, lua_id: u64, walk_speed: f32) {
+        if let Some(state) = self.character_controllers.get_mut(&lua_id) {
+            state.walk_speed = walk_speed.max(0.0);
+        }
+    }
+
+    /// Requests a jump using the provided jump power.
+    pub fn request_character_jump(&mut self, lua_id: u64, jump_power: f32) {
+        if let Some(state) = self.character_controllers.get_mut(&lua_id) {
+            state.jump_power = jump_power.max(0.0);
+            state.jump_requested = true;
+            state.jump_buffer_remaining = humanoid_consts::JUMP_BUFFER_SECS;
+        }
+    }
+
+    /// Advance jump buffer timer and clear stale buffered jumps.
+    pub fn tick_character_jump_buffer(&mut self, lua_id: u64, dt: f32) {
+        if let Some(state) = self.character_controllers.get_mut(&lua_id) {
+            state.jump_cooldown_remaining = (state.jump_cooldown_remaining - dt).max(0.0);
+            if state.jump_requested {
+                state.jump_buffer_remaining = (state.jump_buffer_remaining - dt).max(0.0);
+                if state.jump_buffer_remaining <= 0.0 {
+                    state.jump_requested = false;
+                }
+            }
+        }
+    }
+
+    /// Consumes one pending jump request, returning jump power if requested.
+    pub fn try_consume_character_jump(
+        &mut self,
+        lua_id: u64,
+        can_jump: bool,
+        vertical_velocity: f32,
+    ) -> Option<f32> {
+        let state = self.character_controllers.get_mut(&lua_id)?;
+        if !state.jump_requested || !can_jump {
+            return None;
+        }
+        if state.jump_cooldown_remaining > 0.0 {
+            return None;
+        }
+        // Prevent repeat impulse while already traveling upward.
+        if vertical_velocity > 0.0 {
+            return None;
+        }
+        state.jump_cooldown_remaining = 0.18;
+        if state.jump_requested {
+            state.jump_requested = false;
+            state.jump_buffer_remaining = 0.0;
+            Some(state.jump_power)
+        } else {
+            None
+        }
+    }
+
+    /// Gets current locomotion walk speed for a character controller.
+    pub fn get_character_walk_speed(&self, lua_id: u64) -> Option<f32> {
+        self.character_controllers.get(&lua_id).map(|s| s.walk_speed)
+    }
+
     /// Teleports a character to a specific position (clears target + vertical velocity)
     pub fn set_character_position(&mut self, lua_id: u64, position: [f32; 3]) {
         if let Some(state) = self.character_controllers.get_mut(&lua_id) {
@@ -461,6 +534,9 @@ impl PhysicsWorld {
             }
             state.target_position = None;
             state.vertical_velocity = 0.0;
+            state.jump_requested = false;
+            state.jump_buffer_remaining = 0.0;
+            state.jump_cooldown_remaining = 0.0;
             state.move_to_elapsed = 0.0;
         }
     }
@@ -675,6 +751,57 @@ impl PhysicsWorld {
             velocity: [v.x, v.y, v.z],
             distance: toi,
         })
+    }
+
+    /// Returns the strongest horizontal contact velocity from overlapping kinematic bodies.
+    /// This captures side pushes from moving/rotating anchored obstacles (e.g. spinners).
+    pub fn get_character_contact_kinematic_velocity(&self, lua_id: u64) -> Option<[f32; 3]> {
+        let state = self.character_controllers.get(&lua_id)?;
+        let body = self.rigid_body_set.get(state.body_handle)?;
+        let collider = self.collider_set.get(state.collider_handle)?;
+        let shape = collider.shape();
+        let pos = body.position();
+        let center = pos.translation.vector;
+
+        let filter = QueryFilter::default()
+            .exclude_rigid_body(state.body_handle)
+            .exclude_sensors()
+            .groups(InteractionGroups::new(GROUP_CHARACTER, GROUP_STATIC));
+
+        let mut best: Option<[f32; 3]> = None;
+        let mut best_horiz_speed_sq = 0.0_f32;
+
+        self.query_pipeline.intersections_with_shape(
+            &self.rigid_body_set,
+            &self.collider_set,
+            pos,
+            shape,
+            filter,
+            |other_collider_handle| {
+                let Some(other_collider) = self.collider_set.get(other_collider_handle) else {
+                    return true;
+                };
+                let Some(parent) = other_collider.parent() else {
+                    return true;
+                };
+                let Some(other_body) = self.rigid_body_set.get(parent) else {
+                    return true;
+                };
+                if !other_body.is_kinematic() {
+                    return true;
+                }
+
+                let point_velocity = other_body.velocity_at_point(&point![center.x, center.y, center.z]);
+                let horiz_speed_sq = point_velocity.x * point_velocity.x + point_velocity.z * point_velocity.z;
+                if horiz_speed_sq > best_horiz_speed_sq {
+                    best_horiz_speed_sq = horiz_speed_sq;
+                    best = Some([point_velocity.x, point_velocity.y, point_velocity.z]);
+                }
+                true
+            },
+        );
+
+        best.filter(|v| (v[0] * v[0] + v[2] * v[2]) > consts::EPSILON * consts::EPSILON)
     }
 
     /// Moves a character using the kinematic controller for full 3D translation.
@@ -952,6 +1079,50 @@ mod tests {
             .get_ground_kinematic_velocity(char_id, 4.0)
             .expect("Expected supporting kinematic velocity");
         assert!(v[1] > 0.0, "Platform upward velocity should be positive, got {:?}", v);
+    }
+
+    #[test]
+    fn test_get_character_contact_kinematic_velocity_for_rotating_body() {
+        let mut world = PhysicsWorld::new();
+
+        let spinner = world.add_part(
+            1,
+            [0.0, 2.0, 0.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [16.0, 4.0, 3.0],
+            true,
+            true,
+            PartType::Block,
+        );
+
+        let char_id = 302;
+        world.add_character(char_id, [0.0, 2.0, 2.0], 1.0, 5.0);
+
+        let dt = 1.0 / 60.0;
+        world.step(dt);
+        world.query_pipeline.update(&world.collider_set);
+
+        let theta = 0.5_f32;
+        let c = theta.cos();
+        let s = theta.sin();
+        let rot_y = [
+            [c, 0.0, s],
+            [0.0, 1.0, 0.0],
+            [-s, 0.0, c],
+        ];
+        world.set_kinematic_rotation(spinner, &rot_y);
+        world.step(dt);
+        world.query_pipeline.update(&world.collider_set);
+
+        let v = world
+            .get_character_contact_kinematic_velocity(char_id)
+            .expect("Expected contact velocity from rotating kinematic body");
+        let horiz = (v[0] * v[0] + v[2] * v[2]).sqrt();
+        assert!(
+            horiz > 0.1,
+            "Expected meaningful horizontal contact velocity, got {:?}",
+            v
+        );
     }
 
     #[test]

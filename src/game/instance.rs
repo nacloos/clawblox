@@ -336,15 +336,25 @@ impl GameInstance {
             self.check_afk_players();
         }
 
+        // Run start-of-frame Lua work before physics (resume yields + Stepped).
+        if let Some(runtime) = &self.lua_runtime {
+            if let Err(e) = runtime.begin_frame(dt) {
+                self.handle_lua_error("Begin frame error", &e);
+                if self.halted_error.is_some() {
+                    return;
+                }
+            }
+        }
+
         tick_pipeline::run_tick_phases(self, dt);
         if self.halted_error.is_some() {
             return;
         }
 
-        // Run Lua Heartbeat
+        // Run end-of-frame Lua work after physics (Heartbeat).
         if let Some(runtime) = &self.lua_runtime {
-            if let Err(e) = runtime.tick(dt) {
-                self.handle_lua_error("Tick error", &e);
+            if let Err(e) = runtime.end_frame(dt) {
+                self.handle_lua_error("End frame error", &e);
                 if self.halted_error.is_some() {
                     return;
                 }

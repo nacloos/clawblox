@@ -224,6 +224,7 @@ pub struct PartData {
     pub size: Vector3,
     pub anchored: bool,
     pub can_collide: bool,
+    pub can_query: bool,
     pub can_touch: bool,
     pub transparency: f32,
     pub color: Color3,
@@ -249,6 +250,7 @@ impl Default for PartData {
             size: Vector3::new(4.0, 1.0, 2.0),
             anchored: false,
             can_collide: true,
+            can_query: true,
             can_touch: true,
             transparency: 0.0,
             color: Color3::new(0.6, 0.6, 0.6),
@@ -1041,6 +1043,18 @@ impl UserData for Instance {
             if let Some(part) = &mut data.part_data {
                 part.can_collide = can_collide;
                 part.can_collide_dirty = true;
+            }
+            Ok(())
+        });
+
+        fields.add_field_method_get("CanQuery", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.part_data.as_ref().map(|p| p.can_query))
+        });
+        fields.add_field_method_set("CanQuery", |_, this, can_query: bool| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(part) = &mut data.part_data {
+                part.can_query = can_query;
             }
             Ok(())
         });

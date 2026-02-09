@@ -13,6 +13,9 @@ use super::services::{
 use super::types::register_all_types;
 use crate::game::async_bridge::AsyncBridge;
 
+mod coroutines;
+mod frame_events;
+
 /// A request to kick a player from the game
 #[derive(Debug, Clone)]
 pub struct KickRequest {
@@ -232,9 +235,9 @@ impl LuaRuntime {
         // Time origin for tick() and task scheduling
         let start_time = Instant::now();
 
-        // Add tick() global - returns time since game start
+        // Internal tick implementation used by legacy tick() wrapper in Lua.
         let tick_fn = lua.create_function(move |_, ()| Ok(start_time.elapsed().as_secs_f64()))?;
-        lua.globals().set("tick", tick_fn)?;
+        lua.globals().set("__clawblox_tick_impl", tick_fn)?;
 
         // Internal tables for task scheduling (not accessible to game scripts)
         // Maps thread -> resume_at_time (seconds since start)
@@ -271,6 +274,17 @@ impl LuaRuntime {
         // Register the task table via Lua code that calls Rust helpers
         lua.load(r#"
             task = {}
+            __clawblox_warned_legacy_tick = false
+            __clawblox_warned_legacy_wait = false
+
+            -- Legacy global. Prefer task.wait() or frame events.
+            function tick()
+                if not __clawblox_warned_legacy_tick then
+                    warn("tick() is legacy; prefer task.wait() and RunService events")
+                    __clawblox_warned_legacy_tick = true
+                end
+                return __clawblox_tick_impl()
+            end
 
             function task.spawn(func_or_thread, ...)
                 local thread
@@ -338,8 +352,13 @@ impl LuaRuntime {
 
             -- Fix global wait() to use task.wait()
             function wait(seconds)
+                if not __clawblox_warned_legacy_wait then
+                    warn("wait() is legacy; prefer task.wait()")
+                    __clawblox_warned_legacy_wait = true
+                end
                 return task.wait(seconds)
             end
+
         "#).exec()?;
 
         let table_table = lua.globals().get::<mlua::Table>("table")?;
@@ -416,165 +435,6 @@ impl LuaRuntime {
             }
         }
         self.script_loaded = true;
-        Ok(())
-    }
-
-    pub fn tick(&self, delta_time: f32) -> Result<()> {
-        if !self.script_loaded {
-            return Ok(());
-        }
-
-        // 1. Resume pending coroutines (callbacks that yielded on DataStore operations, etc.)
-        self.resume_pending_coroutines()?;
-
-        // 2. Fire Heartbeat as coroutines (allows callbacks to yield)
-        let heartbeat = self.game.run_service().heartbeat();
-        let yielded_threads = heartbeat.fire_as_coroutines(
-            &self.lua,
-            MultiValue::from_iter([Value::Number(delta_time as f64)]),
-        )?;
-
-        // 3. Track any newly yielded coroutines for resumption on next tick
-        self.track_yielded_threads(yielded_threads)?;
-
-        Ok(())
-    }
-
-    /// Resumes all pending coroutines and removes completed ones.
-    /// Checks cancelled threads, scheduled times, and thread args before resuming.
-    fn resume_pending_coroutines(&self) -> Result<()> {
-        let now = self.start_time.elapsed().as_secs_f64();
-
-        // Get internal tables
-        let schedule: mlua::Table = self.lua.globals().get("__clawblox_thread_schedule")?;
-        let args_table: mlua::Table = self.lua.globals().get("__clawblox_thread_args")?;
-        let cancelled: mlua::Table = self.lua.globals().get("__clawblox_cancelled_threads")?;
-
-        // Drain all keys upfront so we don't hold a mutable borrow during iteration
-        let keys: Vec<RegistryKey> = {
-            let mut pending = self.pending_coroutines.lock().unwrap();
-            pending.drain(..).collect()
-        };
-
-        let mut still_pending = Vec::new();
-
-        for key in keys {
-            // Get the thread from the registry
-            let thread: Thread = match self.lua.registry_value(&key) {
-                Ok(t) => t,
-                Err(_) => {
-                    // Thread was garbage collected or invalid, clean up
-                    let _ = self.lua.remove_registry_value(key);
-                    continue;
-                }
-            };
-
-            // 1. Check if cancelled
-            let is_cancelled: bool = cancelled.get(thread.clone()).unwrap_or(false);
-            if is_cancelled {
-                cancelled.set(thread.clone(), Value::Nil)?;
-                schedule.set(thread.clone(), Value::Nil)?;
-                args_table.set(thread.clone(), Value::Nil)?;
-                let _ = self.lua.remove_registry_value(key);
-                continue;
-            }
-
-            // Check if thread is still resumable
-            if thread.status() != ThreadStatus::Resumable {
-                schedule.set(thread.clone(), Value::Nil)?;
-                args_table.set(thread.clone(), Value::Nil)?;
-                let _ = self.lua.remove_registry_value(key);
-                continue;
-            }
-
-            // 2. Check schedule — if time hasn't elapsed, keep pending
-            let resume_at: Option<f64> = schedule.get(thread.clone())?;
-            if let Some(resume_at) = resume_at {
-                if now < resume_at {
-                    // Not ready yet, keep pending
-                    still_pending.push(key);
-                    continue;
-                }
-                // Time satisfied, clear schedule entry
-                schedule.set(thread.clone(), Value::Nil)?;
-            }
-
-            // 3. Determine resume args
-            let resume_args: MultiValue = {
-                let stored_args: Value = args_table.get(thread.clone())?;
-                match stored_args {
-                    Value::Table(tbl) => {
-                        args_table.set(thread.clone(), Value::Nil)?;
-                        let n: i64 = tbl.get("n").unwrap_or(0);
-                        let mut args = Vec::new();
-                        for i in 1..=n {
-                            let v: Value = tbl.get(i)?;
-                            args.push(v);
-                        }
-                        MultiValue::from_iter(args)
-                    }
-                    _ => {
-                        // For task.wait threads, pass elapsed time
-                        if resume_at.is_some() {
-                            MultiValue::from_iter([Value::Number(now)])
-                        } else {
-                            MultiValue::new()
-                        }
-                    }
-                }
-            };
-
-            // Try to resume the thread
-            match thread.resume::<()>(resume_args) {
-                Ok(()) => {
-                    // Check if still yielded
-                    if thread.status() == ThreadStatus::Resumable {
-                        still_pending.push(key);
-                    } else {
-                        // Thread finished, clean up
-                        let _ = self.lua.remove_registry_value(key);
-                    }
-                }
-                Err(e) => {
-                    // Thread errored — in Halt mode, propagate immediately
-                    let error_mode = self
-                        .lua
-                        .app_data_ref::<ErrorMode>()
-                        .map(|m| *m)
-                        .unwrap_or(ErrorMode::Continue);
-                    let _ = self.lua.remove_registry_value(key);
-                    if error_mode == ErrorMode::Halt {
-                        // Put remaining keys back before returning
-                        let mut pending = self.pending_coroutines.lock().unwrap();
-                        *pending = still_pending;
-                        return Err(e);
-                    }
-                    eprintln!("[LuaRuntime] Coroutine error: {}", e);
-                }
-            }
-        }
-
-        let mut pending = self.pending_coroutines.lock().unwrap();
-        *pending = still_pending;
-        Ok(())
-    }
-
-    /// Tracks yielded threads for resumption on the next tick.
-    fn track_yielded_threads(&self, threads: Vec<Thread>) -> Result<()> {
-        let mut pending = self.pending_coroutines.lock().unwrap();
-
-        for thread in threads {
-            if thread.status() == ThreadStatus::Resumable {
-                // Store in registry to prevent garbage collection
-                match self.lua.create_registry_value(thread) {
-                    Ok(key) => pending.push(key),
-                    Err(e) => {
-                        eprintln!("[LuaRuntime] Failed to store yielded thread: {}", e);
-                    }
-                }
-            }
-        }
-
         Ok(())
     }
 
@@ -809,6 +669,75 @@ mod tests {
     }
 
     #[test]
+    fn test_stepped_fires_before_heartbeat() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            _G.order = {}
+            _G.steppedDt = 0
+            _G.heartbeatDt = 0
+            game:GetService("RunService").Stepped:Connect(function(time, dt)
+                table.insert(_G.order, "S")
+                _G.steppedDt = dt
+            end)
+            game:GetService("RunService").Heartbeat:Connect(function(dt)
+                table.insert(_G.order, "H")
+                _G.heartbeatDt = dt
+            end)
+        "#,
+            )
+            .expect("Failed to load script");
+
+        runtime.tick(1.0 / 60.0).expect("Failed to tick");
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let order: mlua::Table = globals.get("order").unwrap();
+        let first: String = order.get(1).unwrap();
+        let second: String = order.get(2).unwrap();
+        assert_eq!(first, "S");
+        assert_eq!(second, "H");
+
+        let stepped_dt: f64 = globals.get("steppedDt").unwrap();
+        let heartbeat_dt: f64 = globals.get("heartbeatDt").unwrap();
+        assert!((stepped_dt - (1.0 / 60.0)).abs() < 1e-6);
+        assert!((heartbeat_dt - (1.0 / 60.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_signal_wait_yields_and_resumes() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            _G.waitDone = false
+            _G.waitDt = 0
+
+            task.spawn(function()
+                local dt = game:GetService("RunService").Heartbeat:Wait()
+                _G.waitDt = dt
+                _G.waitDone = true
+            end)
+        "#,
+            )
+            .expect("Failed to load script");
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let done: bool = globals.get("waitDone").unwrap();
+        assert!(!done, "Signal:Wait should yield before first heartbeat");
+
+        runtime.tick(1.0 / 60.0).expect("Failed to tick");
+        let done: bool = globals.get("waitDone").unwrap();
+        assert!(!done, "Signal:Wait should resume on the frame after signal fires");
+
+        runtime.tick(1.0 / 60.0).expect("Failed to tick");
+        let done: bool = globals.get("waitDone").unwrap();
+        assert!(done, "Signal:Wait should eventually resume");
+        let dt: f64 = globals.get("waitDt").unwrap();
+        assert!((dt - (1.0 / 60.0)).abs() < 1e-6);
+    }
+
+    #[test]
     fn test_tick_function() {
         let runtime = test_runtime();
         let result: f64 = runtime.lua().load("return tick()").eval().unwrap();
@@ -816,6 +745,217 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         let result2: f64 = runtime.lua().load("return tick()").eval().unwrap();
         assert!(result2 > result);
+    }
+
+    #[test]
+    fn test_workspace_raycast_hits_rotated_thin_part() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local bar = Instance.new("Part")
+            bar.Name = "ThinBar"
+            bar.Size = Vector3.new(12, 2, 1)
+            bar.Anchored = true
+            bar.CFrame = CFrame.new(0, 2, 0) * CFrame.Angles(0, math.rad(45), 0)
+            bar.Parent = Workspace
+
+            local result = Workspace:Raycast(Vector3.new(-10, 2, 4), Vector3.new(25, 0, 0))
+            _G.hitName = result and result.Instance and result.Instance.Name or nil
+        "#,
+            )
+            .expect("Failed to load script");
+
+        let hit_name: Option<String> = runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap()
+            .get("hitName")
+            .unwrap();
+        assert_eq!(hit_name.as_deref(), Some("ThinBar"));
+    }
+
+    #[test]
+    fn test_workspace_raycast_hits_non_collidable_queryable_part() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local front = Instance.new("Part")
+            front.Name = "FrontTrigger"
+            front.Size = Vector3.new(4, 4, 4)
+            front.Anchored = true
+            front.CanCollide = false
+            front.Position = Vector3.new(0, 2, 0)
+            front.Parent = Workspace
+
+            local back = Instance.new("Part")
+            back.Name = "BackWall"
+            back.Size = Vector3.new(4, 4, 4)
+            back.Anchored = true
+            back.Position = Vector3.new(0, 2, 8)
+            back.Parent = Workspace
+
+            local result = Workspace:Raycast(Vector3.new(0, 2, -10), Vector3.new(0, 0, 30))
+            _G.hitName = result and result.Instance and result.Instance.Name or nil
+        "#,
+            )
+            .expect("Failed to load script");
+
+        let hit_name: Option<String> = runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap()
+            .get("hitName")
+            .unwrap();
+        assert_eq!(hit_name.as_deref(), Some("FrontTrigger"));
+    }
+
+    #[test]
+    fn test_workspace_raycast_respects_can_query_false() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local front = Instance.new("Part")
+            front.Name = "FrontNoQuery"
+            front.Size = Vector3.new(4, 4, 4)
+            front.Anchored = true
+            front.CanCollide = true
+            front.CanQuery = false
+            front.Position = Vector3.new(0, 2, 0)
+            front.Parent = Workspace
+
+            local back = Instance.new("Part")
+            back.Name = "BackWall"
+            back.Size = Vector3.new(4, 4, 4)
+            back.Anchored = true
+            back.Position = Vector3.new(0, 2, 8)
+            back.Parent = Workspace
+
+            local result = Workspace:Raycast(Vector3.new(0, 2, -10), Vector3.new(0, 0, 30))
+            _G.hitName = result and result.Instance and result.Instance.Name or nil
+        "#,
+            )
+            .expect("Failed to load script");
+
+        let hit_name: Option<String> = runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap()
+            .get("hitName")
+            .unwrap();
+        assert_eq!(hit_name.as_deref(), Some("BackWall"));
+    }
+
+    #[test]
+    fn test_workspace_raycast_respect_can_collide_filters_non_collidable() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local front = Instance.new("Part")
+            front.Name = "FrontTrigger"
+            front.Size = Vector3.new(4, 4, 4)
+            front.Anchored = true
+            front.CanCollide = false
+            front.Position = Vector3.new(0, 2, 0)
+            front.Parent = Workspace
+
+            local back = Instance.new("Part")
+            back.Name = "BackWall"
+            back.Size = Vector3.new(4, 4, 4)
+            back.Anchored = true
+            back.Position = Vector3.new(0, 2, 8)
+            back.Parent = Workspace
+
+            local params = RaycastParams.new()
+            params.RespectCanCollide = true
+            local result = Workspace:Raycast(Vector3.new(0, 2, -10), Vector3.new(0, 0, 30), params)
+            _G.hitName = result and result.Instance and result.Instance.Name or nil
+        "#,
+            )
+            .expect("Failed to load script");
+
+        let hit_name: Option<String> = runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap()
+            .get("hitName")
+            .unwrap();
+        assert_eq!(hit_name.as_deref(), Some("BackWall"));
+    }
+
+    #[test]
+    fn test_get_part_bounds_in_box_uses_volume_overlap() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local p = Instance.new("Part")
+            p.Name = "EdgeOverlapPart"
+            p.Size = Vector3.new(8, 2, 2)
+            p.Anchored = true
+            p.Position = Vector3.new(3, 1, 0)
+            p.Parent = Workspace
+
+            local hits = Workspace:GetPartBoundsInBox(CFrame.new(0, 1, 0), Vector3.new(4, 4, 4))
+            _G.boxHit = false
+            for _, v in ipairs(hits) do
+                if v.Name == "EdgeOverlapPart" then
+                    _G.boxHit = true
+                end
+            end
+        "#,
+            )
+            .expect("Failed to load script");
+
+        let box_hit: bool = runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap()
+            .get("boxHit")
+            .unwrap();
+        assert!(box_hit, "Part overlapping box by extent should be included");
+    }
+
+    #[test]
+    fn test_get_part_bounds_in_radius_uses_part_extent() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local p = Instance.new("Part")
+            p.Name = "RadiusExtentPart"
+            p.Size = Vector3.new(8, 2, 2)
+            p.Anchored = true
+            p.Position = Vector3.new(3, 1, 0)
+            p.Parent = Workspace
+
+            local hits = Workspace:GetPartBoundsInRadius(Vector3.new(0, 1, 0), 1.5)
+            _G.radiusHit = false
+            for _, v in ipairs(hits) do
+                if v.Name == "RadiusExtentPart" then
+                    _G.radiusHit = true
+                end
+            end
+        "#,
+            )
+            .expect("Failed to load script");
+
+        let radius_hit: bool = runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap()
+            .get("radiusHit")
+            .unwrap();
+        assert!(radius_hit, "Part intersecting sphere by volume should be included");
     }
 
     #[test]
