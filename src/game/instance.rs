@@ -12,6 +12,7 @@ use super::lua::instance::{
 use super::lua::services::AgentInput;
 use super::lua::LuaRuntime;
 use super::physics::PhysicsWorld;
+use super::touch_events::compute_touch_transitions;
 
 /// Walk speed for player characters (studs per second)
 const WALK_SPEED: f32 = consts::WALK_SPEED;
@@ -693,6 +694,7 @@ impl GameInstance {
 
         // Detect current overlaps
         let current = self.physics.detect_overlaps();
+        let transitions = compute_touch_transitions(&current, &self.prev_touches);
 
         // Do all Lua work in a block to scope the runtime borrow,
         // collecting errors to handle afterward (split-borrow pattern).
@@ -749,12 +751,8 @@ impl GameInstance {
                 }
             };
 
-            // New touches = current - prev
-            for &(a, b) in &current {
-                if self.prev_touches.contains(&(a, b)) {
-                    continue;
-                }
-
+            // Began touches
+            for (a, b) in transitions.began.iter().copied() {
                 // Roblox: two anchored (non-character) parts never fire Touched
                 if is_anchored_non_character(a) && is_anchored_non_character(b) {
                     continue;
@@ -793,12 +791,8 @@ impl GameInstance {
                 fire_signal(&b_signal, &inst_a);
             }
 
-            // Ended touches = prev - current
-            for &(a, b) in &self.prev_touches {
-                if current.contains(&(a, b)) {
-                    continue;
-                }
-
+            // Ended touches
+            for (a, b) in transitions.ended.iter().copied() {
                 let (inst_a, inst_b) = match (
                     id_to_instance.get(&a).cloned(),
                     id_to_instance.get(&b).cloned(),

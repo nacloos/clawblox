@@ -4,6 +4,7 @@ pub mod humanoid_movement;
 pub mod instance;
 pub mod lua;
 pub mod physics;
+pub mod touch_events;
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
