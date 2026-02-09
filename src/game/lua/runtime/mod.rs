@@ -1212,6 +1212,107 @@ mod tests {
     }
 
     #[test]
+    fn test_get_parts_in_part_returns_overlapping_parts() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local query = Instance.new("Part")
+            query.Name = "Query"
+            query.Anchored = true
+            query.Size = Vector3.new(4, 4, 4)
+            query.Position = Vector3.new(0, 1, 0)
+            query.Parent = Workspace
+
+            local near = Instance.new("Part")
+            near.Name = "Near"
+            near.Anchored = true
+            near.Size = Vector3.new(2, 2, 2)
+            near.Position = Vector3.new(1, 1, 0)
+            near.Parent = Workspace
+
+            local far = Instance.new("Part")
+            far.Name = "Far"
+            far.Anchored = true
+            far.Size = Vector3.new(2, 2, 2)
+            far.Position = Vector3.new(20, 1, 0)
+            far.Parent = Workspace
+
+            local hits = Workspace:GetPartsInPart(query)
+            _G.hitNear = false
+            _G.hitFar = false
+            _G.hitQuery = false
+            for _, v in ipairs(hits) do
+                if v.Name == "Near" then _G.hitNear = true end
+                if v.Name == "Far" then _G.hitFar = true end
+                if v.Name == "Query" then _G.hitQuery = true end
+            end
+        "#,
+            )
+            .expect("Failed to load script");
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let hit_near: bool = globals.get("hitNear").unwrap();
+        let hit_far: bool = globals.get("hitFar").unwrap();
+        let hit_query: bool = globals.get("hitQuery").unwrap();
+        assert!(hit_near);
+        assert!(!hit_far);
+        assert!(!hit_query);
+    }
+
+    #[test]
+    fn test_get_parts_in_part_respects_overlap_params() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local query = Instance.new("Part")
+            query.Name = "Query"
+            query.Anchored = true
+            query.Size = Vector3.new(4, 4, 4)
+            query.Position = Vector3.new(0, 1, 0)
+            query.Parent = Workspace
+
+            local red = Instance.new("Part")
+            red.Name = "RedSolid"
+            red.Anchored = true
+            red.Size = Vector3.new(2, 2, 2)
+            red.CollisionGroup = "Red"
+            red.Position = Vector3.new(1, 1, 0)
+            red.Parent = Workspace
+
+            local blue = Instance.new("Part")
+            blue.Name = "BlueTrigger"
+            blue.Anchored = true
+            blue.Size = Vector3.new(2, 2, 2)
+            blue.CollisionGroup = "Blue"
+            blue.CanCollide = false
+            blue.Position = Vector3.new(-1, 1, 0)
+            blue.Parent = Workspace
+
+            local params = OverlapParams.new()
+            params.CollisionGroup = "Red"
+            params.RespectCanCollide = true
+            local hits = Workspace:GetPartsInPart(query, params)
+
+            _G.hitRed = false
+            _G.hitBlue = false
+            for _, v in ipairs(hits) do
+                if v.Name == "RedSolid" then _G.hitRed = true end
+                if v.Name == "BlueTrigger" then _G.hitBlue = true end
+            end
+        "#,
+            )
+            .expect("Failed to load script");
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let hit_red: bool = globals.get("hitRed").unwrap();
+        let hit_blue: bool = globals.get("hitBlue").unwrap();
+        assert!(hit_red);
+        assert!(!hit_blue);
+    }
+
+    #[test]
     fn test_player_has_character() {
         let runtime = test_runtime();
         let (player, hrp_id) = runtime.add_player(12345, "TestPlayer");

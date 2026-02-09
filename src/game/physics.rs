@@ -86,6 +86,8 @@ pub struct PhysicsWorld {
     pub character_controllers: HashMap<u64, CharacterControllerState>,
     /// Maps Rapier collider handle to Lua instance ID (for touch detection)
     pub collider_to_lua: HashMap<ColliderHandle, u64>,
+    /// Script-driven kinematic linear velocity sampled from per-tick target translation.
+    pub kinematic_linear_velocities: HashMap<RigidBodyHandle, [f32; 3]>,
 }
 
 /// Builds a collider with the correct shape for a given PartType and size.
@@ -140,6 +142,7 @@ impl PhysicsWorld {
             lua_to_shape: HashMap::new(),
             character_controllers: HashMap::new(),
             collider_to_lua: HashMap::new(),
+            kinematic_linear_velocities: HashMap::new(),
         }
     }
 
@@ -215,6 +218,7 @@ impl PhysicsWorld {
         if let Some(handle) = self.lua_to_body.remove(&lua_id) {
             self.body_to_lua.remove(&handle);
             self.lua_to_shape.remove(&lua_id);
+            self.kinematic_linear_velocities.remove(&handle);
             // Remove collider->lua mappings before destroying the body
             if let Some(body) = self.rigid_body_set.get(handle) {
                 for &ch in body.colliders() {
@@ -236,12 +240,32 @@ impl PhysicsWorld {
     }
 
     /// Updates the position of an anchored (kinematic) part
-    pub fn set_kinematic_position(&mut self, handle: RigidBodyHandle, position: [f32; 3]) {
+    pub fn set_kinematic_position_with_dt(
+        &mut self,
+        handle: RigidBodyHandle,
+        position: [f32; 3],
+        dt: f32,
+    ) {
         if let Some(body) = self.rigid_body_set.get_mut(handle) {
             if body.is_kinematic() {
+                let cur = body.translation();
+                let inv_dt = if dt > consts::EPSILON { 1.0 / dt } else { 0.0 };
+                self.kinematic_linear_velocities.insert(
+                    handle,
+                    [
+                        (position[0] - cur.x) * inv_dt,
+                        (position[1] - cur.y) * inv_dt,
+                        (position[2] - cur.z) * inv_dt,
+                    ],
+                );
                 body.set_next_kinematic_translation(vector![position[0], position[1], position[2]]);
             }
         }
+    }
+
+    /// Updates the position of an anchored (kinematic) part using default tick dt.
+    pub fn set_kinematic_position(&mut self, handle: RigidBodyHandle, position: [f32; 3]) {
+        self.set_kinematic_position_with_dt(handle, position, consts::TIMESTEP);
     }
 
     /// Updates the rotation of an anchored (kinematic) part from a 3x3 rotation matrix
@@ -315,8 +339,10 @@ impl PhysicsWorld {
             if let Some(body) = self.rigid_body_set.get_mut(handle) {
                 if anchored {
                     body.set_body_type(RigidBodyType::KinematicPositionBased, true);
+                    self.kinematic_linear_velocities.insert(handle, [0.0, 0.0, 0.0]);
                 } else {
                     body.set_body_type(RigidBodyType::Dynamic, true);
+                    self.kinematic_linear_velocities.remove(&handle);
                 }
             }
         }
@@ -747,8 +773,13 @@ impl PhysicsWorld {
         }
 
         let v = ground_body.linvel();
+        let sampled_v = self
+            .kinematic_linear_velocities
+            .get(&parent)
+            .copied()
+            .unwrap_or([v.x, v.y, v.z]);
         Some(GroundKinematicSupport {
-            velocity: [v.x, v.y, v.z],
+            velocity: sampled_v,
             distance: toi,
         })
     }

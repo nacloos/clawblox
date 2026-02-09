@@ -476,7 +476,7 @@ impl GameInstance {
     /// - Creates physics bodies for new parts (skips character-controlled parts)
     /// - Updates positions for anchored parts that moved in Lua
     /// - Removes physics bodies for parts that were destroyed in Lua
-    fn sync_lua_to_physics(&mut self) {
+    fn sync_lua_to_physics(&mut self, dt: f32) {
         let Some(runtime) = &self.lua_runtime else {
             return;
         };
@@ -578,9 +578,10 @@ impl GameInstance {
                     // Anchored parts - always sync position/rotation from Lua
                     if part_data.anchored {
                         if let Some(handle) = self.physics.get_handle(lua_id) {
-                            self.physics.set_kinematic_position(
+                            self.physics.set_kinematic_position_with_dt(
                                 handle,
                                 [part_data.position.x, part_data.position.y, part_data.position.z],
+                                dt,
                             );
                             self.physics.set_kinematic_rotation(
                                 handle,

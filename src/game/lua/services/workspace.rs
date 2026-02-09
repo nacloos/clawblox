@@ -1,4 +1,7 @@
 use mlua::{FromLua, Lua, Result, UserData, UserDataFields, UserDataMethods, Value};
+use nalgebra::{Isometry3, Matrix3, Rotation3, Translation3, UnitQuaternion};
+use rapier3d::parry::query::intersection_test;
+use rapier3d::prelude::{point, SharedShape};
 use std::sync::{Arc, Mutex};
 
 use crate::game::constants::physics as consts;
@@ -348,6 +351,42 @@ fn sphere_intersects_obb(
     let dy = local[1] - clamped[1];
     let dz = local[2] - clamped[2];
     (dx * dx + dy * dy + dz * dz) <= sphere_radius * sphere_radius
+}
+
+fn shape_from_part(size: Vector3, shape: PartType) -> Option<SharedShape> {
+    let [sx, sy, sz] = [size.x, size.y, size.z];
+    Some(match shape {
+        PartType::Block => SharedShape::cuboid(sx / 2.0, sy / 2.0, sz / 2.0),
+        PartType::Ball => SharedShape::ball(sx / 2.0),
+        PartType::Cylinder => SharedShape::cylinder(sy / 2.0, sx / 2.0),
+        PartType::Wedge => {
+            let hx = sx / 2.0;
+            let hy = sy / 2.0;
+            let hz = sz / 2.0;
+            let points = [
+                point![-hx, -hy, -hz],
+                point![ hx, -hy, -hz],
+                point![-hx, -hy,  hz],
+                point![ hx, -hy,  hz],
+                point![-hx,  hy, -hz],
+                point![-hx,  hy,  hz],
+            ];
+            SharedShape::convex_hull(&points)?
+        }
+    })
+}
+
+fn cframe_to_isometry(cframe: CFrame) -> Isometry3<f32> {
+    let m = Matrix3::new(
+        cframe.rotation[0][0], cframe.rotation[0][1], cframe.rotation[0][2],
+        cframe.rotation[1][0], cframe.rotation[1][1], cframe.rotation[1][2],
+        cframe.rotation[2][0], cframe.rotation[2][1], cframe.rotation[2][2],
+    );
+    let rot = Rotation3::from_matrix_unchecked(m);
+    Isometry3::from_parts(
+        Translation3::new(cframe.position.x, cframe.position.y, cframe.position.z),
+        UnitQuaternion::from_rotation_matrix(&rot),
+    )
 }
 
 #[derive(Clone)]
@@ -812,6 +851,89 @@ impl WorkspaceService {
         }
         out
     }
+
+    pub fn get_parts_in_part(
+        &self,
+        query_part: Instance,
+        params: Option<OverlapParams>,
+    ) -> Vec<Instance> {
+        let params = params.unwrap_or_default();
+        let query_data = {
+            let data = query_part.data.lock().unwrap();
+            let Some(part) = &data.part_data else {
+                return Vec::new();
+            };
+            (data.id.0, part.size, part.cframe, part.shape)
+        };
+        let (query_id, query_size, query_cframe, query_shape_type) = query_data;
+        let Some(query_shape) = shape_from_part(query_size, query_shape_type) else {
+            return Vec::new();
+        };
+        let query_iso = cframe_to_isometry(query_cframe);
+
+        let mut out = Vec::new();
+        for inst in self.get_descendants() {
+            let should_filter = params.filter_instances.iter().any(|i| {
+                i.id() == inst.id() || inst.is_descendant_of(i)
+            });
+            let skip = match params.filter_type {
+                RaycastFilterType::Exclude => should_filter,
+                RaycastFilterType::Include => !should_filter,
+            };
+            if skip {
+                continue;
+            }
+
+            let part_data = {
+                let data = inst.data.lock().unwrap();
+                if data.id.0 == query_id {
+                    None
+                } else {
+                    data.part_data.as_ref().map(|p| {
+                        (
+                            p.can_query,
+                            p.can_collide,
+                            p.collision_group.clone(),
+                            p.size,
+                            p.cframe,
+                            p.shape,
+                        )
+                    })
+                }
+            };
+
+            let Some((can_query, can_collide, collision_group, size, cframe, shape_type)) = part_data else {
+                continue;
+            };
+
+            if !can_query {
+                continue;
+            }
+            if params.respect_can_collide && !can_collide {
+                continue;
+            }
+            if !params.collision_group.is_empty()
+                && params.collision_group != "Default"
+                && collision_group != params.collision_group
+            {
+                continue;
+            }
+
+            let Some(shape) = shape_from_part(size, shape_type) else {
+                continue;
+            };
+            let iso = cframe_to_isometry(cframe);
+            let intersects = intersection_test(&query_iso, query_shape.as_ref(), &iso, shape.as_ref())
+                .unwrap_or(false);
+            if intersects {
+                out.push(inst);
+                if params.max_parts > 0 && out.len() >= params.max_parts {
+                    break;
+                }
+            }
+        }
+        out
+    }
 }
 
 impl UserData for WorkspaceService {
@@ -849,6 +971,13 @@ impl UserData for WorkspaceService {
             "GetPartBoundsInRadius",
             |_, this, (position, radius, params): (Vector3, f32, Option<OverlapParams>)| {
                 Ok(this.get_part_bounds_in_radius(position, radius, params))
+            },
+        );
+
+        methods.add_method(
+            "GetPartsInPart",
+            |_, this, (part, params): (Instance, Option<OverlapParams>)| {
+                Ok(this.get_parts_in_part(part, params))
             },
         );
 

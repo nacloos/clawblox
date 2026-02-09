@@ -8,7 +8,7 @@ pub(super) fn run_tick_phases(instance: &mut GameInstance, dt: f32) {
     instance.sync_gravity();
 
     // Sync new/changed Lua parts to physics (skip character-controlled parts).
-    instance.sync_lua_to_physics();
+    instance.sync_lua_to_physics(dt);
 
     // Process agent inputs (fire InputReceived events).
     // Do this before syncing MoveTo targets so movement can apply in the same tick.
