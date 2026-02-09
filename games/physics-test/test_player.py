@@ -356,12 +356,9 @@ def test_touched_events(headers: dict):
 
 
 def test_jump(headers: dict):
-    """Test 5: Verify jump reachability for low/med/high platforms."""
+    """Test 5: Sequential jump climb: low -> medium -> high."""
     print("\n--- TEST 5: Jump Platforms (X=40) ---")
-    # Stage near the jump lane before attempting climbs.
-    target = [33, 3, 0]
-
-    pos = wait_until_near(headers, target, threshold=JUMP_APPROACH_THRESHOLD)
+    pos = wait_until_near(headers, [33, 3, 0], threshold=JUMP_APPROACH_THRESHOLD)
     if not pos:
         print("  SKIP: Could not reach jump zone")
         return
@@ -372,16 +369,12 @@ def test_jump(headers: dict):
         ("Med (Y=5)", 5.0, 10.0),
         ("High (Y=8)", 8.0, 20.0),
     ]:
-        print(f"  Attempting {height_label} platform...")
-        # HumanoidRootPart sits about 2.6 studs above the surface when standing.
+        print(f"  Jumping to {height_label}...")
         required_hrp_y = platform_center_y + 2.2
         start = time.time()
         success = False
-        best_y = -999.0
-        best_dist = float("inf")
         last_pos = None
-        jump_cooldown = 0.0
-        first_jump_sent = False
+        jump_sent = False
 
         while time.time() - start < JUMP_ATTEMPT_TIMEOUT:
             obs = observe(headers)
@@ -392,22 +385,15 @@ def test_jump(headers: dict):
             p = obs["player"]["position"]
             last_pos = p
             dist = distance_xz(p, [40.0, p[1], z])
-            best_dist = min(best_dist, dist)
-            best_y = max(best_y, p[1])
+            move_to(headers, [42.0, 10.0, z])
 
-            # Aim slightly past the platform once close to avoid stopping on the front face.
-            move_x = JUMP_OVERTRAVEL_X if dist < JUMP_TRIGGER_DIST else 39.0
-            move_to(headers, [move_x, 10, z])
-
-            # Trigger the first jump earlier (before nose-to-wall contact),
-            # then allow periodic retries if we did not get on top.
-            now = time.time()
-            if dist < JUMP_TRIGGER_DIST and (not first_jump_sent or now >= jump_cooldown):
+            # One early jump per platform attempt.
+            if dist < 9.0 and not jump_sent:
                 send_input(headers, "Jump")
-                first_jump_sent = True
-                jump_cooldown = now + 0.35
+                jump_sent = True
 
-            if dist <= JUMP_PLATFORM_REACH_XZ and p[1] >= required_hrp_y:
+            on_platform_xz = abs(p[0] - 40.0) <= 3.1 and abs(p[2] - z) <= 3.1
+            if on_platform_xz and p[1] >= required_hrp_y:
                 success = True
                 break
 
@@ -416,14 +402,8 @@ def test_jump(headers: dict):
         if success:
             print(f"  PASS {height_label}: reached top (pos={last_pos})")
         else:
-            print(
-                f"  FAIL {height_label}: best_y={best_y:.2f} "
-                f"best_dist_xz={best_dist:.2f} last_pos={last_pos}"
-            )
+            print(f"  FAIL {height_label}: last_pos={last_pos}")
         results.append((height_label, success))
-
-        # Re-stage before next platform attempt.
-        wait_until_near(headers, [33, 3, z], threshold=JUMP_APPROACH_THRESHOLD, timeout=8.0)
 
     passed = sum(1 for _, ok in results if ok)
     print(f"  RESULT: {passed}/3 platforms reached")
