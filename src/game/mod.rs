@@ -10,10 +10,10 @@ mod manager_lifecycle;
 mod manager_listing;
 mod manager_observations;
 mod manager_players;
+mod manager_tick;
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
-use rayon::prelude::*;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::thread;
@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use async_bridge::AsyncBridge;
-use instance::{ErrorMode, GameInstance, GameStatus, MapInfo, PlayerObservation, SpectatorObservation};
+use instance::{ErrorMode, GameInstance, MapInfo, PlayerObservation, SpectatorObservation};
 
 /// Handle to the game manager state
 pub type GameManagerHandle = Arc<GameManagerState>;
@@ -98,52 +98,7 @@ impl GameManager {
         loop {
             let start = Instant::now();
 
-            // Collect instances to avoid holding DashMap reference during parallel iteration
-            let instances: Vec<(Uuid, GameInstanceHandle)> = self
-                .state
-                .instances
-                .iter()
-                .map(|e| (*e.key(), e.value().clone()))
-                .collect();
-
-            // Process instances in parallel using rayon
-            instances
-                .par_iter()
-                .for_each(|(instance_id, instance_handle)| {
-                    let mut instance = instance_handle.write();
-                    let game_id = instance.game_id;
-
-                    if instance.status == GameStatus::Playing {
-                        let players_before: std::collections::HashSet<Uuid> =
-                            instance.players.keys().copied().collect();
-
-                        instance.tick();
-
-                        let players_after: std::collections::HashSet<Uuid> =
-                            instance.players.keys().copied().collect();
-
-                        // Clean up kicked players
-                        for agent_id in players_before.difference(&players_after) {
-                            self.state
-                                .observation_cache
-                                .remove(&(*instance_id, *agent_id));
-                            self.state.player_instances.remove(&(*agent_id, game_id));
-                        }
-
-                        // Update observation cache
-                        for &agent_id in instance.players.keys() {
-                            if let Some(obs) = instance.get_player_observation(agent_id) {
-                                self.state
-                                    .observation_cache
-                                    .insert((*instance_id, agent_id), obs);
-                            }
-                        }
-
-                        // Update spectator cache
-                        let spectator_obs = instance.get_spectator_observation();
-                        self.state.spectator_cache.insert(*instance_id, spectator_obs);
-                    }
-                });
+            manager_tick::tick_instances(&self.state);
 
             // Periodic cleanup
             tick_counter += 1;
