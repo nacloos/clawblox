@@ -6,6 +6,7 @@ local config
 local state
 local spawnService
 local roundService
+local animationService
 
 local function vecFromTriplet(v)
     if type(v) ~= "table" then
@@ -72,7 +73,7 @@ local function canFire(pdata, wdef, now)
     return true
 end
 
-local function startReload(pdata, now)
+local function startReload(player, pdata, now)
     local wdef = weaponDef(pdata.weaponId)
     local wstate = weaponState(pdata)
     if not wdef or not wstate then
@@ -89,10 +90,13 @@ local function startReload(pdata, now)
     end
     wstate.reloading = true
     wstate.reloadEndAt = now + wdef.reload_time
+    if animationService and player then
+        animationService.PlayReload(player, pdata.weaponId)
+    end
     syncWeaponFields(pdata)
 end
 
-local function finishReload(pdata)
+local function finishReload(player, pdata)
     local wdef = weaponDef(pdata.weaponId)
     local wstate = weaponState(pdata)
     if not wdef or not wstate then
@@ -107,6 +111,9 @@ local function finishReload(pdata)
     wstate.reserve = wstate.reserve - take
     wstate.reloading = false
     wstate.reloadEndAt = nil
+    if animationService and player then
+        animationService.StopReload(player, pdata.weaponId)
+    end
     syncWeaponFields(pdata)
 end
 
@@ -119,6 +126,9 @@ local function switchWeapon(player, pdata, slot)
     if prev then
         prev.reloading = false
         prev.reloadEndAt = nil
+    end
+    if animationService then
+        animationService.StopReload(player)
     end
     pdata.weaponId = id
     syncWeaponFields(pdata)
@@ -158,6 +168,9 @@ local function damageVictim(victim, attackerPdata, wdef)
     if newHealth <= 0 then
         vdata.alive = false
         vdata.deaths = vdata.deaths + 1
+        if animationService then
+            animationService.StopAll(victim.player)
+        end
 
         attackerPdata.kills = attackerPdata.kills + 1
         attackerPdata.score = attackerPdata.score + (wdef.kill_score or 100)
@@ -173,6 +186,7 @@ function CombatService.Init(deps)
     state = deps.state
     spawnService = deps.spawnService
     roundService = deps.roundService
+    animationService = deps.animationService
 end
 
 function CombatService.HandleSwitchWeapon(player, payload)
@@ -198,14 +212,15 @@ function CombatService.HandleReload(player)
     if not pdata then
         return
     end
-    startReload(pdata, tick())
+    startReload(player, pdata, tick())
 end
 
 function CombatService.Tick(now)
-    state.ForEachPlayer(function(_, pdata)
+    state.ForEachPlayer(function(userId, pdata)
         local wstate = weaponState(pdata)
         if wstate and wstate.reloading and wstate.reloadEndAt and now >= wstate.reloadEndAt then
-            finishReload(pdata)
+            local player = Players:GetPlayerByUserId(userId)
+            finishReload(player, pdata)
         end
     end)
 end
@@ -233,7 +248,7 @@ function CombatService.HandleFire(player, payload)
     end
 
     if wstate.mag <= 0 then
-        startReload(pdata, now)
+        startReload(player, pdata, now)
         return
     end
 
@@ -257,6 +272,9 @@ function CombatService.HandleFire(player, payload)
 
     pdata.lastShotAt = now
     wstate.mag = wstate.mag - 1
+    if animationService then
+        animationService.PlayFire(player, pdata.weaponId)
+    end
     syncWeaponFields(pdata)
 
     local baseDir = toTarget.Unit

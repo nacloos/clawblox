@@ -127,7 +127,10 @@ let followWeaponSlot: number | null = null
 let followWeaponKick = 0
 let followWeaponMuzzleTime = 0
 let followWeaponMuzzleLight: THREE.PointLight | null = null
-const lastAmmoByPlayer = new Map<string, number>()
+const lastPlayerTrackState = new Map<string, {
+  firePlaying: boolean
+  fireTime: number
+}>()
 
 function rotationToQuaternion(rot: [[number, number, number], [number, number, number], [number, number, number]]): THREE.Quaternion {
   const m = new THREE.Matrix4()
@@ -180,6 +183,22 @@ function stringAttr(attrs: Record<string, unknown> | undefined, keys: string[]):
     if (typeof v === 'string' && v.length > 0) return v
   }
   return null
+}
+
+function isFireAnimationId(animationId: string): boolean {
+  return /fire/i.test(animationId)
+}
+
+function currentFireTrack(
+  tracks: SpectatorPlayerInfo['active_animations'],
+): { playing: boolean, time: number } {
+  if (!tracks || tracks.length === 0) return { playing: false, time: 0 }
+  for (const track of tracks) {
+    if (!track || !track.is_playing) continue
+    if (!isFireAnimationId(String(track.animation_id || ''))) continue
+    return { playing: true, time: Number(track.time_position) || 0 }
+  }
+  return { playing: false, time: 0 }
 }
 
 function queueKillfeed(text: string): void {
@@ -561,6 +580,23 @@ function flashDamageOverlay(): void {
   }, 130)
 }
 
+function syncWeaponVisualFromAnimations(target: SpectatorPlayerInfo): void {
+  const current = currentFireTrack(target.active_animations)
+  const prev = lastPlayerTrackState.get(target.id)
+  if (!prev) {
+    lastPlayerTrackState.set(target.id, { firePlaying: current.playing, fireTime: current.time })
+    return
+  }
+
+  const restarted = current.playing && (!prev.firePlaying || current.time + 0.005 < prev.fireTime)
+  if (restarted) {
+    triggerWeaponFireVisual()
+  }
+
+  prev.firePlaying = current.playing
+  prev.fireTime = current.time
+}
+
 function updateHud(obs: SpectatorObservation): void {
   selectedPlayerId = chooseFollowTarget(obs)
   const target = obs.players.find((p) => p.id === selectedPlayerId) ?? null
@@ -605,14 +641,7 @@ function updateHud(obs: SpectatorObservation): void {
   ammoReserveEl.textContent = ammoReserve === null ? '-' : `${Math.round(ammoReserve)}`
   scoreTextEl.textContent = score === null ? '0' : `${Math.round(score)}`
   waveTextEl.textContent = phase ?? obs.game_status
-
-  if (ammoMag !== null) {
-    const prevAmmo = lastAmmoByPlayer.get(target.id)
-    if (prevAmmo !== undefined && ammoMag < prevAmmo) {
-      triggerWeaponFireVisual()
-    }
-    lastAmmoByPlayer.set(target.id, ammoMag)
-  }
+  syncWeaponVisualFromAnimations(target)
 }
 
 function updateKillfeed(obs: SpectatorObservation): void {
@@ -749,6 +778,10 @@ function getGameId(): string {
 const gameId = getGameId()
 
 function handleObservation(obs: SpectatorObservation): void {
+  const activePlayerIds = new Set(obs.players.map((p) => p.id))
+  for (const id of lastPlayerTrackState.keys()) {
+    if (!activePlayerIds.has(id)) lastPlayerTrackState.delete(id)
+  }
   latestObservation = obs
   updateScene(obs)
   updateHud(obs)
