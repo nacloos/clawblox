@@ -1,3 +1,4 @@
+pub mod animation;
 pub mod events;
 pub mod instance;
 pub mod runtime;

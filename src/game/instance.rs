@@ -1379,11 +1379,17 @@ pub struct SpectatorPlayerInfo {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SpectatorPlayerAnimation {
+    pub track_id: u64,
     pub animation_id: String,
+    pub priority: i32,
     pub time_position: f32,
     pub speed: f32,
     pub looped: bool,
     pub is_playing: bool,
+    pub is_stopping: bool,
+    pub weight_current: f32,
+    pub weight_target: f32,
+    pub effective_weight: f32,
 }
 
 /// Serialized GUI element for frontend rendering

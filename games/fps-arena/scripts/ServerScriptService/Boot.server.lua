@@ -99,6 +99,7 @@ end
 RunService.Heartbeat:Connect(function(_dt)
     local now = tick()
     SpawnService.Tick()
+    AnimationService.Tick()
     CombatService.Tick(now)
     RoundService.Tick(now)
     ReplicateService.Tick()

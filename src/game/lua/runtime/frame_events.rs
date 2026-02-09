@@ -1,5 +1,5 @@
 use super::*;
-use crate::game::lua::instance::AnimationScheduler;
+use crate::game::lua::animation::AnimationScheduler;
 
 impl LuaRuntime {
     pub fn tick(&self, delta_time: f32) -> Result<()> {

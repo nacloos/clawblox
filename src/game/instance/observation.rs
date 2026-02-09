@@ -276,17 +276,23 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
                 let active_animations = animator_id.and_then(|id| {
                     runtime
                         .lua()
-                        .app_data_ref::<crate::game::lua::instance::AnimationScheduler>()
+                        .app_data_ref::<crate::game::lua::animation::AnimationScheduler>()
                         .map(|scheduler| {
                             let tracks = scheduler.active_tracks_for_animator(id);
                             tracks
                                 .into_iter()
                                 .map(|track| SpectatorPlayerAnimation {
+                                    track_id: track.track_id,
                                     animation_id: track.animation_id,
+                                    priority: track.priority,
                                     time_position: round_f32(track.time_position),
                                     speed: round_f32(track.speed),
                                     looped: track.looped,
                                     is_playing: track.is_playing,
+                                    is_stopping: track.is_stopping,
+                                    weight_current: round_f32(track.weight_current),
+                                    weight_target: round_f32(track.weight_target),
+                                    effective_weight: round_f32(track.effective_weight),
                                 })
                                 .collect::<Vec<_>>()
                         })

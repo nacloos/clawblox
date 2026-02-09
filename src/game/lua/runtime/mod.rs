@@ -6,7 +6,8 @@ use uuid::Uuid;
 
 use crate::game::instance::ErrorMode;
 
-use super::instance::{AnimationScheduler, AttributeValue, Instance, InstanceData};
+use super::animation::AnimationScheduler;
+use super::instance::{AttributeValue, Instance, InstanceData};
 use super::services::{
     register_overlap_params, register_raycast_params, AgentInput, AgentInputService,
     DataStoreService, HttpService,

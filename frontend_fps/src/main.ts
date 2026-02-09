@@ -15,11 +15,17 @@ interface SpectatorPlayerInfo {
   health: number
   attributes?: Record<string, unknown>
   active_animations?: Array<{
+    track_id?: number
     animation_id: string
+    priority?: number
     time_position: number
     speed: number
     looped: boolean
     is_playing: boolean
+    is_stopping?: boolean
+    weight_current?: number
+    weight_target?: number
+    effective_weight?: number
   }>
 }
 
@@ -127,9 +133,15 @@ let followWeaponSlot: number | null = null
 let followWeaponKick = 0
 let followWeaponMuzzleTime = 0
 let followWeaponMuzzleLight: THREE.PointLight | null = null
+let followWeaponReloadTarget = 0
+let followWeaponReloadBlend = 0
+let followWeaponWalkTarget = 0
+let followWeaponWalkBlend = 0
+let followWeaponWalkPhase = 0
 const lastPlayerTrackState = new Map<string, {
-  firePlaying: boolean
-  fireTime: number
+  fireTrackId: number | null
+  reloadTrackId: number | null
+  walkTrackId: number | null
 }>()
 
 function rotationToQuaternion(rot: [[number, number, number], [number, number, number], [number, number, number]]): THREE.Quaternion {
@@ -153,11 +165,6 @@ const modelEntityStates = new Map<number, {
   mixer: THREE.AnimationMixer
   walkAction?: THREE.AnimationAction
   idleAction?: THREE.AnimationAction
-  lastPos: THREE.Vector3 | null
-  moveSpeed: number
-  targetYaw: number
-  currentYaw: number
-  modelRoot: THREE.Object3D
 }>()
 const clock = new THREE.Clock()
 let latestObservation: SpectatorObservation | null = null
@@ -189,16 +196,72 @@ function isFireAnimationId(animationId: string): boolean {
   return /fire/i.test(animationId)
 }
 
-function currentFireTrack(
+function isReloadAnimationId(animationId: string): boolean {
+  return /reload/i.test(animationId)
+}
+
+function isWalkAnimationId(animationId: string): boolean {
+  return /(walk|run|jog|locomotion)/i.test(animationId)
+}
+
+function bestTrackBy(
   tracks: SpectatorPlayerInfo['active_animations'],
-): { playing: boolean, time: number } {
-  if (!tracks || tracks.length === 0) return { playing: false, time: 0 }
+  predicate: (animationId: string) => boolean,
+): { playing: boolean, trackId: number | null } {
+  if (!tracks || tracks.length === 0) return { playing: false, trackId: null }
+  let best: SpectatorPlayerInfo['active_animations'][number] | null = null
   for (const track of tracks) {
     if (!track || !track.is_playing) continue
-    if (!isFireAnimationId(String(track.animation_id || ''))) continue
-    return { playing: true, time: Number(track.time_position) || 0 }
+    const animationId = String(track.animation_id || '')
+    if (!predicate(animationId)) continue
+    if (!best) {
+      best = track
+      continue
+    }
+
+    const bestWeight = typeof best.effective_weight === 'number' ? best.effective_weight : 1
+    const nextWeight = typeof track.effective_weight === 'number' ? track.effective_weight : 1
+    if (nextWeight > bestWeight + 1e-4) {
+      best = track
+      continue
+    }
+
+    const bestPriority = typeof best.priority === 'number' ? best.priority : 0
+    const nextPriority = typeof track.priority === 'number' ? track.priority : 0
+    if (nextWeight >= bestWeight - 1e-4 && nextPriority > bestPriority) {
+      best = track
+      continue
+    }
+
+    const bestTrackId = typeof best.track_id === 'number' ? best.track_id : -1
+    const nextTrackId = typeof track.track_id === 'number' ? track.track_id : -1
+    if (nextWeight >= bestWeight - 1e-4 && nextPriority === bestPriority && nextTrackId > bestTrackId) {
+      best = track
+    }
   }
-  return { playing: false, time: 0 }
+  if (!best) return { playing: false, trackId: null }
+  return {
+    playing: true,
+    trackId: typeof best.track_id === 'number' ? best.track_id : null,
+  }
+}
+
+function currentFireTrack(
+  tracks: SpectatorPlayerInfo['active_animations'],
+): { playing: boolean, trackId: number | null } {
+  return bestTrackBy(tracks, isFireAnimationId)
+}
+
+function currentReloadTrack(
+  tracks: SpectatorPlayerInfo['active_animations'],
+): { playing: boolean, trackId: number | null } {
+  return bestTrackBy(tracks, isReloadAnimationId)
+}
+
+function currentWalkTrack(
+  tracks: SpectatorPlayerInfo['active_animations'],
+): { playing: boolean, trackId: number | null } {
+  return bestTrackBy(tracks, isWalkAnimationId)
 }
 
 function queueKillfeed(text: string): void {
@@ -214,6 +277,7 @@ function queueKillfeed(text: string): void {
 
 function buildWeaponModel(slot: number): THREE.Group {
   const group = new THREE.Group()
+  const darkMetal = 0x222222
   const addBox = (
     size: [number, number, number],
     pos: [number, number, number],
@@ -232,16 +296,22 @@ function buildWeaponModel(slot: number): THREE.Group {
     mesh.receiveShadow = true
     group.add(mesh)
   }
-  const addBarrel = (len: number, pos: [number, number, number]) => {
-    const barrel = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.045, 0.045, len, 10),
-      new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.2, metalness: 0.9 }),
+  const addCylinder = (
+    radiusTop: number, radiusBottom: number, len: number,
+    pos: [number, number, number],
+    color: number, roughness: number, metalness: number,
+    rot?: [number, number, number],
+  ) => {
+    const mesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(radiusTop, radiusBottom, len, 10),
+      new THREE.MeshStandardMaterial({ color, roughness, metalness }),
     )
-    barrel.rotation.x = Math.PI / 2
-    barrel.position.set(pos[0], pos[1], pos[2])
-    barrel.castShadow = true
-    barrel.receiveShadow = true
-    group.add(barrel)
+    mesh.position.set(pos[0], pos[1], pos[2])
+    if (rot) mesh.rotation.set(rot[0], rot[1], rot[2])
+    else mesh.rotation.x = Math.PI / 2
+    mesh.castShadow = true
+    mesh.receiveShadow = true
+    group.add(mesh)
   }
   const muzzleFlash = new THREE.PointLight(0xffaa44, 0, 8)
   muzzleFlash.position.set(0, 0.0, -1.05)
@@ -249,25 +319,114 @@ function buildWeaponModel(slot: number): THREE.Group {
   group.userData.muzzleFlash = muzzleFlash
 
   if (slot === 1) {
-    addBox([0.35, 0.18, 0.62], [0, -0.05, -0.42], 0xcccccc, 0.3, 0.8)
-    addBarrel(0.26, [0, 0.0, -0.68])
-    addBox([0.12, 0.28, 0.12], [0, -0.25, -0.20], 0xcccccc, 0.3, 0.8, [0.21, 0, 0])
+    // --- Pistol ---
+    // slide (upper receiver)
+    addBox([0.14, 0.10, 0.44], [0, 0.00, -0.42], 0xbbbbbb, 0.25, 0.85)
+    // frame (lower receiver, slightly wider)
+    addBox([0.16, 0.08, 0.30], [0, -0.09, -0.36], 0xcccccc, 0.30, 0.80)
+    // barrel
+    addCylinder(0.035, 0.035, 0.26, [0, 0.01, -0.68], darkMetal, 0.2, 0.9)
+    // muzzle ring
+    addCylinder(0.042, 0.042, 0.03, [0, 0.01, -0.80], darkMetal, 0.15, 0.95)
+    // grip
+    addBox([0.12, 0.28, 0.10], [0, -0.25, -0.22], 0x333333, 0.6, 0.4, [0.18, 0, 0])
+    // grip texture lines
+    addBox([0.125, 0.16, 0.015], [0, -0.22, -0.20], 0x2a2a2a, 0.7, 0.3, [0.18, 0, 0])
+    // trigger guard
+    addBox([0.04, 0.02, 0.14], [0, -0.14, -0.36], darkMetal, 0.3, 0.8)
+    addBox([0.04, 0.08, 0.02], [0, -0.11, -0.43], darkMetal, 0.3, 0.8)
+    // trigger
+    addBox([0.03, 0.06, 0.02], [0, -0.10, -0.37], 0x444444, 0.3, 0.7, [0.15, 0, 0])
+    // front sight
+    addBox([0.03, 0.05, 0.02], [0, 0.07, -0.60], darkMetal, 0.3, 0.9)
+    // rear sight
+    addBox([0.08, 0.04, 0.02], [0, 0.07, -0.26], darkMetal, 0.3, 0.9)
+    addBox([0.02, 0.05, 0.02], [-0.03, 0.07, -0.26], darkMetal, 0.3, 0.9)
+    addBox([0.02, 0.05, 0.02], [0.03, 0.07, -0.26], darkMetal, 0.3, 0.9)
+    // hammer
+    addBox([0.04, 0.06, 0.03], [0, 0.04, -0.20], 0x444444, 0.3, 0.8, [-0.3, 0, 0])
     return group
   }
 
   if (slot === 3) {
-    addBox([0.34, 0.14, 1.1], [0, -0.04, -0.50], 0x8b4513, 0.5, 0.3)
-    addBarrel(0.52, [0, 0.01, -0.98])
-    addBox([0.12, 0.26, 0.12], [0, -0.23, -0.26], 0x8b4513, 0.5, 0.3, [0.18, 0, 0])
-    addBox([0.14, 0.12, 0.34], [0, -0.10, -0.72], 0x654321, 0.5, 0.3)
+    // --- Shotgun ---
+    const wood = 0x8b4513
+    const woodDark = 0x654321
+    // receiver
+    addBox([0.16, 0.14, 0.40], [0, -0.02, -0.40], 0x3a3a3a, 0.35, 0.75)
+    // barrel
+    addCylinder(0.045, 0.045, 0.70, [0, 0.02, -0.78], darkMetal, 0.2, 0.9)
+    // barrel shroud (tube magazine underneath)
+    addCylinder(0.035, 0.035, 0.55, [0, -0.06, -0.72], darkMetal, 0.25, 0.85)
+    // muzzle
+    addCylinder(0.050, 0.045, 0.04, [0, 0.02, -1.12], darkMetal, 0.15, 0.95)
+    // pump/forend
+    addBox([0.16, 0.10, 0.22], [0, -0.04, -0.68], woodDark, 0.55, 0.2)
+    addBox([0.17, 0.04, 0.22], [0, -0.10, -0.68], woodDark, 0.6, 0.15)
+    // stock
+    addBox([0.14, 0.13, 0.34], [0, -0.04, 0.00], wood, 0.50, 0.25)
+    addBox([0.12, 0.11, 0.14], [0, -0.06, 0.24], wood, 0.55, 0.2, [-0.08, 0, 0])
+    // buttpad
+    addBox([0.13, 0.12, 0.03], [0, -0.06, 0.32], 0x222222, 0.7, 0.3)
+    // grip
+    addBox([0.12, 0.24, 0.10], [0, -0.20, -0.24], wood, 0.50, 0.25, [0.15, 0, 0])
+    // trigger guard
+    addBox([0.04, 0.02, 0.14], [0, -0.13, -0.34], darkMetal, 0.3, 0.8)
+    addBox([0.04, 0.08, 0.02], [0, -0.10, -0.41], darkMetal, 0.3, 0.8)
+    // trigger
+    addBox([0.03, 0.06, 0.02], [0, -0.09, -0.35], 0x444444, 0.3, 0.7, [0.15, 0, 0])
+    // front bead sight
+    addCylinder(0.015, 0.015, 0.03, [0, 0.06, -1.08], 0xdddddd, 0.2, 0.9, [0, 0, 0])
+    // ejection port
+    addBox([0.05, 0.06, 0.10], [0.08, 0.02, -0.36], 0x2a2a2a, 0.4, 0.7)
     return group
   }
 
-  addBox([0.34, 0.16, 1.05], [0, -0.04, -0.50], 0x444444, 0.3, 0.8)
-  addBarrel(0.46, [0, 0.01, -0.92])
-  addBox([0.12, 0.26, 0.12], [0, -0.24, -0.28], 0x444444, 0.3, 0.8, [0.18, 0, 0])
-  addBox([0.10, 0.22, 0.14], [0, -0.22, -0.50], 0x333333, 0.4, 0.7)
-  addBox([0.16, 0.12, 0.30], [0, -0.02, 0.20], 0x444444, 0.3, 0.8)
+  // --- Assault Rifle (default, slot 2) ---
+  const gunMetal = 0x444444
+  // upper receiver
+  addBox([0.16, 0.12, 0.50], [0, 0.00, -0.50], gunMetal, 0.28, 0.82)
+  // lower receiver
+  addBox([0.17, 0.10, 0.34], [0, -0.10, -0.42], 0x3e3e3e, 0.30, 0.78)
+  // barrel
+  addCylinder(0.038, 0.038, 0.52, [0, 0.01, -0.92], darkMetal, 0.2, 0.9)
+  // muzzle brake
+  addCylinder(0.048, 0.042, 0.06, [0, 0.01, -1.16], darkMetal, 0.15, 0.95)
+  addCylinder(0.050, 0.050, 0.02, [0, 0.01, -1.12], darkMetal, 0.15, 0.95)
+  // handguard / rail
+  addBox([0.18, 0.13, 0.30], [0, -0.01, -0.72], 0x3a3a3a, 0.35, 0.7)
+  // rail grooves (top)
+  addBox([0.10, 0.015, 0.32], [0, 0.065, -0.72], 0x383838, 0.4, 0.65)
+  // grip
+  addBox([0.10, 0.24, 0.10], [0, -0.24, -0.30], 0x333333, 0.55, 0.45, [0.15, 0, 0])
+  // grip texture
+  addBox([0.105, 0.14, 0.015], [0, -0.22, -0.28], 0x2a2a2a, 0.65, 0.35, [0.15, 0, 0])
+  // magazine
+  addBox([0.08, 0.24, 0.10], [0, -0.24, -0.50], 0x333333, 0.4, 0.7, [0.05, 0, 0])
+  // magazine base plate
+  addBox([0.09, 0.02, 0.11], [0, -0.36, -0.50], 0x2a2a2a, 0.35, 0.75)
+  // stock tube
+  addCylinder(0.035, 0.035, 0.24, [0, -0.02, 0.08], gunMetal, 0.3, 0.8)
+  // stock
+  addBox([0.15, 0.11, 0.18], [0, -0.02, 0.24], gunMetal, 0.30, 0.80)
+  // buttpad
+  addBox([0.14, 0.10, 0.02], [0, -0.02, 0.34], 0x2a2a2a, 0.7, 0.3)
+  // trigger guard
+  addBox([0.04, 0.02, 0.14], [0, -0.14, -0.38], darkMetal, 0.3, 0.8)
+  addBox([0.04, 0.08, 0.02], [0, -0.11, -0.45], darkMetal, 0.3, 0.8)
+  // trigger
+  addBox([0.03, 0.06, 0.02], [0, -0.10, -0.39], 0x555555, 0.3, 0.7, [0.15, 0, 0])
+  // front sight post
+  addBox([0.03, 0.06, 0.02], [0, 0.08, -0.84], darkMetal, 0.3, 0.9)
+  addBox([0.06, 0.02, 0.02], [0, 0.05, -0.84], darkMetal, 0.3, 0.9)
+  // rear sight
+  addBox([0.08, 0.04, 0.02], [0, 0.08, -0.28], darkMetal, 0.3, 0.9)
+  addBox([0.02, 0.055, 0.02], [-0.03, 0.08, -0.28], darkMetal, 0.3, 0.9)
+  addBox([0.02, 0.055, 0.02], [0.03, 0.08, -0.28], darkMetal, 0.3, 0.9)
+  // ejection port
+  addBox([0.04, 0.05, 0.08], [0.08, 0.01, -0.44], 0x2a2a2a, 0.4, 0.7)
+  // charging handle
+  addBox([0.06, 0.03, 0.05], [0, 0.07, -0.26], 0x3a3a3a, 0.35, 0.75)
   return group
 }
 
@@ -289,13 +448,19 @@ function syncFollowWeapon(playerPos: THREE.Vector3, forward: THREE.Vector3, attr
   const weaponPos = playerPos.clone()
     .addScaledVector(forward, 0.75 - 0.28 * followWeaponKick)
     .addScaledVector(right, 1.05)
-    .add(new THREE.Vector3(0, -0.25, 0))
+    .add(new THREE.Vector3(0, -0.25 - followWeaponReloadBlend * 0.22, followWeaponReloadBlend * 0.08))
+  weaponPos.y += Math.sin(followWeaponWalkPhase) * 0.03 * followWeaponWalkBlend
+  weaponPos.addScaledVector(forward, (Math.cos(followWeaponWalkPhase * 2) - 1) * 0.015 * followWeaponWalkBlend)
   followWeapon.position.copy(weaponPos)
 
   const lookTarget = weaponPos.clone().addScaledVector(forward, 5)
   followWeapon.lookAt(lookTarget)
+  followWeapon.rotation.z -= followWeaponReloadBlend * 0.2
+  followWeapon.rotation.x += followWeaponReloadBlend * 0.1
+  followWeapon.rotation.z += Math.sin(followWeaponWalkPhase * 0.5) * 0.03 * followWeaponWalkBlend
   if (followWeaponMuzzleLight) {
-    followWeaponMuzzleLight.intensity = followWeaponMuzzleTime > 0 ? 3 : 0
+    const canFlash = followWeaponReloadBlend < 0.2
+    followWeaponMuzzleLight.intensity = canFlash && followWeaponMuzzleTime > 0 ? 3 : 0
   }
 }
 
@@ -310,6 +475,15 @@ function tickWeaponVisual(dt: number): void {
   }
   if (followWeaponMuzzleTime > 0) {
     followWeaponMuzzleTime = Math.max(0, followWeaponMuzzleTime - dt)
+  }
+  const reloadBlendLerp = 1 - Math.exp(-dt * 10)
+  followWeaponReloadBlend = THREE.MathUtils.lerp(followWeaponReloadBlend, followWeaponReloadTarget, reloadBlendLerp)
+  const walkBlendLerp = 1 - Math.exp(-dt * 12)
+  followWeaponWalkBlend = THREE.MathUtils.lerp(followWeaponWalkBlend, followWeaponWalkTarget, walkBlendLerp)
+  if (followWeaponWalkBlend > 0.02) {
+    followWeaponWalkPhase += dt * (7 + followWeaponWalkBlend * 4)
+  } else {
+    followWeaponWalkPhase = 0
   }
 }
 
@@ -464,11 +638,6 @@ async function attachModelToEntityRoot(
         mixer,
         walkAction,
         idleAction,
-        lastPos: null,
-        moveSpeed: 0,
-        targetYaw: 0,
-        currentYaw: 0,
-        modelRoot: clone,
       })
     }
   } catch (error) {
@@ -476,45 +645,70 @@ async function attachModelToEntityRoot(
   }
 }
 
-function updateModelAnimations(dt: number): void {
+function applyActionFromTrack(
+  action: THREE.AnimationAction | undefined,
+  track: SpectatorPlayerInfo['active_animations'][number] | undefined,
+): void {
+  if (!action) return
+  if (!track || !track.is_playing) {
+    action.paused = true
+    action.time = 0
+    action.weight = 0
+    return
+  }
+  action.paused = false
+  action.weight = typeof track.effective_weight === 'number'
+    ? THREE.MathUtils.clamp(track.effective_weight, 0, 1)
+    : 1
+  action.timeScale = typeof track.speed === 'number'
+    ? Math.max(0, track.speed)
+    : 1
+}
+
+function findBestTrack(
+  tracks: SpectatorPlayerInfo['active_animations'] | undefined,
+  predicate: (animationId: string) => boolean,
+): SpectatorPlayerInfo['active_animations'][number] | undefined {
+  if (!tracks) return undefined
+  let best: SpectatorPlayerInfo['active_animations'][number] | undefined
+  for (const track of tracks) {
+    if (!track || !track.is_playing) continue
+    const animationId = String(track.animation_id || '')
+    if (!predicate(animationId)) continue
+    if (!best) {
+      best = track
+      continue
+    }
+    const bestWeight = typeof best.effective_weight === 'number' ? best.effective_weight : 1
+    const nextWeight = typeof track.effective_weight === 'number' ? track.effective_weight : 1
+    if (nextWeight > bestWeight + 1e-4) {
+      best = track
+      continue
+    }
+    const bestPriority = typeof best.priority === 'number' ? best.priority : 0
+    const nextPriority = typeof track.priority === 'number' ? track.priority : 0
+    if (nextWeight >= bestWeight - 1e-4 && nextPriority > bestPriority) {
+      best = track
+    }
+  }
+  return best
+}
+
+function updateModelAnimations(obs: SpectatorObservation, dt: number): void {
   if (dt <= 0) return
+  const tracksByRootEntity = new Map<number, SpectatorPlayerInfo['active_animations'] | undefined>()
+  for (const player of obs.players) {
+    if (typeof player.root_part_id === 'number') {
+      tracksByRootEntity.set(player.root_part_id, player.active_animations)
+    }
+  }
+
   for (const [entityId, state] of modelEntityStates) {
-    const obj = entityObjects.get(entityId)
-    if (!obj) continue
-
-    const current = obj.position.clone()
-    if (state.lastPos) {
-      const dx = current.x - state.lastPos.x
-      const dz = current.z - state.lastPos.z
-      const speed = Math.sqrt(dx * dx + dz * dz) / dt
-      const lerpFactor = speed < state.moveSpeed ? 0.5 : 0.2
-      state.moveSpeed = THREE.MathUtils.lerp(state.moveSpeed, speed, lerpFactor)
-      if (Math.abs(dx) > 0.01 || Math.abs(dz) > 0.01) {
-        state.targetYaw = Math.atan2(dx, dz)
-      }
-    }
-    state.lastPos = current
-
-    const rotDiff = state.targetYaw - state.currentYaw
-    const shortest = Math.atan2(Math.sin(rotDiff), Math.cos(rotDiff))
-    state.currentYaw += shortest * Math.min(1, dt * 10)
-    state.modelRoot.rotation.y = state.currentYaw
-
-    const isMoving = state.moveSpeed > 0.5
-    if (state.walkAction) {
-      if (isMoving) {
-        state.walkAction.paused = false
-        state.walkAction.timeScale = THREE.MathUtils.clamp(state.moveSpeed / 5, 0.7, 1.6)
-      } else {
-        state.walkAction.paused = true
-        state.walkAction.time = 0
-      }
-    }
-
-    if (state.idleAction && state.idleAction !== state.walkAction) {
-      state.idleAction.paused = false
-      state.idleAction.weight = isMoving ? 0 : 1
-    }
+    const tracks = tracksByRootEntity.get(entityId)
+    const walkTrack = findBestTrack(tracks, isWalkAnimationId)
+    const idleTrack = findBestTrack(tracks, (animationId) => /idle/i.test(animationId))
+    applyActionFromTrack(state.walkAction, walkTrack)
+    applyActionFromTrack(state.idleAction, idleTrack)
 
     state.mixer.update(dt)
   }
@@ -582,19 +776,35 @@ function flashDamageOverlay(): void {
 
 function syncWeaponVisualFromAnimations(target: SpectatorPlayerInfo): void {
   const current = currentFireTrack(target.active_animations)
+  const currentReload = currentReloadTrack(target.active_animations)
+  const currentWalk = currentWalkTrack(target.active_animations)
   const prev = lastPlayerTrackState.get(target.id)
   if (!prev) {
-    lastPlayerTrackState.set(target.id, { firePlaying: current.playing, fireTime: current.time })
+    lastPlayerTrackState.set(target.id, {
+      fireTrackId: current.trackId,
+      reloadTrackId: currentReload.trackId,
+      walkTrackId: currentWalk.trackId,
+    })
+    followWeaponReloadTarget = currentReload.playing ? 1 : 0
+    followWeaponWalkTarget = currentWalk.playing ? 1 : 0
     return
   }
 
-  const restarted = current.playing && (!prev.firePlaying || current.time + 0.005 < prev.fireTime)
-  if (restarted) {
+  const restartedById = current.playing && current.trackId !== null && current.trackId !== prev.fireTrackId
+  if (restartedById) {
     triggerWeaponFireVisual()
   }
 
-  prev.firePlaying = current.playing
-  prev.fireTime = current.time
+  const reloadRestartedById = currentReload.playing && currentReload.trackId !== null && currentReload.trackId !== prev.reloadTrackId
+  if (reloadRestartedById) {
+    followWeaponKick = Math.max(followWeaponKick, 0.35)
+  }
+
+  followWeaponReloadTarget = currentReload.playing ? 1 : 0
+  followWeaponWalkTarget = currentWalk.playing ? 1 : 0
+  prev.fireTrackId = current.trackId
+  prev.reloadTrackId = currentReload.trackId
+  prev.walkTrackId = currentWalk.trackId
 }
 
 function updateHud(obs: SpectatorObservation): void {
@@ -610,6 +820,8 @@ function updateHud(obs: SpectatorObservation): void {
     weaponNameEl.textContent = 'Unknown'
     scoreTextEl.textContent = '0'
     waveTextEl.textContent = 'Spectating'
+    followWeaponReloadTarget = 0
+    followWeaponWalkTarget = 0
     return
   }
 
@@ -868,7 +1080,7 @@ function frame(): void {
 
   if (latestObservation) {
     updateCamera(latestObservation, dt)
-    updateModelAnimations(dt)
+    updateModelAnimations(latestObservation, dt)
   }
   tickWeaponVisual(dt)
 

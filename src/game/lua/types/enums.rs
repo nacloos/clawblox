@@ -376,6 +376,9 @@ pub fn register_enums(lua: &Lua) -> Result<()> {
     let filter_type_table = lua.create_table()?;
     filter_type_table.set("Include", RaycastFilterType::Include)?;
     filter_type_table.set("Exclude", RaycastFilterType::Exclude)?;
+    // Roblox-compatible aliases
+    filter_type_table.set("Whitelist", RaycastFilterType::Include)?;
+    filter_type_table.set("Blacklist", RaycastFilterType::Exclude)?;
     enum_table.set("RaycastFilterType", filter_type_table)?;
 
     let text_x_alignment_table = lua.create_table()?;

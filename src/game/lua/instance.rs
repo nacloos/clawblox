@@ -242,197 +242,9 @@ pub fn attributes_to_json(
     attrs.iter().map(|(k, v)| (k.clone(), v.to_json())).collect()
 }
 
-fn default_animation_length_seconds(animation_id: &str) -> f32 {
-    match animation_id {
-        "local://fire_rifle" => 0.16,
-        "local://fire_shotgun" => 0.22,
-        "local://reload_rifle" => 1.15,
-        "local://reload_shotgun" => 1.35,
-        "local://idle_default" => 0.9,
-        _ => 0.5,
-    }
-}
-
-#[derive(Clone)]
-pub struct AnimationTrack {
-    pub data: Arc<Mutex<AnimationTrackData>>,
-}
-
-pub struct AnimationTrackData {
-    pub animation_id: String,
-    pub owner_animator_id: u64,
-    pub length: f32,
-    pub looped: bool,
-    pub speed: f32,
-    pub time_position: f32,
-    pub is_playing: bool,
-    pub stopped: RBXScriptSignal,
-    pub ended: RBXScriptSignal,
-}
-
-impl AnimationTrack {
-    pub fn new(animation_id: String, owner_animator_id: u64, length: f32) -> Self {
-        Self {
-            data: Arc::new(Mutex::new(AnimationTrackData {
-                animation_id,
-                owner_animator_id,
-                length: length.max(0.01),
-                looped: false,
-                speed: 1.0,
-                time_position: 0.0,
-                is_playing: false,
-                stopped: create_signal("Stopped"),
-                ended: create_signal("Ended"),
-            })),
-        }
-    }
-
-    pub fn tick(&self, lua: &Lua, delta_time: f32) -> Result<()> {
-        let mut fire_stopped = None;
-        let mut fire_ended = None;
-
-        {
-            let mut data = self.data.lock().unwrap();
-            if !data.is_playing {
-                return Ok(());
-            }
-            data.time_position += delta_time.max(0.0) * data.speed.max(0.0);
-            if data.time_position >= data.length {
-                if data.looped {
-                    data.time_position = 0.0;
-                } else {
-                    data.time_position = data.length;
-                    data.is_playing = false;
-                    fire_stopped = Some(data.stopped.clone());
-                    fire_ended = Some(data.ended.clone());
-                }
-            }
-        }
-
-        if let Some(stopped) = fire_stopped {
-            let threads = stopped.fire_as_coroutines(lua, MultiValue::new())?;
-            crate::game::lua::events::track_yielded_threads(lua, threads)?;
-        }
-        if let Some(ended) = fire_ended {
-            let threads = ended.fire_as_coroutines(lua, MultiValue::new())?;
-            crate::game::lua::events::track_yielded_threads(lua, threads)?;
-        }
-        Ok(())
-    }
-}
-
-impl UserData for AnimationTrack {
-    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
-        fields.add_field_method_get("Length", |_, this| Ok(this.data.lock().unwrap().length));
-        fields.add_field_method_get("Looped", |_, this| Ok(this.data.lock().unwrap().looped));
-        fields.add_field_method_set("Looped", |_, this, looped: bool| {
-            this.data.lock().unwrap().looped = looped;
-            Ok(())
-        });
-        fields.add_field_method_get("Speed", |_, this| Ok(this.data.lock().unwrap().speed));
-        fields.add_field_method_set("Speed", |_, this, speed: f32| {
-            this.data.lock().unwrap().speed = speed.max(0.0);
-            Ok(())
-        });
-        fields.add_field_method_get("TimePosition", |_, this| {
-            Ok(this.data.lock().unwrap().time_position)
-        });
-        fields.add_field_method_set("TimePosition", |_, this, time_position: f32| {
-            let mut data = this.data.lock().unwrap();
-            data.time_position = time_position.clamp(0.0, data.length);
-            Ok(())
-        });
-        fields.add_field_method_get("IsPlaying", |_, this| {
-            Ok(this.data.lock().unwrap().is_playing)
-        });
-        fields.add_field_method_get("Stopped", |_, this| {
-            Ok(this.data.lock().unwrap().stopped.clone())
-        });
-        fields.add_field_method_get("Ended", |_, this| Ok(this.data.lock().unwrap().ended.clone()));
-    }
-
-    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("Play", |_, this, (_fade_time, _weight, speed): (Option<f32>, Option<f32>, Option<f32>)| {
-            let mut data = this.data.lock().unwrap();
-            data.time_position = 0.0;
-            data.is_playing = true;
-            if let Some(s) = speed {
-                data.speed = s.max(0.0);
-            }
-            Ok(())
-        });
-        methods.add_method("Stop", |lua, this, _fade_time: Option<f32>| {
-            let stopped = {
-                let mut data = this.data.lock().unwrap();
-                if !data.is_playing {
-                    None
-                } else {
-                    data.is_playing = false;
-                    Some(data.stopped.clone())
-                }
-            };
-            if let Some(stopped) = stopped {
-                let threads = stopped.fire_as_coroutines(lua, MultiValue::new())?;
-                crate::game::lua::events::track_yielded_threads(lua, threads)?;
-            }
-            Ok(())
-        });
-        methods.add_method("AdjustSpeed", |_, this, speed: f32| {
-            this.data.lock().unwrap().speed = speed.max(0.0);
-            Ok(())
-        });
-    }
-}
-
-#[derive(Clone, Default)]
-pub struct AnimationScheduler {
-    pub tracks: Arc<Mutex<Vec<AnimationTrack>>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct AnimationTrackSnapshot {
-    pub animation_id: String,
-    pub owner_animator_id: u64,
-    pub time_position: f32,
-    pub speed: f32,
-    pub looped: bool,
-    pub is_playing: bool,
-}
-
-impl AnimationScheduler {
-    pub fn register(&self, track: AnimationTrack) {
-        self.tracks.lock().unwrap().push(track);
-    }
-
-    pub fn tick(&self, lua: &Lua, delta_time: f32) -> Result<()> {
-        let tracks = self.tracks.lock().unwrap().clone();
-        for track in tracks {
-            track.tick(lua, delta_time)?;
-        }
-        Ok(())
-    }
-
-    pub fn active_tracks_for_animator(&self, animator_id: u64) -> Vec<AnimationTrackSnapshot> {
-        let tracks = self.tracks.lock().unwrap().clone();
-        tracks
-            .into_iter()
-            .filter_map(|track| {
-                let data = track.data.lock().ok()?;
-                if data.owner_animator_id != animator_id || !data.is_playing {
-                    return None;
-                }
-                Some(AnimationTrackSnapshot {
-                    animation_id: data.animation_id.clone(),
-                    owner_animator_id: data.owner_animator_id,
-                    time_position: data.time_position,
-                    speed: data.speed,
-                    looped: data.looped,
-                    is_playing: data.is_playing,
-                })
-            })
-            .collect()
-    }
-}
+pub use super::animation::{
+    default_animation_length_seconds, AnimationScheduler, AnimationTrack, AnimationTrackSnapshot,
+};
 
 #[derive(Debug, Clone)]
 pub struct PartData {
@@ -2600,6 +2412,20 @@ impl UserData for Instance {
             Err(mlua::Error::runtime(
                 "LoadAnimation is supported on Humanoid and Animator",
             ))
+        });
+
+        methods.add_method("GetPlayingAnimationTracks", |lua, this, ()| {
+            if this.class_name() != ClassName::Animator {
+                return Err(mlua::Error::runtime(
+                    "GetPlayingAnimationTracks is supported on Animator",
+                ));
+            }
+            let animator_id = this.id().0;
+            let tracks = lua
+                .app_data_ref::<AnimationScheduler>()
+                .map(|scheduler| scheduler.playing_tracks_for_animator(animator_id))
+                .unwrap_or_default();
+            lua.create_sequence_from(tracks)
         });
 
         methods.add_method("GetPrimaryPartCFrame", |_, this, ()| {
