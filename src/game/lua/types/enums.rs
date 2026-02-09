@@ -228,6 +228,83 @@ impl UserData for RaycastFilterType {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextXAlignmentEnum {
+    Left,
+    Center,
+    Right,
+}
+
+impl TextXAlignmentEnum {
+    pub fn name(&self) -> &'static str {
+        match self {
+            TextXAlignmentEnum::Left => "Left",
+            TextXAlignmentEnum::Center => "Center",
+            TextXAlignmentEnum::Right => "Right",
+        }
+    }
+}
+
+impl UserData for TextXAlignmentEnum {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
+            Ok(format!("Enum.TextXAlignment.{}", this.name()))
+        });
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextYAlignmentEnum {
+    Top,
+    Center,
+    Bottom,
+}
+
+impl TextYAlignmentEnum {
+    pub fn name(&self) -> &'static str {
+        match self {
+            TextYAlignmentEnum::Top => "Top",
+            TextYAlignmentEnum::Center => "Center",
+            TextYAlignmentEnum::Bottom => "Bottom",
+        }
+    }
+}
+
+impl UserData for TextYAlignmentEnum {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
+            Ok(format!("Enum.TextYAlignment.{}", this.name()))
+        });
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontEnum {
+    GothamBold,
+    Gotham,
+    SourceSans,
+    SourceSansBold,
+}
+
+impl FontEnum {
+    pub fn name(&self) -> &'static str {
+        match self {
+            FontEnum::GothamBold => "GothamBold",
+            FontEnum::Gotham => "Gotham",
+            FontEnum::SourceSans => "SourceSans",
+            FontEnum::SourceSansBold => "SourceSansBold",
+        }
+    }
+}
+
+impl UserData for FontEnum {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
+            Ok(format!("Enum.Font.{}", this.name()))
+        });
+    }
+}
+
 pub fn register_enums(lua: &Lua) -> Result<()> {
     let enum_table = lua.create_table()?;
 
@@ -270,6 +347,25 @@ pub fn register_enums(lua: &Lua) -> Result<()> {
     filter_type_table.set("Include", RaycastFilterType::Include)?;
     filter_type_table.set("Exclude", RaycastFilterType::Exclude)?;
     enum_table.set("RaycastFilterType", filter_type_table)?;
+
+    let text_x_alignment_table = lua.create_table()?;
+    text_x_alignment_table.set("Left", "Left")?;
+    text_x_alignment_table.set("Center", "Center")?;
+    text_x_alignment_table.set("Right", "Right")?;
+    enum_table.set("TextXAlignment", text_x_alignment_table)?;
+
+    let text_y_alignment_table = lua.create_table()?;
+    text_y_alignment_table.set("Top", "Top")?;
+    text_y_alignment_table.set("Center", "Center")?;
+    text_y_alignment_table.set("Bottom", "Bottom")?;
+    enum_table.set("TextYAlignment", text_y_alignment_table)?;
+
+    let font_table = lua.create_table()?;
+    font_table.set("GothamBold", "GothamBold")?;
+    font_table.set("Gotham", "Gotham")?;
+    font_table.set("SourceSans", "SourceSans")?;
+    font_table.set("SourceSansBold", "SourceSansBold")?;
+    enum_table.set("Font", font_table)?;
 
     lua.globals().set("Enum", enum_table)?;
 

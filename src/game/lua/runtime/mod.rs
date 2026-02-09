@@ -1,4 +1,5 @@
 use mlua::{Lua, MultiValue, ObjectLike, RegistryKey, Result, Thread, ThreadStatus, UserData, UserDataMethods, Value};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use uuid::Uuid;
@@ -15,6 +16,7 @@ use super::types::register_all_types;
 use crate::game::async_bridge::AsyncBridge;
 
 mod coroutines;
+mod engine;
 mod frame_events;
 
 /// A request to kick a player from the game
@@ -30,6 +32,7 @@ pub struct GameDataModel {
     pub run_service: RunService,
     pub agent_input_service: AgentInputService,
     pub data_store_service: DataStoreService,
+    pub server_script_service: Instance,
     /// Queue of pending kick requests from Lua scripts
     pub kick_requests: Vec<KickRequest>,
 }
@@ -48,6 +51,7 @@ impl GameDataModel {
             run_service: RunService::new(true),
             agent_input_service: AgentInputService::new(),
             data_store_service: DataStoreService::new(game_id, async_bridge),
+            server_script_service: Instance::from_data(InstanceData::new_server_script_service()),
             kick_requests: Vec::new(),
         }
     }
@@ -89,6 +93,10 @@ impl Game {
         self.data_model.lock().unwrap().data_store_service.clone()
     }
 
+    pub fn server_script_service(&self) -> Instance {
+        self.data_model.lock().unwrap().server_script_service.clone()
+    }
+
     /// Queue a kick request for a player (called from Lua Player:Kick())
     pub fn queue_kick(&self, user_id: u64, message: Option<String>) {
         self.data_model
@@ -118,6 +126,9 @@ impl UserData for Game {
                 "DataStoreService" => Ok(Value::UserData(
                     lua.create_userdata(dm.data_store_service.clone())?,
                 )),
+                "ServerScriptService" => {
+                    Ok(Value::UserData(lua.create_userdata(dm.server_script_service.clone())?))
+                }
                 "HttpService" => {
                     drop(dm); // Release lock before creating userdata
                     Ok(Value::UserData(lua.create_userdata(HttpService::new())?))
@@ -131,6 +142,10 @@ impl UserData for Game {
             match key.as_str() {
                 "Workspace" => Ok(Value::UserData(lua.create_userdata(dm.workspace.clone())?)),
                 "Players" => Ok(Value::UserData(lua.create_userdata(dm.players.clone())?)),
+                "RunService" => Ok(Value::UserData(lua.create_userdata(dm.run_service.clone())?)),
+                "ServerScriptService" => Ok(Value::UserData(
+                    lua.create_userdata(dm.server_script_service.clone())?,
+                )),
                 _ => Ok(Value::Nil),
             }
         });
@@ -144,6 +159,8 @@ pub struct LuaRuntime {
     /// Tracks yielded coroutines that need to be resumed (e.g., callbacks waiting on DataStore)
     /// Stored as RegistryKeys to prevent garbage collection
     pending_coroutines: Arc<Mutex<Vec<RegistryKey>>>,
+    /// Tracks scripts that already executed once
+    executed_scripts: Arc<Mutex<HashSet<u64>>>,
     /// Time when the runtime was created, used for task scheduling
     start_time: Instant,
 }
@@ -182,6 +199,9 @@ impl LuaRuntime {
 
         lua.globals().set("Workspace", game.workspace())?;
         lua.globals().set("Players", game.players())?;
+        lua.globals().set("RunService", game.run_service())?;
+        lua.globals()
+            .set("ServerScriptService", game.server_script_service())?;
 
         let print_fn = lua.create_function(|_, args: MultiValue| {
             let msg: Vec<String> = args
@@ -406,11 +426,23 @@ impl LuaRuntime {
         })?;
         lua.globals().set("__clawblox_track_thread", track_fn)?;
 
+        let executed_scripts = Arc::new(Mutex::new(HashSet::new()));
+        let module_cache = Arc::new(Mutex::new(HashMap::new()));
+        let loading_modules = Arc::new(Mutex::new(HashSet::new()));
+
+        Self::register_require(
+            &lua,
+            module_cache.clone(),
+            loading_modules.clone(),
+            pending_coroutines.clone(),
+        )?;
+
         Ok(Self {
             lua,
             game,
             script_loaded: false,
             pending_coroutines,
+            executed_scripts,
             start_time,
         })
     }
@@ -668,6 +700,118 @@ mod tests {
             .get("tickCount")
             .unwrap();
         assert_eq!(tick_count, 10);
+    }
+
+    #[test]
+    fn test_screen_gui_reset_on_spawn_property() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local gui = Instance.new("ScreenGui")
+            _G.defaultResetOnSpawn = gui.ResetOnSpawn
+            gui.ResetOnSpawn = false
+            _G.updatedResetOnSpawn = gui.ResetOnSpawn
+        "#,
+            )
+            .expect("Failed to load script");
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let default_value: bool = globals.get("defaultResetOnSpawn").unwrap();
+        let updated_value: bool = globals.get("updatedResetOnSpawn").unwrap();
+        assert!(default_value, "ScreenGui.ResetOnSpawn should default to true");
+        assert!(
+            !updated_value,
+            "ScreenGui.ResetOnSpawn should be writable and persist value"
+        );
+    }
+
+    #[test]
+    fn test_uicorner_instance_and_corner_radius_property() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local corner = Instance.new("UICorner")
+            _G.defaultCornerScale = corner.CornerRadius.Scale
+            _G.defaultCornerOffset = corner.CornerRadius.Offset
+
+            corner.CornerRadius = UDim.new(0, 12)
+            _G.updatedCornerScale = corner.CornerRadius.Scale
+            _G.updatedCornerOffset = corner.CornerRadius.Offset
+        "#,
+            )
+            .expect("Failed to load script");
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let default_scale: f64 = globals.get("defaultCornerScale").unwrap();
+        let default_offset: i64 = globals.get("defaultCornerOffset").unwrap();
+        let updated_scale: f64 = globals.get("updatedCornerScale").unwrap();
+        let updated_offset: i64 = globals.get("updatedCornerOffset").unwrap();
+
+        assert_eq!(default_scale, 0.0);
+        assert_eq!(default_offset, 0);
+        assert_eq!(updated_scale, 0.0);
+        assert_eq!(updated_offset, 12);
+    }
+
+    #[test]
+    fn test_gui_enum_and_font_properties_for_hud_compat() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local label = Instance.new("TextLabel")
+            label.TextXAlignment = Enum.TextXAlignment.Left
+            label.TextYAlignment = Enum.TextYAlignment.Top
+            label.Font = Enum.Font.GothamBold
+            label.TextStrokeTransparency = 0.35
+
+            _G.xAlign = label.TextXAlignment
+            _G.yAlign = label.TextYAlignment
+            _G.font = label.Font
+            _G.stroke = label.TextStrokeTransparency
+        "#,
+            )
+            .expect("Failed to load script");
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let x_align: String = globals.get("xAlign").unwrap();
+        let y_align: String = globals.get("yAlign").unwrap();
+        let font: String = globals.get("font").unwrap();
+        let stroke: f64 = globals.get("stroke").unwrap();
+
+        assert_eq!(x_align, "Left");
+        assert_eq!(y_align, "Top");
+        assert_eq!(font, "GothamBold");
+        assert!((stroke - 0.35).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_runservice_available_as_global_and_game_property() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            _G.globalConnected = false
+            _G.propertyConnected = false
+
+            if RunService and RunService.Heartbeat then
+                _G.globalConnected = true
+            end
+
+            if game.RunService and game.RunService.Heartbeat then
+                _G.propertyConnected = true
+            end
+        "#,
+            )
+            .expect("Failed to load script");
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let global_connected: bool = globals.get("globalConnected").unwrap();
+        let property_connected: bool = globals.get("propertyConnected").unwrap();
+        assert!(global_connected, "RunService global should be available");
+        assert!(property_connected, "game.RunService should be available");
     }
 
     #[test]
@@ -1576,5 +1720,144 @@ mod tests {
             .get("globalWaitDone")
             .unwrap();
         assert!(done, "global wait() should resume after delay");
+    }
+
+    #[test]
+    fn test_instance_new_unknown_class_errors() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local ok, err = pcall(function()
+                Instance.new("DefinitelyUnknownClass")
+            end)
+            _G.ok = ok
+            _G.err = tostring(err)
+        "#,
+            )
+            .expect("Failed to run script");
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let ok: bool = globals.get("ok").unwrap();
+        let err: String = globals.get("err").unwrap();
+        assert!(!ok);
+        assert!(err.contains("Unknown class"));
+    }
+
+    #[test]
+    fn test_attribute_and_property_changed_signals() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local part = Instance.new("Part")
+            part.Parent = Workspace
+
+            _G.attrCount = 0
+            _G.propCount = 0
+
+            part:GetAttributeChangedSignal("Coins"):Connect(function()
+                _G.attrCount = _G.attrCount + 1
+            end)
+
+            part:GetPropertyChangedSignal("Name"):Connect(function()
+                _G.propCount = _G.propCount + 1
+            end)
+
+            part:SetAttribute("Coins", 1)
+            part.Name = "ChangedName"
+        "#,
+            )
+            .expect("Failed to run script");
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let attr_count: i64 = globals.get("attrCount").unwrap();
+        let prop_count: i64 = globals.get("propCount").unwrap();
+        assert_eq!(attr_count, 1);
+        assert_eq!(prop_count, 1);
+    }
+
+    #[test]
+    fn test_wait_for_child_returns_child() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local folder = Instance.new("Folder")
+            folder.Name = "Container"
+            folder.Parent = Workspace
+
+            _G.childName = nil
+
+            task.spawn(function()
+                local child = folder:WaitForChild("LatePart", 1.0)
+                _G.childName = child and child.Name or "nil"
+            end)
+
+            task.delay(0.05, function()
+                local part = Instance.new("Part")
+                part.Name = "LatePart"
+                part.Parent = folder
+            end)
+        "#,
+            )
+            .expect("Failed to run script");
+
+        std::thread::sleep(std::time::Duration::from_millis(70));
+        runtime.tick(1.0 / 60.0).unwrap();
+        runtime.tick(1.0 / 60.0).unwrap();
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let child_name: String = globals.get("childName").unwrap();
+        assert_eq!(child_name, "LatePart");
+    }
+
+    #[test]
+    fn test_require_caches_module_result() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local m = Instance.new("ModuleScript")
+            m.Source = "_G.runCount = (_G.runCount or 0) + 1; return { value = _G.runCount }"
+
+            local a = require(m)
+            local b = require(m)
+
+            _G.runCount = _G.runCount
+            _G.sameRef = (a == b)
+            _G.value = a.value
+        "#,
+            )
+            .expect("Failed to run script");
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let run_count: i64 = globals.get("runCount").unwrap();
+        let same_ref: bool = globals.get("sameRef").unwrap();
+        let value: i64 = globals.get("value").unwrap();
+
+        assert_eq!(run_count, 1);
+        assert!(same_ref);
+        assert_eq!(value, 1);
+    }
+
+    #[test]
+    fn test_server_script_service_discovers_and_runs_scripts() {
+        let runtime = test_runtime();
+
+        let script = Instance::from_data(InstanceData::new_script("BootScript"));
+        {
+            let mut data = script.data.lock().unwrap();
+            data.script_data.as_mut().unwrap().source = "_G.serviceBootRan = true".to_string();
+        }
+
+        let sss = runtime.game().server_script_service();
+        script.set_parent(Some(&sss));
+
+        runtime.tick(1.0 / 60.0).expect("Failed to tick");
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let ran: bool = globals.get("serviceBootRan").unwrap();
+        assert!(ran);
     }
 }

@@ -1,4 +1,4 @@
-use mlua::{FromLua, Lua, Result, UserData, UserDataFields, UserDataMethods, Value};
+use mlua::{FromLua, Lua, MultiValue, Result, UserData, UserDataFields, UserDataMethods, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -7,7 +7,7 @@ use crate::game::constants::humanoid as humanoid_consts;
 use super::events::{create_signal, RBXScriptSignal};
 use super::runtime::Game;
 use super::services::WorkspaceService;
-use super::types::{CFrame, Color3, Material, PartType, UDim2, Vector3};
+use super::types::{CFrame, Color3, Material, PartType, UDim, UDim2, Vector3};
 
 static INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -42,6 +42,9 @@ pub enum ClassName {
     Players,
     RunService,
     Camera,
+    Script,
+    ModuleScript,
+    ServerScriptService,
     // Constraints
     Weld,
     // GUI classes
@@ -53,6 +56,7 @@ pub enum ClassName {
     TextButton,
     ImageLabel,
     ImageButton,
+    UICorner,
 }
 
 impl ClassName {
@@ -69,6 +73,9 @@ impl ClassName {
             ClassName::Players => "Players",
             ClassName::RunService => "RunService",
             ClassName::Camera => "Camera",
+            ClassName::Script => "Script",
+            ClassName::ModuleScript => "ModuleScript",
+            ClassName::ServerScriptService => "ServerScriptService",
             ClassName::Weld => "Weld",
             ClassName::BillboardGui => "BillboardGui",
             ClassName::PlayerGui => "PlayerGui",
@@ -78,6 +85,7 @@ impl ClassName {
             ClassName::TextButton => "TextButton",
             ClassName::ImageLabel => "ImageLabel",
             ClassName::ImageButton => "ImageButton",
+            ClassName::UICorner => "UICorner",
         }
     }
 
@@ -94,6 +102,9 @@ impl ClassName {
             "Players" => matches!(self, ClassName::Players),
             "RunService" => matches!(self, ClassName::RunService),
             "Camera" => matches!(self, ClassName::Camera),
+            "Script" => matches!(self, ClassName::Script),
+            "ModuleScript" => matches!(self, ClassName::ModuleScript),
+            "ServerScriptService" => matches!(self, ClassName::ServerScriptService),
             // Constraints
             "Constraint" => matches!(self, ClassName::Weld),
             "Weld" => matches!(self, ClassName::Weld),
@@ -129,6 +140,8 @@ impl ClassName {
             "TextButton" => matches!(self, ClassName::TextButton),
             "ImageLabel" => matches!(self, ClassName::ImageLabel),
             "ImageButton" => matches!(self, ClassName::ImageButton),
+            "UICorner" => matches!(self, ClassName::UICorner),
+            "UIComponent" => matches!(self, ClassName::UICorner),
             _ => self.as_str() == class_name,
         }
     }
@@ -182,6 +195,10 @@ pub struct InstanceData {
     pub gui_data: Option<GuiObjectData>,
     pub weld_data: Option<WeldData>,
     pub billboard_gui_data: Option<BillboardGuiData>,
+    pub ui_corner_data: Option<UICornerData>,
+    pub script_data: Option<ScriptData>,
+    pub property_changed_signals: HashMap<String, RBXScriptSignal>,
+    pub attribute_changed_signals: HashMap<String, RBXScriptSignal>,
 
     destroyed: bool,
 }
@@ -347,6 +364,21 @@ impl Default for ModelData {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ScriptData {
+    pub source: String,
+    pub disabled: bool,
+}
+
+impl Default for ScriptData {
+    fn default() -> Self {
+        Self {
+            source: String::new(),
+            disabled: false,
+        }
+    }
+}
+
 /// Data for Weld constraints
 #[derive(Debug, Clone)]
 pub struct WeldData {
@@ -391,6 +423,20 @@ impl Default for BillboardGuiData {
     }
 }
 
+/// Data for UICorner
+#[derive(Debug, Clone, Copy)]
+pub struct UICornerData {
+    pub corner_radius: UDim,
+}
+
+impl Default for UICornerData {
+    fn default() -> Self {
+        Self {
+            corner_radius: UDim::new(0.0, 0),
+        }
+    }
+}
+
 /// Data for GUI objects (Frame, TextLabel, TextButton, etc.)
 #[derive(Debug, Clone)]
 pub struct GuiObjectData {
@@ -414,6 +460,8 @@ pub struct GuiObjectData {
     pub text_color: Option<Color3>,
     pub text_size: Option<f32>,
     pub text_transparency: Option<f32>,
+    pub text_stroke_transparency: Option<f32>,
+    pub font: Option<String>,
     pub text_scaled: bool,
     pub text_x_alignment: TextXAlignment,
     pub text_y_alignment: TextYAlignment,
@@ -427,6 +475,7 @@ pub struct GuiObjectData {
     pub display_order: i32,
     pub ignore_gui_inset: bool,
     pub enabled: bool,
+    pub reset_on_spawn: bool,
 
     // Events (for GuiButton types)
     pub mouse_button1_click: Option<RBXScriptSignal>,
@@ -470,6 +519,8 @@ impl Default for GuiObjectData {
             text_color: None,
             text_size: None,
             text_transparency: None,
+            text_stroke_transparency: None,
+            font: None,
             text_scaled: false,
             text_x_alignment: TextXAlignment::default(),
             text_y_alignment: TextYAlignment::default(),
@@ -479,6 +530,7 @@ impl Default for GuiObjectData {
             display_order: 0,
             ignore_gui_inset: false,
             enabled: true,
+            reset_on_spawn: true,
             mouse_button1_click: None,
             mouse_button1_down: None,
             mouse_button1_up: None,
@@ -501,6 +553,8 @@ impl GuiObjectData {
             text_color: Some(Color3::new(0.0, 0.0, 0.0)),
             text_size: Some(14.0),
             text_transparency: Some(0.0),
+            text_stroke_transparency: Some(1.0),
+            font: Some("SourceSans".to_string()),
             background_transparency: 1.0, // TextLabels default to transparent background
             ..Self::default()
         }
@@ -513,6 +567,8 @@ impl GuiObjectData {
             text_color: Some(Color3::new(0.0, 0.0, 0.0)),
             text_size: Some(14.0),
             text_transparency: Some(0.0),
+            text_stroke_transparency: Some(1.0),
+            font: Some("SourceSans".to_string()),
             mouse_button1_click: Some(create_signal("MouseButton1Click")),
             mouse_button1_down: Some(create_signal("MouseButton1Down")),
             mouse_button1_up: Some(create_signal("MouseButton1Up")),
@@ -554,6 +610,7 @@ impl GuiObjectData {
             enabled: true,
             display_order: 0,
             ignore_gui_inset: false,
+            reset_on_spawn: true,
             background_transparency: 1.0, // ScreenGui is fully transparent
             ..Self::default()
         }
@@ -581,6 +638,10 @@ impl InstanceData {
             gui_data: None,
             weld_data: None,
             billboard_gui_data: None,
+            ui_corner_data: None,
+            script_data: None,
+            property_changed_signals: HashMap::new(),
+            attribute_changed_signals: HashMap::new(),
             destroyed: false,
         }
     }
@@ -621,6 +682,22 @@ impl InstanceData {
         inst
     }
 
+    pub fn new_script(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::Script, name);
+        inst.script_data = Some(ScriptData::default());
+        inst
+    }
+
+    pub fn new_module_script(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::ModuleScript, name);
+        inst.script_data = Some(ScriptData::default());
+        inst
+    }
+
+    pub fn new_server_script_service() -> Self {
+        Self::new(ClassName::ServerScriptService, "ServerScriptService")
+    }
+
     pub fn new_player_gui(name: &str) -> Self {
         Self::new(ClassName::PlayerGui, name)
     }
@@ -628,6 +705,12 @@ impl InstanceData {
     pub fn new_screen_gui(name: &str) -> Self {
         let mut inst = Self::new(ClassName::ScreenGui, name);
         inst.gui_data = Some(GuiObjectData::new_screen_gui());
+        inst
+    }
+
+    pub fn new_uicorner(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::UICorner, name);
+        inst.ui_corner_data = Some(UICornerData::default());
         inst
     }
 
@@ -700,6 +783,26 @@ impl Instance {
         self.data.lock().unwrap().name = name.to_string();
     }
 
+    fn fire_signal(lua: &Lua, signal: &RBXScriptSignal, args: MultiValue) -> Result<()> {
+        let threads = signal.fire_as_coroutines(lua, args)?;
+        crate::game::lua::events::track_yielded_threads(lua, threads)?;
+        Ok(())
+    }
+
+    fn fire_property_changed_if_listening(&self, lua: &Lua, property_name: &str) -> Result<()> {
+        let signal = self
+            .data
+            .lock()
+            .unwrap()
+            .property_changed_signals
+            .get(property_name)
+            .cloned();
+        if let Some(signal) = signal {
+            Self::fire_signal(lua, &signal, MultiValue::new())?;
+        }
+        Ok(())
+    }
+
     pub fn class_name(&self) -> ClassName {
         self.data.lock().unwrap().class_name
     }
@@ -740,6 +843,26 @@ impl Instance {
         } else {
             self.data.lock().unwrap().parent = None;
         }
+    }
+
+    pub fn set_parent_with_lua(&self, parent: Option<&Instance>, lua: &Lua) -> Result<()> {
+        let old_parent = self.parent();
+        self.set_parent(parent);
+
+        if let Some(old_parent) = old_parent {
+            let signal = old_parent.data.lock().unwrap().child_removed.clone();
+            let child_ud = lua.create_userdata(self.clone())?;
+            Self::fire_signal(lua, &signal, MultiValue::from_iter([Value::UserData(child_ud)]))?;
+        }
+
+        if let Some(new_parent) = parent {
+            let signal = new_parent.data.lock().unwrap().child_added.clone();
+            let child_ud = lua.create_userdata(self.clone())?;
+            Self::fire_signal(lua, &signal, MultiValue::from_iter([Value::UserData(child_ud)]))?;
+        }
+
+        self.fire_property_changed_if_listening(lua, "Parent")?;
+        Ok(())
     }
 
     pub fn get_children(&self) -> Vec<Instance> {
@@ -812,7 +935,7 @@ impl Instance {
             child.destroy(lua)?;
         }
 
-        self.set_parent(None);
+        self.set_parent_with_lua(None, lua)?;
         Ok(())
     }
 
@@ -857,6 +980,41 @@ impl Instance {
             .unwrap()
             .attributes
             .insert(name.to_string(), value);
+    }
+
+    pub fn set_attribute_with_lua(&self, lua: &Lua, name: &str, value: AttributeValue) -> Result<()> {
+        self.set_attribute(name, value);
+
+        let (attribute_changed, specific_signal) = {
+            let mut data = self.data.lock().unwrap();
+            let specific = data
+                .attribute_changed_signals
+                .entry(name.to_string())
+                .or_insert_with(|| create_signal(&format!("AttributeChanged_{}", name)))
+                .clone();
+            (data.attribute_changed.clone(), specific)
+        };
+
+        let attr_name = Value::String(lua.create_string(name)?);
+        Self::fire_signal(lua, &attribute_changed, MultiValue::from_iter([attr_name]))?;
+        Self::fire_signal(lua, &specific_signal, MultiValue::new())?;
+        Ok(())
+    }
+
+    pub fn ensure_property_signal(&self, property_name: &str) -> RBXScriptSignal {
+        let mut data = self.data.lock().unwrap();
+        data.property_changed_signals
+            .entry(property_name.to_string())
+            .or_insert_with(|| create_signal(&format!("{}Changed", property_name)))
+            .clone()
+    }
+
+    pub fn ensure_attribute_signal(&self, attr_name: &str) -> RBXScriptSignal {
+        let mut data = self.data.lock().unwrap();
+        data.attribute_changed_signals
+            .entry(attr_name.to_string())
+            .or_insert_with(|| create_signal(&format!("AttributeChanged_{}", attr_name)))
+            .clone()
     }
 
     pub fn get_attribute(&self, name: &str) -> Option<AttributeValue> {
@@ -904,8 +1062,9 @@ impl FromLua for Instance {
 impl UserData for Instance {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_field_method_get("Name", |_, this| Ok(this.name()));
-        fields.add_field_method_set("Name", |_, this, name: String| {
+        fields.add_field_method_set("Name", |lua, this, name: String| {
             this.set_name(&name);
+            this.fire_property_changed_if_listening(lua, "Name")?;
             Ok(())
         });
 
@@ -914,16 +1073,16 @@ impl UserData for Instance {
         });
 
         fields.add_field_method_get("Parent", |_, this| Ok(this.parent()));
-        fields.add_field_method_set("Parent", |_, this, parent: Value| {
+        fields.add_field_method_set("Parent", |lua, this, parent: Value| {
             match parent {
                 Value::Nil => {
-                    this.set_parent(None);
+                    this.set_parent_with_lua(None, lua)?;
                 }
                 Value::UserData(ud) => {
                     if let Ok(inst) = ud.borrow::<Instance>() {
-                        this.set_parent(Some(&inst));
+                        this.set_parent_with_lua(Some(&inst), lua)?;
                     } else if let Ok(ws) = ud.borrow::<WorkspaceService>() {
-                        this.set_parent(Some(&ws.instance));
+                        this.set_parent_with_lua(Some(&ws.instance), lua)?;
                     } else {
                         return Err(mlua::Error::runtime("Parent must be an Instance or nil"));
                     }
@@ -944,6 +1103,34 @@ impl UserData for Instance {
         });
         fields.add_field_method_get("AttributeChanged", |_, this| {
             Ok(this.data.lock().unwrap().attribute_changed.clone())
+        });
+
+        fields.add_field_method_get("Source", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.script_data.as_ref().map(|s| s.source.clone()))
+        });
+        fields.add_field_method_set("Source", |lua, this, source: String| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(script) = &mut data.script_data {
+                script.source = source;
+                drop(data);
+                this.fire_property_changed_if_listening(lua, "Source")?;
+            }
+            Ok(())
+        });
+
+        fields.add_field_method_get("Disabled", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.script_data.as_ref().map(|s| s.disabled))
+        });
+        fields.add_field_method_set("Disabled", |lua, this, disabled: bool| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(script) = &mut data.script_data {
+                script.disabled = disabled;
+                drop(data);
+                this.fire_property_changed_if_listening(lua, "Disabled")?;
+            }
+            Ok(())
         });
 
         // Position: Vector3 for Parts, UDim2 for GUI objects
@@ -1643,6 +1830,36 @@ impl UserData for Instance {
             Ok(())
         });
 
+        // TextStrokeTransparency (TextLabel, TextButton)
+        fields.add_field_method_get("TextStrokeTransparency", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().and_then(|g| g.text_stroke_transparency))
+        });
+        fields.add_field_method_set("TextStrokeTransparency", |_, this, transparency: f32| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                gui.text_stroke_transparency = Some(transparency.clamp(0.0, 1.0));
+            }
+            Ok(())
+        });
+
+        // Font (TextLabel, TextButton)
+        fields.add_field_method_get("Font", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().and_then(|g| g.font.clone()))
+        });
+        fields.add_field_method_set("Font", |_, this, font: Value| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                if let Value::String(s) = font {
+                    if let Ok(font_name) = s.to_str() {
+                        gui.font = Some(font_name.to_string());
+                    }
+                }
+            }
+            Ok(())
+        });
+
         // TextScaled (TextLabel, TextButton)
         fields.add_field_method_get("TextScaled", |_, this| {
             let data = this.data.lock().unwrap();
@@ -1794,6 +2011,32 @@ impl UserData for Instance {
             Ok(())
         });
 
+        // ResetOnSpawn (ScreenGui)
+        fields.add_field_method_get("ResetOnSpawn", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.gui_data.as_ref().map(|g| g.reset_on_spawn))
+        });
+        fields.add_field_method_set("ResetOnSpawn", |_, this, reset_on_spawn: bool| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(gui) = &mut data.gui_data {
+                gui.reset_on_spawn = reset_on_spawn;
+            }
+            Ok(())
+        });
+
+        // CornerRadius (UICorner)
+        fields.add_field_method_get("CornerRadius", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.ui_corner_data.as_ref().map(|c| c.corner_radius))
+        });
+        fields.add_field_method_set("CornerRadius", |_, this, corner_radius: UDim| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(ui_corner) = &mut data.ui_corner_data {
+                ui_corner.corner_radius = corner_radius;
+            }
+            Ok(())
+        });
+
         // MouseButton1Click (GuiButton)
         fields.add_field_method_get("MouseButton1Click", |_, this| {
             let data = this.data.lock().unwrap();
@@ -1862,7 +2105,7 @@ impl UserData for Instance {
             Ok(this.is_descendant_of(&ancestor))
         });
 
-        methods.add_method("SetAttribute", |_, this, (name, value): (String, Value)| {
+        methods.add_method("SetAttribute", |lua, this, (name, value): (String, Value)| {
             let attr_value = match value {
                 Value::Nil => AttributeValue::Nil,
                 Value::Boolean(b) => AttributeValue::Bool(b),
@@ -1880,9 +2123,49 @@ impl UserData for Instance {
                 }
                 _ => return Err(mlua::Error::runtime("Unsupported attribute type")),
             };
-            this.set_attribute(&name, attr_value);
+            this.set_attribute_with_lua(lua, &name, attr_value)?;
             Ok(())
         });
+
+        methods.add_method("GetAttributeChangedSignal", |_, this, name: String| {
+            Ok(this.ensure_attribute_signal(&name))
+        });
+
+        methods.add_method("GetPropertyChangedSignal", |_, this, name: String| {
+            Ok(this.ensure_property_signal(&name))
+        });
+
+        methods.add_async_method(
+            "WaitForChild",
+            |lua, this, (name, timeout): (String, Option<f64>)| {
+                let this = this.clone();
+                async move {
+                    let start = std::time::Instant::now();
+                    let timeout = timeout.map(|t| t.max(0.0));
+                    let name_for_poll = name.clone();
+
+                    let child = futures_util::future::poll_fn(move |_cx| {
+                        if let Some(child) = this.find_first_child(&name_for_poll, false) {
+                            return std::task::Poll::Ready(Some(child));
+                        }
+
+                        if let Some(t) = timeout {
+                            if start.elapsed().as_secs_f64() >= t {
+                                return std::task::Poll::Ready(None);
+                            }
+                        }
+
+                        std::task::Poll::Pending
+                    })
+                    .await;
+
+                    match child {
+                        Some(child) => Ok(Value::UserData(lua.create_userdata(child)?)),
+                        None => Ok(Value::Nil),
+                    }
+                }
+            },
+        );
 
         methods.add_method("GetAttribute", |lua, this, name: String| {
             match this.get_attribute(&name) {
@@ -2112,6 +2395,13 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
                     "Model" => Instance::from_data(InstanceData::new_model("Model")),
                     "Humanoid" => Instance::from_data(InstanceData::new_humanoid("Humanoid")),
                     "Folder" => Instance::new(ClassName::Folder, "Folder"),
+                    "Script" => Instance::from_data(InstanceData::new_script("Script")),
+                    "ModuleScript" => {
+                        Instance::from_data(InstanceData::new_module_script("ModuleScript"))
+                    }
+                    "ServerScriptService" => {
+                        Instance::from_data(InstanceData::new_server_script_service())
+                    }
                     // Constraints
                     "Weld" => Instance::from_data(InstanceData::new_weld("Weld")),
                     // 3D GUI
@@ -2131,7 +2421,8 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
                     "ImageButton" => {
                         Instance::from_data(InstanceData::new_image_button("ImageButton"))
                     }
-                    _ => Instance::new(ClassName::Instance, &class_name),
+                    "UICorner" => Instance::from_data(InstanceData::new_uicorner("UICorner")),
+                    _ => return Err(mlua::Error::runtime(format!("Unknown class '{}'", class_name))),
                 };
 
                 if let Some(parent) = parent {
