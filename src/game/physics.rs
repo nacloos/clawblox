@@ -48,6 +48,12 @@ pub struct CharacterControllerState {
     pub grounded: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct GroundKinematicSupport {
+    pub velocity: [f32; 3],
+    pub distance: f32,
+}
+
 /// Wrapper around Rapier3D physics world for game physics simulation.
 /// Syncs with Lua Workspace parts to simulate physics for non-anchored parts.
 pub struct PhysicsWorld {
@@ -628,6 +634,12 @@ impl PhysicsWorld {
     /// Returns the linear velocity of the kinematic body directly supporting this character.
     /// Used for Roblox-like moving platform carry behavior.
     pub fn get_ground_kinematic_velocity(&self, lua_id: u64, max_distance: f32) -> Option<[f32; 3]> {
+        self.get_ground_kinematic_support(lua_id, max_distance)
+            .map(|support| support.velocity)
+    }
+
+    /// Returns kinematic support data for the surface directly below this character.
+    pub fn get_ground_kinematic_support(&self, lua_id: u64, max_distance: f32) -> Option<GroundKinematicSupport> {
         let state = self.character_controllers.get(&lua_id)?;
         let body = self.rigid_body_set.get(state.body_handle)?;
         let origin = body.translation();
@@ -642,7 +654,7 @@ impl PhysicsWorld {
             .exclude_sensors()
             .groups(InteractionGroups::new(GROUP_CHARACTER, GROUP_STATIC));
 
-        let (hit_collider, _toi) = self.query_pipeline.cast_ray(
+        let (hit_collider, toi) = self.query_pipeline.cast_ray(
             &self.rigid_body_set,
             &self.collider_set,
             &ray,
@@ -659,7 +671,10 @@ impl PhysicsWorld {
         }
 
         let v = ground_body.linvel();
-        Some([v.x, v.y, v.z])
+        Some(GroundKinematicSupport {
+            velocity: [v.x, v.y, v.z],
+            distance: toi,
+        })
     }
 
     /// Moves a character using the kinematic controller for full 3D translation.

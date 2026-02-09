@@ -33,6 +33,9 @@ pub mod physics {
     /// Max downward query distance used to find supporting ground/platform body.
     pub const CHARACTER_GROUND_QUERY_DISTANCE: f32 = 4.0;
 
+    /// Max support gap for "sticky" moving-platform carry when briefly not grounded.
+    pub const CHARACTER_PLATFORM_STICK_DISTANCE: f32 = 0.6;
+
     /// Small epsilon for float comparisons
     pub const EPSILON: f32 = 0.001;
 }

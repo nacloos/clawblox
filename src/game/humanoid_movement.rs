@@ -15,6 +15,7 @@ pub fn build_motion_plan(
     gravity: f32,
     dt: f32,
     grounded: bool,
+    carry_by_platform: bool,
     jump_power: Option<f32>,
     platform_velocity: Option<[f32; 3]>,
 ) -> MotionPlan {
@@ -43,13 +44,13 @@ pub fn build_motion_plan(
         }
     }
 
-    let mut desired_y = if grounded && new_vertical_velocity <= 0.0 {
+    let mut desired_y = if (grounded || carry_by_platform) && new_vertical_velocity <= 0.0 {
         0.0
     } else {
         new_vertical_velocity * dt
     };
 
-    if grounded {
+    if carry_by_platform {
         if let Some(v) = platform_velocity {
             dx += v[0] * dt;
             desired_y += v[1] * dt;

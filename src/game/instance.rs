@@ -17,6 +17,11 @@ use super::touch_events::compute_touch_transitions;
 
 mod tick_pipeline;
 mod observation;
+mod character_controller;
+
+use self::character_controller::{
+    evaluate_ground_controller, sample_ground_sensor, ControllerManagerConfig,
+};
 
 /// Walk speed for player characters (studs per second)
 const WALK_SPEED: f32 = consts::WALK_SPEED;
@@ -994,11 +999,12 @@ impl GameInstance {
             let walk_speed = self.get_humanoid_walk_speed(agent_id).unwrap_or(WALK_SPEED);
             let jump_power = self.consume_humanoid_jump_request(agent_id);
             let gravity = self.physics.gravity.y;
-            let platform_velocity = if grounded {
-                self.physics.get_ground_kinematic_velocity(hrp_id, consts::CHARACTER_GROUND_QUERY_DISTANCE)
-            } else {
-                None
+            let controller_config = ControllerManagerConfig {
+                ground_query_distance: consts::CHARACTER_GROUND_QUERY_DISTANCE,
+                platform_stick_distance: consts::CHARACTER_PLATFORM_STICK_DISTANCE,
             };
+            let ground_sample = sample_ground_sensor(&self.physics, hrp_id, grounded, controller_config);
+            let ground_decision = evaluate_ground_controller(ground_sample, controller_config);
             let motion_plan = build_motion_plan(
                 current_pos,
                 target,
@@ -1007,8 +1013,9 @@ impl GameInstance {
                 gravity,
                 dt,
                 grounded,
+                ground_decision.carry_by_platform,
                 jump_power,
-                platform_velocity,
+                ground_decision.platform_velocity,
             );
 
             let mut new_vertical_velocity = motion_plan.new_vertical_velocity;
