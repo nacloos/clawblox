@@ -8,6 +8,7 @@ local state
 local gameStateFolder = nil
 
 local function setPlayerAttrs(player, pdata)
+    local wstate = pdata.weapons and pdata.weapons[pdata.weaponId] or nil
     player:SetAttribute("Health", pdata.health)
     player:SetAttribute("MaxHealth", pdata.maxHealth)
     player:SetAttribute("Kills", pdata.kills)
@@ -17,6 +18,8 @@ local function setPlayerAttrs(player, pdata)
     player:SetAttribute("Ammo", pdata.ammo)
     player:SetAttribute("AmmoReserve", pdata.ammoReserve)
     player:SetAttribute("IsAlive", pdata.alive)
+    player:SetAttribute("WeaponSlot", pdata.weaponId)
+    player:SetAttribute("IsReloading", wstate and wstate.reloading or false)
 end
 
 local function setGameStateAttrs()

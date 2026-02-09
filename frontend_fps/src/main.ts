@@ -114,6 +114,21 @@ lightPositions.forEach((pos, i) => {
   accentLights.push(light)
 })
 
+const CAMERA_SMOOTHING = 8
+const FOLLOW_DISTANCE = 10
+const FOLLOW_HEIGHT = 4.5
+const MIN_CAMERA_DISTANCE = 5
+const followRaycaster = new THREE.Raycaster()
+const followRayDirection = new THREE.Vector3()
+let lastFollowPlayerPos: THREE.Vector3 | null = null
+const lastFollowForward = new THREE.Vector3(0, 0, -1)
+let followWeapon: THREE.Group | null = null
+let followWeaponSlot: number | null = null
+let followWeaponKick = 0
+let followWeaponMuzzleTime = 0
+let followWeaponMuzzleLight: THREE.PointLight | null = null
+const lastAmmoByPlayer = new Map<string, number>()
+
 function rotationToQuaternion(rot: [[number, number, number], [number, number, number], [number, number, number]]): THREE.Quaternion {
   const m = new THREE.Matrix4()
   m.set(rot[0][0], rot[0][1], rot[0][2], 0, rot[1][0], rot[1][1], rot[1][2], 0, rot[2][0], rot[2][1], rot[2][2], 0, 0, 0, 0, 1)
@@ -178,6 +193,107 @@ function queueKillfeed(text: string): void {
   window.setTimeout(() => node.remove(), 3400)
 }
 
+function buildWeaponModel(slot: number): THREE.Group {
+  const group = new THREE.Group()
+  const addBox = (
+    size: [number, number, number],
+    pos: [number, number, number],
+    color: number,
+    roughness: number,
+    metalness: number,
+    rot?: [number, number, number],
+  ) => {
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(size[0], size[1], size[2]),
+      new THREE.MeshStandardMaterial({ color, roughness, metalness }),
+    )
+    mesh.position.set(pos[0], pos[1], pos[2])
+    if (rot) mesh.rotation.set(rot[0], rot[1], rot[2])
+    mesh.castShadow = true
+    mesh.receiveShadow = true
+    group.add(mesh)
+  }
+  const addBarrel = (len: number, pos: [number, number, number]) => {
+    const barrel = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.045, 0.045, len, 10),
+      new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.2, metalness: 0.9 }),
+    )
+    barrel.rotation.x = Math.PI / 2
+    barrel.position.set(pos[0], pos[1], pos[2])
+    barrel.castShadow = true
+    barrel.receiveShadow = true
+    group.add(barrel)
+  }
+  const muzzleFlash = new THREE.PointLight(0xffaa44, 0, 8)
+  muzzleFlash.position.set(0, 0.0, -1.05)
+  group.add(muzzleFlash)
+  group.userData.muzzleFlash = muzzleFlash
+
+  if (slot === 1) {
+    addBox([0.35, 0.18, 0.62], [0, -0.05, -0.42], 0xcccccc, 0.3, 0.8)
+    addBarrel(0.26, [0, 0.0, -0.68])
+    addBox([0.12, 0.28, 0.12], [0, -0.25, -0.20], 0xcccccc, 0.3, 0.8, [0.21, 0, 0])
+    return group
+  }
+
+  if (slot === 3) {
+    addBox([0.34, 0.14, 1.1], [0, -0.04, -0.50], 0x8b4513, 0.5, 0.3)
+    addBarrel(0.52, [0, 0.01, -0.98])
+    addBox([0.12, 0.26, 0.12], [0, -0.23, -0.26], 0x8b4513, 0.5, 0.3, [0.18, 0, 0])
+    addBox([0.14, 0.12, 0.34], [0, -0.10, -0.72], 0x654321, 0.5, 0.3)
+    return group
+  }
+
+  addBox([0.34, 0.16, 1.05], [0, -0.04, -0.50], 0x444444, 0.3, 0.8)
+  addBarrel(0.46, [0, 0.01, -0.92])
+  addBox([0.12, 0.26, 0.12], [0, -0.24, -0.28], 0x444444, 0.3, 0.8, [0.18, 0, 0])
+  addBox([0.10, 0.22, 0.14], [0, -0.22, -0.50], 0x333333, 0.4, 0.7)
+  addBox([0.16, 0.12, 0.30], [0, -0.02, 0.20], 0x444444, 0.3, 0.8)
+  return group
+}
+
+function syncFollowWeapon(playerPos: THREE.Vector3, forward: THREE.Vector3, attrs: Record<string, unknown> | undefined): void {
+  const slotValue = numberAttr(attrs, ['WeaponSlot', 'weapon_slot', 'WeaponIndex'])
+  const slot = slotValue ? Math.max(1, Math.min(3, Math.round(slotValue))) : 2
+  if (!followWeapon || followWeaponSlot !== slot) {
+    if (followWeapon) {
+      scene.remove(followWeapon)
+      disposeObject(followWeapon)
+    }
+    followWeapon = buildWeaponModel(slot)
+    followWeaponSlot = slot
+    followWeaponMuzzleLight = (followWeapon.userData.muzzleFlash as THREE.PointLight | undefined) ?? null
+    scene.add(followWeapon)
+  }
+
+  const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize()
+  const weaponPos = playerPos.clone()
+    .addScaledVector(forward, 0.75 - 0.28 * followWeaponKick)
+    .addScaledVector(right, 1.05)
+    .add(new THREE.Vector3(0, -0.25, 0))
+  followWeapon.position.copy(weaponPos)
+
+  const lookTarget = weaponPos.clone().addScaledVector(forward, 5)
+  followWeapon.lookAt(lookTarget)
+  if (followWeaponMuzzleLight) {
+    followWeaponMuzzleLight.intensity = followWeaponMuzzleTime > 0 ? 3 : 0
+  }
+}
+
+function triggerWeaponFireVisual(): void {
+  followWeaponKick = 1
+  followWeaponMuzzleTime = 0.05
+}
+
+function tickWeaponVisual(dt: number): void {
+  if (followWeaponKick > 0) {
+    followWeaponKick = Math.max(0, followWeaponKick - dt * 10)
+  }
+  if (followWeaponMuzzleTime > 0) {
+    followWeaponMuzzleTime = Math.max(0, followWeaponMuzzleTime - dt)
+  }
+}
+
 function disposeObject(obj: THREE.Object3D): void {
   obj.traverse((n) => {
     const mesh = n as THREE.Mesh
@@ -238,23 +354,41 @@ function findClip(animations: THREE.AnimationClip[], pattern: RegExp): THREE.Ani
 }
 
 function fitModelToSize(model: THREE.Object3D, size: [number, number, number]): void {
-  const box = new THREE.Box3().setFromObject(model)
-  const source = box.getSize(new THREE.Vector3())
+  let mesh: THREE.Mesh | THREE.SkinnedMesh | null = null
+  model.traverse((obj) => {
+    if (mesh) return
+    const skinned = obj as THREE.SkinnedMesh
+    if (skinned.isSkinnedMesh) {
+      mesh = skinned
+      return
+    }
+    const regular = obj as THREE.Mesh
+    if (regular.isMesh) {
+      mesh = regular
+    }
+  })
+
+  const sourceBox = new THREE.Box3()
+  if (mesh) {
+    mesh.geometry.computeBoundingBox()
+    if (!mesh.geometry.boundingBox) return
+    sourceBox.copy(mesh.geometry.boundingBox)
+  } else {
+    sourceBox.setFromObject(model)
+  }
+
+  const source = sourceBox.getSize(new THREE.Vector3())
   if (source.y <= 0.0001) return
 
+  const center = sourceBox.getCenter(new THREE.Vector3())
   const targetHeight = Math.max(size[1], 0.001)
   const scale = targetHeight / source.y
   model.scale.setScalar(scale)
 
-  const scaledBox = new THREE.Box3().setFromObject(model)
-  const center = scaledBox.getCenter(new THREE.Vector3())
-  const minY = scaledBox.min.y
-  const targetMinY = -targetHeight * 0.5
-
   model.position.set(
-    model.position.x - center.x,
-    model.position.y + (targetMinY - minY),
-    model.position.z - center.z,
+    -center.x * scale,
+    -center.y * scale,
+    -center.z * scale,
   )
 }
 
@@ -471,6 +605,14 @@ function updateHud(obs: SpectatorObservation): void {
   ammoReserveEl.textContent = ammoReserve === null ? '-' : `${Math.round(ammoReserve)}`
   scoreTextEl.textContent = score === null ? '0' : `${Math.round(score)}`
   waveTextEl.textContent = phase ?? obs.game_status
+
+  if (ammoMag !== null) {
+    const prevAmmo = lastAmmoByPlayer.get(target.id)
+    if (prevAmmo !== undefined && ammoMag < prevAmmo) {
+      triggerWeaponFireVisual()
+    }
+    lastAmmoByPlayer.set(target.id, ammoMag)
+  }
 }
 
 function updateKillfeed(obs: SpectatorObservation): void {
@@ -537,22 +679,62 @@ function drawMinimap(obs: SpectatorObservation): void {
 
 function updateCamera(obs: SpectatorObservation, dt: number): void {
   const target = obs.players.find((p) => p.id === selectedPlayerId)
-  if (!target) return
+  if (!target) {
+    if (followWeapon) followWeapon.visible = false
+    return
+  }
 
   const root = target.root_part_id ? obs.entities.find((e) => e.id === target.root_part_id) : null
-
-  const pos = new THREE.Vector3(target.position[0], target.position[1] + 1.6, target.position[2])
+  const playerPos = new THREE.Vector3(target.position[0], target.position[1] + 2, target.position[2])
   const forward = new THREE.Vector3(0, 0, -1)
-  if (root?.rotation) forward.applyQuaternion(rotationToQuaternion(root.rotation))
-  forward.y = 0
+
+  if (root?.rotation) {
+    forward.applyQuaternion(rotationToQuaternion(root.rotation))
+    forward.y = 0
+  } else if (lastFollowPlayerPos) {
+    const movement = playerPos.clone().sub(lastFollowPlayerPos)
+    movement.y = 0
+    if (movement.lengthSq() > 0.0004) {
+      forward.copy(movement.normalize())
+    } else {
+      forward.copy(lastFollowForward)
+    }
+  } else {
+    forward.copy(lastFollowForward)
+  }
   if (forward.lengthSq() < 0.0001) forward.set(0, 0, -1)
   forward.normalize()
+  lastFollowForward.copy(forward)
+  lastFollowPlayerPos = playerPos.clone()
 
-  const desired = pos.clone().addScaledVector(forward, -6.5).add(new THREE.Vector3(0, 2.6, 0))
-  const alpha = 1 - Math.exp(-8 * dt)
-  camera.position.lerp(desired, alpha)
+  syncFollowWeapon(playerPos, forward, target.attributes)
+  if (followWeapon) followWeapon.visible = true
 
-  const lookAt = pos.clone().addScaledVector(forward, 14)
+  const desiredPos = playerPos
+    .clone()
+    .addScaledVector(forward, -FOLLOW_DISTANCE)
+    .add(new THREE.Vector3(0, FOLLOW_HEIGHT, 0))
+
+  followRayDirection.copy(desiredPos).sub(playerPos).normalize()
+  const desiredDistance = desiredPos.distanceTo(playerPos)
+  followRaycaster.set(playerPos, followRayDirection)
+  followRaycaster.far = desiredDistance
+
+  const hits = followRaycaster.intersectObjects(scene.children, true)
+  const validHits = hits.filter((hit) => {
+    const obj = hit.object as THREE.Object3D
+    return (obj as THREE.Mesh).isMesh && obj.visible
+  })
+
+  const cameraTargetPos = desiredPos.clone()
+  if (validHits.length > 0 && validHits[0].distance < desiredDistance) {
+    const safeDistance = Math.max(validHits[0].distance - 1, MIN_CAMERA_DISTANCE)
+    cameraTargetPos.copy(playerPos).addScaledVector(followRayDirection, safeDistance)
+  }
+
+  const alpha = 1 - Math.exp(-CAMERA_SMOOTHING * dt)
+  camera.position.lerp(cameraTargetPos, alpha)
+  const lookAt = playerPos.clone().addScaledVector(forward, 12)
   camera.lookAt(lookAt)
 }
 
@@ -655,6 +837,7 @@ function frame(): void {
     updateCamera(latestObservation, dt)
     updateModelAnimations(dt)
   }
+  tickWeaponVisual(dt)
 
   const t = Date.now() * 0.001
   accentLights.forEach((l, i) => {

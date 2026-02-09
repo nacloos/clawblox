@@ -1,6 +1,15 @@
 local Map = {}
 
 local spawnParts = {}
+local mapScale = 1.0
+
+local function s(value)
+    return value * mapScale
+end
+
+local function sv3(v)
+    return Vector3.new(s(v.X), s(v.Y), s(v.Z))
+end
 
 local function makePart(name, size, position, color, anchored, material, renderRole, renderPresetId, renderPrimitive)
     local part = Instance.new("Part")
@@ -41,8 +50,8 @@ end
 local function addSpawn(position)
     local p = Instance.new("Part")
     p.Name = "SpawnPoint"
-    p.Size = Vector3.new(2.5, 0.6, 2.5)
-    p.Position = position
+    p.Size = Vector3.new(s(2.5), s(0.6), s(2.5))
+    p.Position = sv3(position)
     p.Anchored = true
     p.CanCollide = false
     p.Transparency = 0.5
@@ -62,8 +71,8 @@ end
 local function addWall(x, z, sx, sz, ht)
     local wall = makePart(
         "Wall",
-        Vector3.new(sx, ht, sz),
-        Vector3.new(x, ht / 2, z),
+        Vector3.new(s(sx), s(ht), s(sz)),
+        Vector3.new(s(x), s(ht / 2), s(z)),
         Color3.fromRGB(58, 58, 66),
         true,
         Enum.Material.Concrete,
@@ -77,8 +86,8 @@ end
 local function addCrate(x, z, size, ht)
     local crate = makePart(
         "Crate",
-        Vector3.new(size, ht, size),
-        Vector3.new(x, ht / 2, z),
+        Vector3.new(s(size), s(ht), s(size)),
+        Vector3.new(s(x), s(ht / 2), s(z)),
         Color3.fromRGB(107, 66, 38),
         true,
         Enum.Material.Wood,
@@ -90,8 +99,8 @@ local function addCrate(x, z, size, ht)
     local edgeColor = Color3.fromRGB(68, 68, 68)
     local edge1 = makePart(
         "CrateEdge",
-        Vector3.new(size + 0.02, 0.04, 0.04),
-        Vector3.new(x, ht, z),
+        Vector3.new(s(size + 0.02), s(0.04), s(0.04)),
+        Vector3.new(s(x), s(ht), s(z)),
         edgeColor,
         true,
         Enum.Material.Metal,
@@ -101,8 +110,8 @@ local function addCrate(x, z, size, ht)
     )
     local edge2 = makePart(
         "CrateEdge",
-        Vector3.new(size + 0.02, 0.04, 0.04),
-        Vector3.new(x, 0, z),
+        Vector3.new(s(size + 0.02), s(0.04), s(0.04)),
+        Vector3.new(s(x), 0, s(z)),
         edgeColor,
         true,
         Enum.Material.Metal,
@@ -117,8 +126,8 @@ end
 local function addPillar(x, z, radius, ht)
     local p = makePart(
         "Pillar",
-        Vector3.new(radius * 2, ht, radius * 2),
-        Vector3.new(x, ht / 2, z),
+        Vector3.new(s(radius * 2), s(ht), s(radius * 2)),
+        Vector3.new(s(x), s(ht / 2), s(z)),
         Color3.fromRGB(85, 85, 102),
         true,
         Enum.Material.Metal,
@@ -133,16 +142,17 @@ end
 
 function Map.Build(config)
     spawnParts = {}
+    mapScale = config.MAP_SCALE or 1.0
 
-    local mapSize = config.MAP_SIZE
-    local wallH = config.ARENA_HEIGHT
+    local mapSize = s(config.MAP_SIZE)
+    local wallH = s(config.ARENA_HEIGHT)
     local half = mapSize / 2
-    local wt = 0.5
+    local wt = s(0.5)
 
     local floor = makePart(
         "Floor",
-        Vector3.new(mapSize, 1, mapSize),
-        Vector3.new(0, -0.5, 0),
+        Vector3.new(mapSize, s(1), mapSize),
+        Vector3.new(0, -s(0.5), 0),
         Color3.fromRGB(58, 58, 58),
         true,
         Enum.Material.Slate,
@@ -154,7 +164,7 @@ function Map.Build(config)
 
     local ceiling = makePart(
         "Ceiling",
-        Vector3.new(mapSize, 1, mapSize),
+        Vector3.new(mapSize, s(1), mapSize),
         Vector3.new(0, wallH, 0),
         Color3.fromRGB(42, 42, 48),
         true,
@@ -228,8 +238,8 @@ function Map.Build(config)
     for _, p in ipairs(platforms) do
         makePart(
             "Platform",
-            Vector3.new(p[3], p[4], p[5]),
-            Vector3.new(p[1], p[4] / 2, p[2]),
+            Vector3.new(s(p[3]), s(p[4]), s(p[5])),
+            Vector3.new(s(p[1]), s(p[4] / 2), s(p[2])),
             Color3.fromRGB(42, 42, 48),
             true,
             Enum.Material.Metal,
@@ -241,8 +251,8 @@ function Map.Build(config)
 
     local stripLeft = makePart(
         "TrimRed",
-        Vector3.new(0.1, 0.1, mapSize),
-        Vector3.new(-half + 0.3, 0.5, 0),
+        Vector3.new(s(0.1), s(0.1), mapSize),
+        Vector3.new(-half + s(0.3), s(0.5), 0),
         Color3.fromRGB(255, 34, 34),
         true,
         Enum.Material.Neon,
@@ -252,8 +262,8 @@ function Map.Build(config)
     )
     local stripRight = makePart(
         "TrimBlue",
-        Vector3.new(0.1, 0.1, mapSize),
-        Vector3.new(half - 0.3, 0.5, 0),
+        Vector3.new(s(0.1), s(0.1), mapSize),
+        Vector3.new(half - s(0.3), s(0.5), 0),
         Color3.fromRGB(34, 68, 255),
         true,
         Enum.Material.Neon,
@@ -263,8 +273,8 @@ function Map.Build(config)
     )
     local stripBottom = makePart(
         "TrimRed",
-        Vector3.new(mapSize, 0.1, 0.1),
-        Vector3.new(0, 0.5, -half + 0.3),
+        Vector3.new(mapSize, s(0.1), s(0.1)),
+        Vector3.new(0, s(0.5), -half + s(0.3)),
         Color3.fromRGB(255, 34, 34),
         true,
         Enum.Material.Neon,
@@ -274,8 +284,8 @@ function Map.Build(config)
     )
     local stripTop = makePart(
         "TrimBlue",
-        Vector3.new(mapSize, 0.1, 0.1),
-        Vector3.new(0, 0.5, half - 0.3),
+        Vector3.new(mapSize, s(0.1), s(0.1)),
+        Vector3.new(0, s(0.5), half - s(0.3)),
         Color3.fromRGB(34, 68, 255),
         true,
         Enum.Material.Neon,

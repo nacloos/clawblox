@@ -16,13 +16,18 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import json
 import math
+import os
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import requests
+
+TEST_AGENT_NAME = "fps-arena-cache-check"
 
 
 @dataclass
@@ -31,6 +36,46 @@ class Session:
     api_base: str
     game_id: str | None
     headers: dict[str, str]
+    agent_name: str
+
+
+def key_cache_path() -> Path:
+    env = os.getenv("CLOWBLOX_TEST_PLAYER_KEY_CACHE")
+    if env:
+        return Path(env)
+    return Path.home() / ".clawblox" / "fps_arena_test_player_keys.json"
+
+
+def _cache_key(api_base: str, name: str) -> str:
+    return f"{api_base}::{name}"
+
+
+def load_cached_api_key(api_base: str, name: str) -> str | None:
+    path = key_cache_path()
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None
+
+    key = data.get(_cache_key(api_base, name))
+    return key if isinstance(key, str) and key else None
+
+
+def save_cached_api_key(api_base: str, name: str, api_key: str) -> None:
+    path = key_cache_path()
+    data: dict[str, str] = {}
+    try:
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+
+    data[_cache_key(api_base, name)] = api_key
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True))
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,8 +86,8 @@ def parse_args() -> argparse.Namespace:
         help="Base URL (local: http://localhost:8080, hosted: .../api/v1)",
     )
     p.add_argument("--game-id", default=None, help="Required for /api/v1 mode")
-    p.add_argument("--name", default="fps-arena-test", help="Agent name")
     p.add_argument("--api-key", default=None, help="Existing API key for /api/v1 mode")
+    p.add_argument("--num-players", type=int, default=1, help="Number of bot players to join")
     p.add_argument("--duration", type=float, default=45.0, help="Run duration in seconds")
     p.add_argument("--tick", type=float, default=0.35, help="Loop interval in seconds")
     return p.parse_args()
@@ -75,21 +120,27 @@ def register_agent(api_base: str, name: str) -> str:
     return key
 
 
-def create_platform_session(args: argparse.Namespace, api_base: str) -> Session:
+def create_platform_session(args: argparse.Namespace, api_base: str, agent_name: str) -> Session:
     if not args.game_id:
         raise RuntimeError("--game-id is required when --api-base ends with /api/v1")
 
-    api_key = args.api_key or register_agent(api_base, args.name)
+    api_key = args.api_key or load_cached_api_key(api_base, agent_name)
+    if api_key:
+        print(f"[auth] using cached api_key for name={agent_name}")
+    else:
+        api_key = register_agent(api_base, agent_name)
+        save_cached_api_key(api_base, agent_name, api_key)
+        print(f"[auth] cached api_key for name={agent_name} at {key_cache_path()}")
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
     r = requests.post(f"{api_base}/games/{args.game_id}/join", headers=headers, timeout=10)
     r.raise_for_status()
     print("[join] joined game (/api/v1 mode)")
 
-    return Session(mode="platform", api_base=api_base, game_id=args.game_id, headers=headers)
+    return Session(mode="platform", api_base=api_base, game_id=args.game_id, headers=headers, agent_name=agent_name)
 
 
-def create_local_session(args: argparse.Namespace, api_base: str) -> Session:
+def create_local_session(args: argparse.Namespace, api_base: str, agent_name: str) -> Session:
     # `clawblox run` starts a daemon and may take a moment before endpoints respond.
     deadline = time.time() + 12.0
     last_err: str | None = None
@@ -104,7 +155,7 @@ def create_local_session(args: argparse.Namespace, api_base: str) -> Session:
     else:
         raise RuntimeError(f"local server not ready at {api_base}: {last_err or 'timeout'}")
 
-    r = requests.post(f"{api_base}/join", params={"name": args.name}, timeout=10)
+    r = requests.post(f"{api_base}/join", params={"name": agent_name}, timeout=10)
     r.raise_for_status()
     body = r.json()
 
@@ -115,7 +166,7 @@ def create_local_session(args: argparse.Namespace, api_base: str) -> Session:
     headers = {"X-Session": token, "Content-Type": "application/json"}
     print(f"[join] joined local game session={token[:8]}...")
 
-    return Session(mode="local", api_base=api_base, game_id=args.game_id, headers=headers)
+    return Session(mode="local", api_base=api_base, game_id=args.game_id, headers=headers, agent_name=agent_name)
 
 
 def leave_game(sess: Session) -> None:
@@ -183,54 +234,72 @@ def choose_fire_target(obs: dict[str, Any], self_id: str | None) -> list[float] 
     return best
 
 
+def choose_forced_fire_target(obs: dict[str, Any], phase_t: float) -> list[float]:
+    player = obs.get("player") or {}
+    my_pos = player.get("position") or [0.0, 2.0, 0.0]
+    x = float(my_pos[0]) + math.cos(phase_t * 1.3) * 24.0
+    z = float(my_pos[2]) + math.sin(phase_t * 1.3) * 24.0
+    return [x, float(my_pos[1]) + 1.0, z]
+
+
 def main() -> int:
     args = parse_args()
     api_base = normalize_base(args.api_base)
     mode = detect_mode(api_base)
     print(f"[mode] {mode} ({api_base})")
+    sessions: list[Session] = []
 
     try:
-        if mode == "platform":
-            sess = create_platform_session(args, api_base)
-        else:
-            sess = create_local_session(args, api_base)
+        num_players = max(1, int(args.num_players))
+        names = [TEST_AGENT_NAME] if num_players == 1 else [f"{TEST_AGENT_NAME}-{i + 1}" for i in range(num_players)]
+        for name in names:
+            if mode == "platform":
+                sessions.append(create_platform_session(args, api_base, name))
+            else:
+                sessions.append(create_local_session(args, api_base, name))
 
         start = time.time()
-        last_fire = 0.0
-        self_id: str | None = None
+        last_fire_by_idx = [0.0 for _ in sessions]
+        self_ids: list[str | None] = [None for _ in sessions]
 
         while time.time() - start < args.duration:
             now = time.time()
-            obs = observe(sess)
+            for i, sess in enumerate(sessions):
+                obs = observe(sess)
 
-            player = obs.get("player") or {}
-            if self_id is None:
-                pid = player.get("id")
-                if isinstance(pid, str):
-                    self_id = pid
+                player = obs.get("player") or {}
+                if self_ids[i] is None:
+                    pid = player.get("id")
+                    if isinstance(pid, str):
+                        self_ids[i] = pid
 
-            pos = player.get("position") or [0.0, 0.0, 0.0]
-            hp = player.get("health")
-            attrs = player.get("attributes") or {}
-            kills = attrs.get("Kills")
-            deaths = attrs.get("Deaths")
-            score = attrs.get("Score")
-            tick = obs.get("tick")
+                pos = player.get("position") or [0.0, 0.0, 0.0]
+                hp = player.get("health")
+                attrs = player.get("attributes") or {}
+                kills = attrs.get("Kills")
+                deaths = attrs.get("Deaths")
+                score = attrs.get("Score")
+                tick = obs.get("tick")
 
-            print(
-                f"[obs] tick={tick} hp={hp} pos=({pos[0]:.1f},{pos[1]:.1f},{pos[2]:.1f}) "
-                f"kills={kills} deaths={deaths} score={score}"
-            )
+                print(
+                    f"[obs][{sess.agent_name}] tick={tick} hp={hp} pos=({pos[0]:.1f},{pos[1]:.1f},{pos[2]:.1f}) "
+                    f"kills={kills} deaths={deaths} score={score}"
+                )
 
-            move_target = choose_move_target(now - start)
-            send_input(sess, "MoveTo", {"position": move_target})
+                move_target = choose_move_target((now - start) + (i * 0.9))
+                send_input(sess, "MoveTo", {"position": move_target})
 
-            if now - last_fire >= 0.25:
-                fire_target = choose_fire_target(obs, self_id)
-                if fire_target is not None:
-                    send_input(sess, "Fire", {"target": fire_target})
-                    print(f"[fire] target=({fire_target[0]:.1f},{fire_target[1]:.1f},{fire_target[2]:.1f})")
-                last_fire = now
+                if now - last_fire_by_idx[i] >= 0.25:
+                    fire_target = choose_fire_target(obs, self_ids[i])
+                    if fire_target is None and i == 0:
+                        # Lead bot: force continuous firing so spectator has visible shot cues.
+                        fire_target = choose_forced_fire_target(obs, now - start)
+                    if fire_target is not None:
+                        send_input(sess, "Fire", {"target": fire_target})
+                        print(
+                            f"[fire][{sess.agent_name}] target=({fire_target[0]:.1f},{fire_target[1]:.1f},{fire_target[2]:.1f})"
+                        )
+                    last_fire_by_idx[i] = now
 
             time.sleep(args.tick)
 
@@ -249,7 +318,8 @@ def main() -> int:
         return 1
     finally:
         try:
-            leave_game(sess)  # type: ignore[name-defined]
+            for s in sessions:  # type: ignore[name-defined]
+                leave_game(s)
         except Exception:
             pass
 

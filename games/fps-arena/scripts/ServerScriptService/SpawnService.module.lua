@@ -127,4 +127,14 @@ function SpawnService.TryProcessRespawns(now)
     end
 end
 
+-- Weapon visuals are frontend-authored in Three.js; server remains authority for gameplay state.
+function SpawnService.SetWeaponSlot(_player, _slot)
+end
+
+function SpawnService.RemovePlayer(_player)
+end
+
+function SpawnService.Tick()
+end
+
 return SpawnService

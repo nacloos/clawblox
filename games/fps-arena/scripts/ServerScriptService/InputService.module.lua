@@ -52,6 +52,16 @@ function InputService.Init(deps)
             combatService.HandleFire(player, data)
             return
         end
+
+        if inputType == "Reload" then
+            combatService.HandleReload(player)
+            return
+        end
+
+        if inputType == "SwitchWeapon" or inputType == "WeaponSwitch" then
+            combatService.HandleSwitchWeapon(player, data)
+            return
+        end
     end)
 end
 

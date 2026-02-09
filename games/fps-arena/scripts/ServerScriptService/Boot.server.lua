@@ -61,10 +61,17 @@ local function onPlayerAdded(player)
         end
     end)
 
-    RoundService.StartIfReady()
+    local round = State.GetRound()
+    if round.phase == "active" then
+        -- Late join during an active match: spawn immediately so inputs are accepted.
+        SpawnService.SpawnPlayer(player)
+    else
+        RoundService.StartIfReady()
+    end
 end
 
 local function onPlayerRemoving(player)
+    SpawnService.RemovePlayer(player)
     State.RemovePlayer(player)
 end
 
@@ -77,6 +84,8 @@ end
 
 RunService.Heartbeat:Connect(function(_dt)
     local now = tick()
+    SpawnService.Tick()
+    CombatService.Tick(now)
     RoundService.Tick(now)
     ReplicateService.Tick()
 end)

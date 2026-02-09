@@ -46,12 +46,124 @@ local function findCharacterFromPart(part)
     return nil
 end
 
-local function canFire(pdata, now)
+local function weaponDef(id)
+    return config.WEAPONS[id]
+end
+
+local function weaponState(pdata)
+    return pdata.weapons and pdata.weapons[pdata.weaponId] or nil
+end
+
+local function syncWeaponFields(pdata)
+    state.SyncWeaponFields(pdata, config)
+end
+
+local function canFire(pdata, wdef, now)
     if not pdata.alive then
         return false
     end
-    if now - pdata.lastShotAt < config.FIRE_COOLDOWN then
+    local wstate = weaponState(pdata)
+    if not wstate or wstate.reloading then
         return false
+    end
+    if now - pdata.lastShotAt < wdef.fire_rate then
+        return false
+    end
+    return true
+end
+
+local function startReload(pdata, now)
+    local wdef = weaponDef(pdata.weaponId)
+    local wstate = weaponState(pdata)
+    if not wdef or not wstate then
+        return
+    end
+    if wstate.reloading then
+        return
+    end
+    if wstate.reserve <= 0 then
+        return
+    end
+    if wstate.mag >= wdef.mag_size then
+        return
+    end
+    wstate.reloading = true
+    wstate.reloadEndAt = now + wdef.reload_time
+    syncWeaponFields(pdata)
+end
+
+local function finishReload(pdata)
+    local wdef = weaponDef(pdata.weaponId)
+    local wstate = weaponState(pdata)
+    if not wdef or not wstate then
+        return
+    end
+    if not wstate.reloading then
+        return
+    end
+    local needed = wdef.mag_size - wstate.mag
+    local take = math.min(needed, wstate.reserve)
+    wstate.mag = wstate.mag + take
+    wstate.reserve = wstate.reserve - take
+    wstate.reloading = false
+    wstate.reloadEndAt = nil
+    syncWeaponFields(pdata)
+end
+
+local function switchWeapon(player, pdata, slot)
+    local id = math.floor(slot)
+    if id < 1 or not weaponDef(id) or not pdata.weapons[id] then
+        return
+    end
+    local prev = weaponState(pdata)
+    if prev then
+        prev.reloading = false
+        prev.reloadEndAt = nil
+    end
+    pdata.weaponId = id
+    syncWeaponFields(pdata)
+    spawnService.SetWeaponSlot(player, pdata.weaponId)
+end
+
+local function randomSpreadDirection(baseDir, spread)
+    local upAxis = Vector3.new(0, 1, 0)
+    local right = baseDir:Cross(upAxis)
+    if right.Magnitude < 0.001 then
+        right = baseDir:Cross(Vector3.new(1, 0, 0))
+    end
+    right = right.Unit
+    local up = right:Cross(baseDir).Unit
+
+    local jitterX = (math.random() - 0.5) * spread
+    local jitterY = (math.random() - 0.5) * spread
+    return (baseDir + right * jitterX + up * jitterY).Unit
+end
+
+local function damageVictim(victim, attackerPdata, wdef)
+    local vdata = state.GetPlayer(victim.player)
+    if not vdata or not vdata.alive then
+        return false
+    end
+
+    local before = vdata.health
+    if before <= 0 then
+        return false
+    end
+
+    local damage = math.floor(wdef.damage * (1 + math.random() * 0.2))
+    local newHealth = math.max(0, before - damage)
+    vdata.health = newHealth
+    victim.humanoid.Health = newHealth
+
+    if newHealth <= 0 then
+        vdata.alive = false
+        vdata.deaths = vdata.deaths + 1
+
+        attackerPdata.kills = attackerPdata.kills + 1
+        attackerPdata.score = attackerPdata.score + (wdef.kill_score or 100)
+
+        spawnService.ScheduleRespawn(victim.player, tick())
+        roundService.OnElimination(victim.attackerPlayer, victim.player)
     end
     return true
 end
@@ -61,6 +173,41 @@ function CombatService.Init(deps)
     state = deps.state
     spawnService = deps.spawnService
     roundService = deps.roundService
+end
+
+function CombatService.HandleSwitchWeapon(player, payload)
+    local pdata = state.GetPlayer(player)
+    if not pdata then
+        return
+    end
+
+    local slot = nil
+    if type(payload) == "number" then
+        slot = payload
+    elseif type(payload) == "table" then
+        slot = payload.weapon or payload.slot or payload.index
+    end
+    if type(slot) ~= "number" then
+        return
+    end
+    switchWeapon(player, pdata, slot)
+end
+
+function CombatService.HandleReload(player)
+    local pdata = state.GetPlayer(player)
+    if not pdata then
+        return
+    end
+    startReload(pdata, tick())
+end
+
+function CombatService.Tick(now)
+    state.ForEachPlayer(function(_, pdata)
+        local wstate = weaponState(pdata)
+        if wstate and wstate.reloading and wstate.reloadEndAt and now >= wstate.reloadEndAt then
+            finishReload(pdata)
+        end
+    end)
 end
 
 function CombatService.HandleFire(player, payload)
@@ -74,8 +221,19 @@ function CombatService.HandleFire(player, payload)
         return
     end
 
+    local wdef = weaponDef(pdata.weaponId)
+    local wstate = weaponState(pdata)
+    if not wdef or not wstate then
+        return
+    end
+
     local now = tick()
-    if not canFire(pdata, now) then
+    if not canFire(pdata, wdef, now) then
+        return
+    end
+
+    if wstate.mag <= 0 then
+        startReload(pdata, now)
         return
     end
 
@@ -97,58 +255,37 @@ function CombatService.HandleFire(player, payload)
         return
     end
 
-    local shotDist = math.min(dist, config.FIRE_RANGE)
-    local direction = toTarget.Unit * shotDist
-
     pdata.lastShotAt = now
+    wstate.mag = wstate.mag - 1
+    syncWeaponFields(pdata)
 
-    local hit = Workspace:Raycast(origin, direction)
-    if not hit or not hit.Instance then
-        return
-    end
+    local baseDir = toTarget.Unit
+    local pellets = wdef.pellets or 1
 
-    local hitCharacter = findCharacterFromPart(hit.Instance)
-    if not hitCharacter then
-        return
-    end
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+    rayParams.FilterDescendantsInstances = { character }
 
-    if hitCharacter == character then
-        return
-    end
-
-    local victim = Players:GetPlayerFromCharacter(hitCharacter)
-    if not victim then
-        return
-    end
-
-    local vdata = state.GetPlayer(victim)
-    if not vdata or not vdata.alive then
-        return
-    end
-
-    local victimHumanoid = getHumanoid(hitCharacter)
-    if not victimHumanoid then
-        return
-    end
-
-    local before = vdata.health
-    if before <= 0 then
-        return
-    end
-
-    local newHealth = math.max(0, before - config.FIRE_DAMAGE)
-    vdata.health = newHealth
-    victimHumanoid.Health = newHealth
-
-    if newHealth <= 0 then
-        vdata.alive = false
-        vdata.deaths = vdata.deaths + 1
-
-        pdata.kills = pdata.kills + 1
-        pdata.score = pdata.score + 100
-
-        spawnService.ScheduleRespawn(victim, now)
-        roundService.OnElimination(player, victim)
+    for _ = 1, pellets do
+        local dir = randomSpreadDirection(baseDir, wdef.spread or 0)
+        local rayDir = dir * config.FIRE_RANGE
+        local hit = Workspace:Raycast(origin, rayDir, rayParams)
+        if hit and hit.Instance then
+            local hitCharacter = findCharacterFromPart(hit.Instance)
+            if hitCharacter and hitCharacter ~= character then
+                local victimPlayer = Players:GetPlayerFromCharacter(hitCharacter)
+                if victimPlayer then
+                    local victimHumanoid = getHumanoid(hitCharacter)
+                    if victimHumanoid then
+                        damageVictim({
+                            player = victimPlayer,
+                            humanoid = victimHumanoid,
+                            attackerPlayer = player,
+                        }, pdata, wdef)
+                    end
+                end
+            end
+        end
     end
 end
 
