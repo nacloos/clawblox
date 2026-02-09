@@ -309,6 +309,8 @@ pub struct HumanoidData {
     pub jump_height: f32,
     pub auto_rotate: bool,
     pub hip_height: f32,
+    pub move_direction: Vector3,
+    pub running_speed: f32,
     /// One-shot jump request consumed by game movement update
     pub jump_requested: bool,
     /// Movement target set by MoveTo()
@@ -318,6 +320,7 @@ pub struct HumanoidData {
 
     pub died: RBXScriptSignal,
     pub health_changed: RBXScriptSignal,
+    pub running: RBXScriptSignal,
     pub move_to_finished: RBXScriptSignal,
 }
 
@@ -331,11 +334,14 @@ impl Default for HumanoidData {
             jump_height: humanoid_consts::DEFAULT_JUMP_HEIGHT,
             auto_rotate: true,
             hip_height: humanoid_consts::DEFAULT_HIP_HEIGHT,
+            move_direction: Vector3::zero(),
+            running_speed: 0.0,
             jump_requested: false,
             move_to_target: None,
             cancel_move_to: false,
             died: create_signal("Died"),
             health_changed: create_signal("HealthChanged"),
+            running: create_signal("Running"),
             move_to_finished: create_signal("MoveToFinished"),
         }
     }
@@ -1543,6 +1549,11 @@ impl UserData for Instance {
             Ok(())
         });
 
+        fields.add_field_method_get("MoveDirection", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.humanoid_data.as_ref().map(|h| h.move_direction))
+        });
+
         fields.add_field_method_get("Died", |_, this| {
             let data = this.data.lock().unwrap();
             Ok(data.humanoid_data.as_ref().map(|h| h.died.clone()))
@@ -1551,6 +1562,11 @@ impl UserData for Instance {
         fields.add_field_method_get("HealthChanged", |_, this| {
             let data = this.data.lock().unwrap();
             Ok(data.humanoid_data.as_ref().map(|h| h.health_changed.clone()))
+        });
+
+        fields.add_field_method_get("Running", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.humanoid_data.as_ref().map(|h| h.running.clone()))
         });
 
         fields.add_field_method_get("MoveToFinished", |_, this| {

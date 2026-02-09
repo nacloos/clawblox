@@ -628,6 +628,16 @@ impl GameInstance {
                         part_data.position.z = pos[2];
                         part_data.cframe.position = part_data.position;
                     }
+                    if let Some(handle) = self.physics.get_handle(lua_id) {
+                        if let Some(rot) = self.physics.get_rotation_matrix(handle) {
+                            part_data.cframe.rotation = rot;
+                        }
+                    }
+                    if let Some(vel) = self.physics.get_character_velocity(lua_id) {
+                        part_data.velocity.x = vel[0];
+                        part_data.velocity.y = vel[1];
+                        part_data.velocity.z = vel[2];
+                    }
                 } else if !part_data.anchored {
                     if let Some(handle) = self.physics.get_handle(lua_id) {
                         // Update position from physics
@@ -1255,6 +1265,21 @@ impl GameInstance {
         }
         None
     }
+
+    /// Reads model local yaw correction (degrees) from instance attributes.
+    /// Supports both `ModelYawOffsetDeg` and `model_yaw_offset_deg`.
+    fn extract_model_yaw_offset_deg(
+        attributes: &std::collections::HashMap<String, AttributeValue>,
+    ) -> Option<f32> {
+        for key in ["ModelYawOffsetDeg", "model_yaw_offset_deg"] {
+            if let Some(AttributeValue::Number(value)) = attributes.get(key) {
+                if value.is_finite() {
+                    return Some(*value as f32);
+                }
+            }
+        }
+        None
+    }
 }
 
 // ============================================================================
@@ -1470,6 +1495,8 @@ pub struct SpectatorEntity {
     pub pickup_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_yaw_offset_deg: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub billboard_gui: Option<BillboardGuiJson>,
 }

@@ -3,6 +3,7 @@ use uuid::Uuid;
 use super::super::constants::humanoid as humanoid_consts;
 use super::super::constants::physics as consts;
 use super::super::humanoid_movement::{build_motion_plan, resolve_vertical_velocity_after_move};
+use super::super::lua::types::Vector3;
 use super::character_controller::{
     evaluate_ground_controller, sample_ground_sensor, ControllerManagerConfig,
 };
@@ -177,6 +178,17 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
         } else if move_to_timed_out {
             fire_move_to_finished(instance, agent_id, false);
         }
+
+        if let Some(vel) = instance.physics.get_character_velocity(hrp_id) {
+            update_humanoid_locomotion_state(instance, agent_id, vel);
+            if humanoid_auto_rotate_enabled(instance, agent_id) {
+                let speed = (vel[0] * vel[0] + vel[2] * vel[2]).sqrt();
+                if speed > 0.2 {
+                    let yaw = yaw_from_horizontal_velocity(vel);
+                    instance.physics.set_character_yaw(hrp_id, yaw);
+                }
+            }
+        }
     }
 }
 
@@ -188,6 +200,12 @@ fn warn_once_move_to(instance: &GameInstance, agent_id: Uuid, reason: &str) {
             *count += 1;
         }
     }
+}
+
+/// Converts world-space horizontal velocity to character yaw so local forward (-Z)
+/// aligns with movement direction in the shared physics/render convention.
+fn yaw_from_horizontal_velocity(vel: [f32; 3]) -> f32 {
+    (-vel[0]).atan2(-vel[2])
 }
 
 #[cfg(test)]
@@ -247,4 +265,112 @@ fn fire_move_to_finished(instance: &mut GameInstance, agent_id: Uuid, reached: b
     if let Err(e) = result {
         instance.handle_lua_error("MoveToFinished event", &e);
     }
+}
+
+fn update_humanoid_locomotion_state(
+    instance: &mut GameInstance,
+    agent_id: Uuid,
+    velocity: [f32; 3],
+) {
+    let result: Result<(), mlua::Error> = (|| {
+        let Some(user_id) = instance.players.get(&agent_id).copied() else {
+            return Ok(());
+        };
+        let Some(runtime) = &instance.lua_runtime else {
+            return Ok(());
+        };
+        let Some(player) = runtime.players().get_player_by_user_id(user_id) else {
+            return Ok(());
+        };
+
+        let horizontal_speed = (velocity[0] * velocity[0] + velocity[2] * velocity[2]).sqrt();
+        let move_direction = if horizontal_speed > 1e-4 {
+            Vector3::new(velocity[0] / horizontal_speed, 0.0, velocity[2] / horizontal_speed)
+        } else {
+            Vector3::zero()
+        };
+
+        let (running_signal, should_fire_running) = {
+            let player_data = player.data.lock().unwrap();
+            let Some(character) = player_data
+                .player_data
+                .as_ref()
+                .and_then(|p| p.character.as_ref())
+                .and_then(|w| w.upgrade())
+            else {
+                return Ok(());
+            };
+            drop(player_data);
+
+            let char_data = character.lock().unwrap();
+            let mut signal = None;
+            let mut fire_running = false;
+            for child_ref in &char_data.children {
+                let mut child_data = child_ref.lock().unwrap();
+                if let Some(humanoid) = &mut child_data.humanoid_data {
+                    let prev_speed = humanoid.running_speed;
+                    humanoid.move_direction = move_direction;
+                    humanoid.running_speed = horizontal_speed;
+
+                    let crossed_motion_threshold = (prev_speed <= 0.05 && horizontal_speed > 0.05)
+                        || (prev_speed > 0.05 && horizontal_speed <= 0.05);
+                    let speed_changed = (prev_speed - horizontal_speed).abs() >= 0.1;
+                    if crossed_motion_threshold || speed_changed {
+                        signal = Some(humanoid.running.clone());
+                        fire_running = true;
+                    }
+                    break;
+                }
+            }
+            (signal, fire_running)
+        };
+
+        if should_fire_running {
+            if let Some(signal) = running_signal {
+                let lua = runtime.lua();
+                let threads = signal.fire_as_coroutines(
+                    lua,
+                    mlua::MultiValue::from_iter([mlua::Value::Number(horizontal_speed as f64)]),
+                )?;
+                super::super::lua::events::track_yielded_threads(lua, threads)?;
+            }
+        }
+
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        instance.handle_lua_error("Humanoid Running event", &e);
+    }
+}
+
+fn humanoid_auto_rotate_enabled(instance: &GameInstance, agent_id: Uuid) -> bool {
+    let Some(user_id) = instance.players.get(&agent_id).copied() else {
+        return true;
+    };
+    let Some(runtime) = &instance.lua_runtime else {
+        return true;
+    };
+    let Some(player) = runtime.players().get_player_by_user_id(user_id) else {
+        return true;
+    };
+    let player_data = player.data.lock().unwrap();
+    let Some(character) = player_data
+        .player_data
+        .as_ref()
+        .and_then(|p| p.character.as_ref())
+        .and_then(|w| w.upgrade())
+    else {
+        return true;
+    };
+    drop(player_data);
+
+    let char_data = character.lock().unwrap();
+    for child_ref in &char_data.children {
+        let child_data = child_ref.lock().unwrap();
+        if let Some(humanoid) = &child_data.humanoid_data {
+            return humanoid.auto_rotate;
+        }
+    }
+    true
 }

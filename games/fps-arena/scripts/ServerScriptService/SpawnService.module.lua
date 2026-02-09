@@ -73,6 +73,11 @@ function SpawnService.ApplyCharacterStats(player, character)
         return
     end
 
+    local root = getRoot(character)
+    if root then
+        root:SetAttribute("ModelYawOffsetDeg", 180)
+    end
+
     local humanoid = getHumanoid(character)
     if humanoid then
         humanoid.MaxHealth = pdata.maxHealth

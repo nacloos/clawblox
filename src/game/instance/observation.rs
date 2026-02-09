@@ -210,6 +210,7 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
                     health: None,
                     pickup_type: None,
                     model_url: GameInstance::extract_model_url(&data.attributes),
+                    model_yaw_offset_deg: GameInstance::extract_model_yaw_offset_deg(&data.attributes),
                     billboard_gui,
                 });
             }

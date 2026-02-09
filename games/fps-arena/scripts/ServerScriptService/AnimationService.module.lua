@@ -37,7 +37,8 @@ local TRACK_CONFIG = {
         fade_out = 0.06,
     },
 }
-local MOVE_THRESHOLD = 0.6
+local WALK_START_SPEED = 1.2
+local WALK_STOP_SPEED = 0.7
 
 local function getHumanoid(character)
     if not character then
@@ -196,10 +197,14 @@ local function updateLocomotionForPlayer(player, pstate)
 
     local v = root.Velocity
     local horizontalSpeed = math.sqrt(v.X * v.X + v.Z * v.Z)
-    if horizontalSpeed > MOVE_THRESHOLD then
+    if pstate.locomotion == "walk" then
+        if horizontalSpeed <= WALK_STOP_SPEED then
+            setLocomotionState(player, pstate, "idle")
+        end
+        return
+    end
+    if horizontalSpeed >= WALK_START_SPEED then
         setLocomotionState(player, pstate, "walk")
-    else
-        setLocomotionState(player, pstate, "idle")
     end
 end
 

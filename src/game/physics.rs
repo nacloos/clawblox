@@ -575,6 +575,27 @@ impl PhysicsWorld {
         Some([pos.x, pos.y, pos.z])
     }
 
+    /// Gets current linear velocity of a character controller body.
+    pub fn get_character_velocity(&self, lua_id: u64) -> Option<[f32; 3]> {
+        let state = self.character_controllers.get(&lua_id)?;
+        let body = self.rigid_body_set.get(state.body_handle)?;
+        let vel = body.linvel();
+        Some([vel.x, vel.y, vel.z])
+    }
+
+    /// Sets the facing yaw for a character controller body.
+    pub fn set_character_yaw(&mut self, lua_id: u64, yaw: f32) -> bool {
+        let Some(state) = self.character_controllers.get(&lua_id) else {
+            return false;
+        };
+        let Some(body) = self.rigid_body_set.get_mut(state.body_handle) else {
+            return false;
+        };
+        let rot = UnitQuaternion::from_euler_angles(0.0, yaw, 0.0);
+        body.set_next_kinematic_rotation(rot);
+        true
+    }
+
     /// Gets the character controller state (for checking grounded, target, etc.)
     pub fn get_character_state(&self, lua_id: u64) -> Option<&CharacterControllerState> {
         self.character_controllers.get(&lua_id)

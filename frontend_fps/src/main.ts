@@ -37,6 +37,7 @@ interface SpectatorEntity {
   size: [number, number, number]
   render: RenderSpec
   model_url?: string
+  model_yaw_offset_deg?: number
 }
 
 interface SpectatorObservation {
@@ -505,7 +506,13 @@ function createEntityObject(entity: SpectatorEntity): THREE.Object3D {
     root.userData.entityId = entity.id
     const fallback = createPrimitiveEntityMesh(entity)
     root.add(fallback)
-    void attachModelToEntityRoot(root, entity.model_url, entity.size, entity.render)
+    void attachModelToEntityRoot(
+      root,
+      entity.model_url,
+      entity.size,
+      entity.render,
+      entity.model_yaw_offset_deg,
+    )
     return root
   }
   return createPrimitiveEntityMesh(entity)
@@ -599,6 +606,7 @@ async function attachModelToEntityRoot(
   modelUrl: string,
   size: [number, number, number],
   render: RenderSpec,
+  yawOffsetDeg?: number,
 ): Promise<void> {
   try {
     const loaded = await loadModelTemplate(modelUrl)
@@ -613,6 +621,7 @@ async function attachModelToEntityRoot(
     }
     const clone = cloneSkeleton(loaded.scene)
     fitModelToSize(clone, size)
+    clone.rotation.y = THREE.MathUtils.degToRad(yawOffsetDeg ?? 0)
     setShadowFlags(clone, render.casts_shadow, render.receives_shadow)
     root.add(clone)
 
