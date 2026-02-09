@@ -167,6 +167,10 @@ def find_entities_by_name(obs: dict, name: str) -> list[dict]:
     entities = obs.get("world", {}).get("entities", [])
     return [e for e in entities if e.get("name") == name]
 
+def get_entity_attr(entity: dict, key: str, default=None):
+    attrs = entity.get("attributes") or {}
+    return attrs.get(key, default)
+
 
 # ---------------------------------------------------------------------------
 # Test routines — each walks to a zone and checks observations
@@ -493,21 +497,130 @@ def test_kinematic_push(headers: dict):
                 print(f"  Elevator frame {i}: player_y={p[1]:.1f} elevator_y={elev_y}")
             time.sleep(0.5)
 
-    # Stand near spinner
+    # Stand near spinner and verify it actually pushes us
     print("  Standing near spinner...")
-    target = [-35, 3, -20]
+    target = [-34, 3, -20]
     pos = wait_until_near(headers, target)
     if pos:
-        for i in range(5):
+        # Stop path-following so collision response isn't masked by MoveTo corrections.
+        send_input(headers, "Stop")
+        time.sleep(0.2)
+
+        start_xz = None
+        max_disp = 0.0
+        for i in range(12):
             obs = observe(headers)
             if obs:
                 p = obs["player"]["position"]
+                if start_xz is None:
+                    start_xz = [p[0], p[2]]
+                else:
+                    disp = distance_xz([p[0], 0, p[2]], [start_xz[0], 0, start_xz[1]])
+                    max_disp = max(max_disp, disp)
                 spinners = find_entities_by_name(obs, "Spinner")
                 spin_rot = spinners[0].get("rotation", "?") if spinners else "?"
                 print(f"  Spinner frame {i}: player=({p[0]:.1f}, {p[2]:.1f}) rotation={spin_rot}")
             time.sleep(0.5)
 
+        if max_disp > 1.0:
+            print(f"  PASS Spinner: pushed player by {max_disp:.2f} studs")
+        else:
+            print(f"  FAIL Spinner: no meaningful push observed (max_disp={max_disp:.2f})")
+
     print("  CHECK: Pusher should move player, elevator should lift, spinner should sweep (Phase 6)")
+
+def test_raycast_parity(headers: dict):
+    """Test 8: Verify rotated thin-part raycast passes via published status attributes."""
+    print("\n--- TEST 8: Raycast Parity (X=60, Z=-20) ---")
+
+    target = [60, 3, -20]
+    pos = wait_until_near(headers, target, threshold=6.5, timeout=20.0)
+    if not pos:
+        print("  SKIP: Could not reach raycast parity zone")
+        return
+
+    passes = 0
+    samples = 0
+    for i in range(8):
+        obs = observe(headers)
+        if not obs:
+            time.sleep(0.3)
+            continue
+
+        status_parts = find_entities_by_name(obs, "RaycastStatus")
+        thin_bar = find_entities_by_name(obs, "RaycastThinBar")
+        if not status_parts:
+            print(f"  Frame {i}: RaycastStatus not found")
+            time.sleep(0.3)
+            continue
+
+        status = status_parts[0]
+        hit_name = get_entity_attr(status, "RaycastHitName", "missing")
+        hit_dist = get_entity_attr(status, "RaycastDistance", -1)
+        passed = bool(get_entity_attr(status, "RaycastPass", False))
+        bar_rot = thin_bar[0].get("rotation") if thin_bar else None
+
+        samples += 1
+        passes += 1 if passed else 0
+        print(
+            f"  Frame {i}: hit={hit_name} dist={hit_dist} pass={passed} "
+            f"bar_rot={'present' if bar_rot else 'missing'}"
+        )
+        time.sleep(0.3)
+
+    if samples == 0:
+        print("  FAIL: no raycast status samples collected")
+    elif passes == samples:
+        print(f"  PASS: raycast parity stable ({passes}/{samples} passing samples)")
+    else:
+        print(f"  FAIL: raycast parity unstable ({passes}/{samples} passing samples)")
+
+
+def test_overlap_parity(headers: dict):
+    """Test 9: Verify GetPartsInPart + OverlapParams parity via published status attributes."""
+    print("\n--- TEST 9: GetPartsInPart Parity (X=80, Z=-20) ---")
+
+    target = [80, 3, -20]
+    pos = wait_until_near(headers, target, threshold=6.5, timeout=20.0)
+    if not pos:
+        print("  SKIP: Could not reach overlap parity zone")
+        return
+
+    passes = 0
+    samples = 0
+    for i in range(8):
+        obs = observe(headers)
+        if not obs:
+            time.sleep(0.3)
+            continue
+
+        status_parts = find_entities_by_name(obs, "OverlapStatus")
+        if not status_parts:
+            print(f"  Frame {i}: OverlapStatus not found")
+            time.sleep(0.3)
+            continue
+
+        status = status_parts[0]
+        has_default = bool(get_entity_attr(status, "OverlapHasDefault", False))
+        has_no_query = bool(get_entity_attr(status, "OverlapHasNoQuery", True))
+        has_red_solid = bool(get_entity_attr(status, "OverlapHasRedSolid", False))
+        has_red_trigger = bool(get_entity_attr(status, "OverlapHasRedTrigger", True))
+        passed = bool(get_entity_attr(status, "OverlapPass", False))
+
+        samples += 1
+        passes += 1 if passed else 0
+        print(
+            f"  Frame {i}: pass={passed} default={has_default} noQuery={has_no_query} "
+            f"redSolid={has_red_solid} redTrigger={has_red_trigger}"
+        )
+        time.sleep(0.3)
+
+    if samples == 0:
+        print("  FAIL: no overlap status samples collected")
+    elif passes == samples:
+        print(f"  PASS: overlap parity stable ({passes}/{samples} passing samples)")
+    else:
+        print(f"  FAIL: overlap parity unstable ({passes}/{samples} passing samples)")
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +635,8 @@ TESTS = {
     "5": ("jump", test_jump),
     "6": ("kinematic", test_kinematic_push),
     "7": ("jump_simple", test_jump_simple),
+    "8": ("raycast", test_raycast_parity),
+    "9": ("overlap", test_overlap_parity),
 }
 
 # Build reverse lookup: name -> (number, func)
