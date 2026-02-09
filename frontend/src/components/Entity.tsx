@@ -57,6 +57,24 @@ function sanitizeModelUrl(url?: string): string | null {
   return null
 }
 
+function isFireAnimationId(animationId: string): boolean {
+  return /(^|[:/_-])fire([:_-]|$)/i.test(animationId)
+}
+
+function getEntityFireState(stateBuffer: StateBuffer, entityId: number): { isFiring: boolean; ownerName: string | null } {
+  const latest = stateBuffer.getLatest()
+  if (!latest) return { isFiring: false, ownerName: null }
+
+  for (const player of latest.players.values()) {
+    if (player.root_part_id !== entityId) continue
+    const active = player.active_animations ?? []
+    const hasFireTrack = active.some((track) => track.is_playing && isFireAnimationId(track.animation_id))
+    return { isFiring: hasFireTrack, ownerName: player.name }
+  }
+
+  return { isFiring: false, ownerName: null }
+}
+
 // Convert Roblox rotation matrix to Three.js Quaternion
 function rotationToQuaternion(rot: [[number, number, number], [number, number, number], [number, number, number]]): THREE.Quaternion {
   const matrix = new THREE.Matrix4()
@@ -448,6 +466,39 @@ function PartEntity({ entityId, stateBuffer }: EntityProps) {
   const materialProps = getMaterialProps(initialEntity?.material, color)
   const shape = initialEntity?.shape || 'Block'
   const modelUrl = sanitizeModelUrl(initialEntity?.model_url)
+
+  // Pre-build wedge geometry (must be outside switch to satisfy Rules of Hooks)
+  const wedgeGeometry = useMemo(() => {
+    if (shape !== 'Wedge') return null
+    const hx = size[0] / 2, hy = size[1] / 2, hz = size[2] / 2
+    const geo = new THREE.BufferGeometry()
+    const v = (x: number, y: number, z: number) => [x, y, z]
+    // 6 unique vertices of the wedge prism
+    const BLB = v(-hx, -hy, -hz) // bottom-left-back
+    const BRB = v( hx, -hy, -hz) // bottom-right-back
+    const BLF = v(-hx, -hy,  hz) // bottom-left-front
+    const BRF = v( hx, -hy,  hz) // bottom-right-front
+    const TLB = v(-hx,  hy, -hz) // top-left-back
+    const TLF = v(-hx,  hy,  hz) // top-left-front
+    const positions = new Float32Array([
+      // Bottom quad
+      ...BLB, ...BRB, ...BRF,
+      ...BLB, ...BRF, ...BLF,
+      // Back triangle
+      ...BLB, ...TLB, ...BRB,
+      // Front triangle
+      ...BLF, ...BRF, ...TLF,
+      // Left quad (vertical wall)
+      ...BLB, ...BLF, ...TLF,
+      ...BLB, ...TLF, ...TLB,
+      // Slope quad
+      ...BRB, ...TLB, ...TLF,
+      ...BRB, ...TLF, ...BRF,
+    ])
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    geo.computeVertexNormals()
+    return geo
+  }, [shape, size[0], size[1], size[2]])
   const [billboardGui, setBillboardGui] = useState<BillboardGui | null>(initialEntity?.billboard_gui ?? null)
   const billboardGuiRef = useRef<BillboardGui | null>(billboardGui)
 
@@ -507,9 +558,8 @@ function PartEntity({ entityId, stateBuffer }: EntityProps) {
 
       case 'Wedge':
         return (
-          <mesh {...refProp} castShadow receiveShadow>
-            <boxGeometry args={size as [number, number, number]} />
-            <meshStandardMaterial {...materialProps} />
+          <mesh {...refProp} castShadow receiveShadow geometry={wedgeGeometry!}>
+            <meshStandardMaterial {...materialProps} side={THREE.DoubleSide} />
           </mesh>
         )
 
