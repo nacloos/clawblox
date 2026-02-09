@@ -31,6 +31,9 @@ RESET_BUTTON_REACH_THRESHOLD = 3.0
 TRIGGER_REACH_THRESHOLD = 2.0
 KILL_APPROACH_THRESHOLD = 6.5
 JUMP_ZONE_REACH_THRESHOLD = 4.5
+JUMP_APPROACH_THRESHOLD = 1.5
+JUMP_PLATFORM_REACH_XZ = 2.2
+JUMP_ATTEMPT_TIMEOUT = 6.0
 
 
 def distance_xz(a: list, b: list) -> float:
@@ -351,27 +354,73 @@ def test_touched_events(headers: dict):
 
 
 def test_jump(headers: dict):
-    """Test 5: Attempt to jump onto platforms."""
+    """Test 5: Verify jump reachability for low/med/high platforms."""
     print("\n--- TEST 5: Jump Platforms (X=40) ---")
-    target = [40, 3, 0]
+    # Stage near the jump lane before attempting climbs.
+    target = [36, 3, 0]
 
-    pos = wait_until_near(headers, target, threshold=JUMP_ZONE_REACH_THRESHOLD)
+    pos = wait_until_near(headers, target, threshold=JUMP_APPROACH_THRESHOLD)
     if not pos:
         print("  SKIP: Could not reach jump zone")
         return
 
-    # Try jumping
-    for height_label, z in [("Low (Y=2)", 0), ("Med (Y=5)", 10), ("High (Y=8)", 20)]:
-        print(f"  Jumping toward {height_label} platform...")
-        send_input(headers, "Jump")
-        move_to(headers, [40, 10, z])
-        time.sleep(2)
-        obs = observe(headers)
-        if obs:
-            p = obs["player"]["position"]
-            print(f"  Position after jump: ({p[0]:.1f}, {p[1]:.1f}, {p[2]:.1f})")
+    results = []
+    for height_label, platform_center_y, z in [
+        ("Low (Y=2)", 2.0, 0.0),
+        ("Med (Y=5)", 5.0, 10.0),
+        ("High (Y=8)", 8.0, 20.0),
+    ]:
+        print(f"  Attempting {height_label} platform...")
+        # HumanoidRootPart sits about 2.6 studs above the surface when standing.
+        required_hrp_y = platform_center_y + 2.2
+        start = time.time()
+        success = False
+        best_y = -999.0
+        best_dist = float("inf")
+        last_pos = None
+        jump_cooldown = 0.0
 
-    print("  CHECK: Player should reach low/med platforms with jump (Phase 5)")
+        while time.time() - start < JUMP_ATTEMPT_TIMEOUT:
+            obs = observe(headers)
+            if not obs:
+                time.sleep(0.2)
+                continue
+
+            p = obs["player"]["position"]
+            last_pos = p
+            dist = distance_xz(p, [40.0, p[1], z])
+            best_dist = min(best_dist, dist)
+            best_y = max(best_y, p[1])
+
+            move_to(headers, [40, 10, z])
+
+            # Keep issuing jump while approaching target, this avoids one-frame timing misses.
+            now = time.time()
+            if dist < 5.0 and now >= jump_cooldown:
+                send_input(headers, "Jump")
+                jump_cooldown = now + 0.35
+
+            if dist <= JUMP_PLATFORM_REACH_XZ and p[1] >= required_hrp_y:
+                success = True
+                break
+
+            time.sleep(0.2)
+
+        if success:
+            print(f"  PASS {height_label}: reached top (pos={last_pos})")
+        else:
+            print(
+                f"  FAIL {height_label}: best_y={best_y:.2f} "
+                f"best_dist_xz={best_dist:.2f} last_pos={last_pos}"
+            )
+        results.append((height_label, success))
+
+        # Re-stage before next platform attempt.
+        wait_until_near(headers, [36, 3, z], threshold=JUMP_APPROACH_THRESHOLD, timeout=8.0)
+
+    passed = sum(1 for _, ok in results if ok)
+    print(f"  RESULT: {passed}/3 platforms reached")
+    print("  CHECK: Low/med should be reachable; high depends on exact jump tuning")
 
 
 def test_kinematic_push(headers: dict):
