@@ -859,8 +859,8 @@ impl GameInstance {
         }
     }
 
-    /// Syncs Lua humanoid MoveTo targets to physics character controllers
-    fn sync_humanoid_move_targets(&mut self) {
+    /// Sync control targets from script state into physics character controllers.
+    fn sync_controller_targets(&mut self) {
         controller_runtime::sync_move_targets(self);
     }
 

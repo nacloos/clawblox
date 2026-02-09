@@ -21,8 +21,8 @@ pub(super) fn run_tick_phases(instance: &mut GameInstance, dt: f32) {
         }
     }
 
-    // Sync Lua humanoid MoveTo targets to physics character controllers.
-    instance.sync_humanoid_move_targets();
+    // Sync script control targets to physics character controllers.
+    instance.sync_controller_targets();
 
     // Update query pipeline before character movement so move_shape sees current collisions.
     instance
@@ -45,4 +45,3 @@ pub(super) fn run_tick_phases(instance: &mut GameInstance, dt: f32) {
     // Process weld constraints (update Part1 positions based on Part0).
     instance.process_welds();
 }
-
