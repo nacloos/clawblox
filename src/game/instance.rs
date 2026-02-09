@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use super::async_bridge::AsyncBridge;
 use super::constants::physics as consts;
+use super::constants::humanoid as humanoid_consts;
 use super::humanoid_movement::{build_motion_plan, resolve_vertical_velocity_after_move};
 use super::lua::instance::{
     attributes_to_json, AttributeValue, ClassName, Instance, TextXAlignment, TextYAlignment,
@@ -14,9 +15,10 @@ use super::lua::LuaRuntime;
 use super::physics::PhysicsWorld;
 use super::touch_events::compute_touch_transitions;
 
+mod tick_pipeline;
+
 /// Walk speed for player characters (studs per second)
 const WALK_SPEED: f32 = consts::WALK_SPEED;
-
 /// Default AFK timeout in seconds (5 minutes)
 const DEFAULT_AFK_TIMEOUT_SECS: u64 = 300;
 
@@ -336,45 +338,10 @@ impl GameInstance {
             self.check_afk_players();
         }
 
-        // Sync Lua workspace gravity to physics
-        self.sync_gravity();
-
-        // Sync new/changed Lua parts to physics (skip character-controlled parts)
-        self.sync_lua_to_physics();
-
-        // Process agent inputs (fire InputReceived events)
-        // Do this before syncing MoveTo targets so movement can apply in the same tick.
-        if let Some(runtime) = &self.lua_runtime {
-            if let Err(e) = runtime.process_agent_inputs() {
-                self.handle_lua_error("Failed to process agent inputs", &e);
-                if self.halted_error.is_some() {
-                    return;
-                }
-            }
+        tick_pipeline::run_tick_phases(self, dt);
+        if self.halted_error.is_some() {
+            return;
         }
-
-        // Sync Lua humanoid MoveTo targets to physics character controllers
-        self.sync_humanoid_move_targets();
-
-        // Update query pipeline BEFORE character movement so move_shape has current collision state
-        // This is necessary because the previous tick's physics.step moved the character,
-        // and move_shape needs to see the updated positions.
-        self.physics.query_pipeline.update(&self.physics.collider_set);
-
-        // Update character controller movement
-        self.update_character_movement(dt);
-
-        // Step physics simulation
-        self.physics.step(dt);
-
-        // Detect touch overlaps and fire Touched/TouchEnded events
-        self.fire_touch_events();
-
-        // Sync physics results back to Lua (for Anchored=false parts and characters)
-        self.sync_physics_to_lua();
-
-        // Process weld constraints (update Part1 positions based on Part0)
-        self.process_welds();
 
         // Run Lua Heartbeat
         if let Some(runtime) = &self.lua_runtime {
@@ -1006,14 +973,20 @@ impl GameInstance {
 
         for (agent_id, hrp_id) in agent_hrp_pairs {
             // Get current position, target, and vertical velocity
-            let (current_pos, target, vertical_velocity, grounded) = {
+            let (current_pos, target, vertical_velocity, grounded, move_to_elapsed) = {
                 let Some(state) = self.physics.get_character_state(hrp_id) else {
                     continue;
                 };
                 let Some(pos) = self.physics.get_character_position(hrp_id) else {
                     continue;
                 };
-                (pos, state.target_position, state.vertical_velocity, state.grounded)
+                (
+                    pos,
+                    state.target_position,
+                    state.vertical_velocity,
+                    state.grounded,
+                    state.move_to_elapsed,
+                )
             };
 
             // Look up the humanoid's walk_speed from Lua instance data
@@ -1021,7 +994,7 @@ impl GameInstance {
             let jump_power = self.consume_humanoid_jump_request(agent_id);
             let gravity = self.physics.gravity.y;
             let platform_velocity = if grounded {
-                self.physics.get_ground_kinematic_velocity(hrp_id, 4.0)
+                self.physics.get_ground_kinematic_velocity(hrp_id, consts::CHARACTER_GROUND_QUERY_DISTANCE)
             } else {
                 None
             };
@@ -1038,8 +1011,20 @@ impl GameInstance {
             );
 
             let mut new_vertical_velocity = motion_plan.new_vertical_velocity;
+            let mut new_move_to_elapsed = move_to_elapsed;
             if motion_plan.reached_move_to {
                 self.physics.set_character_target(hrp_id, None);
+                new_move_to_elapsed = 0.0;
+            }
+
+            let mut move_to_timed_out = false;
+            if target.is_some() && !motion_plan.reached_move_to {
+                new_move_to_elapsed += dt;
+                if new_move_to_elapsed >= humanoid_consts::MOVE_TO_TIMEOUT_SECS {
+                    self.physics.set_character_target(hrp_id, None);
+                    new_move_to_elapsed = 0.0;
+                    move_to_timed_out = true;
+                }
             }
 
             if let Some(movement) = self.physics.move_character(hrp_id, motion_plan.desired, dt) {
@@ -1053,9 +1038,12 @@ impl GameInstance {
 
             if let Some(state) = self.physics.get_character_state_mut(hrp_id) {
                 state.vertical_velocity = new_vertical_velocity;
+                state.move_to_elapsed = new_move_to_elapsed;
             }
             if motion_plan.reached_move_to {
                 self.fire_humanoid_move_to_finished(agent_id, true);
+            } else if move_to_timed_out {
+                self.fire_humanoid_move_to_finished(agent_id, false);
             }
         }
     }
@@ -2249,6 +2237,109 @@ mod tests {
 
         let last_reached = get_trigger_bool_attr(&instance, "SignalState", "LastReached");
         assert!(!last_reached, "LastReached should be false after cancel");
+    }
+
+    #[test]
+    fn test_moveto_finished_false_on_timeout_when_blocked() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(r#"
+            local AgentInputService = game:GetService("AgentInputService")
+            local Players = game:GetService("Players")
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(300, 1, 300)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            local wall = Instance.new("Part")
+            wall.Name = "Wall"
+            wall.Size = Vector3.new(2, 20, 120)
+            wall.Position = Vector3.new(5, 10, 0)
+            wall.Anchored = true
+            wall.Parent = Workspace
+
+            local state = Instance.new("Part")
+            state.Name = "SignalState"
+            state.Size = Vector3.new(2, 2, 2)
+            state.Position = Vector3.new(0, 2, 40)
+            state.Anchored = true
+            state.Parent = Workspace
+            state:SetAttribute("TimeoutCount", 0)
+            state:SetAttribute("ReachedCount", 0)
+
+            local function bindHumanoid(player)
+                local character = player.Character
+                if not character then return end
+                local humanoid = character:FindFirstChild("Humanoid")
+                if not humanoid then return end
+                humanoid.MoveToFinished:Connect(function(reached)
+                    if reached then
+                        state:SetAttribute("ReachedCount", (state:GetAttribute("ReachedCount") or 0) + 1)
+                    else
+                        state:SetAttribute("TimeoutCount", (state:GetAttribute("TimeoutCount") or 0) + 1)
+                    end
+                end)
+            end
+
+            Players.PlayerAdded:Connect(function(player)
+                player.CharacterAdded:Connect(function()
+                    bindHumanoid(player)
+                end)
+                bindHumanoid(player)
+            end)
+
+            if AgentInputService then
+                AgentInputService.InputReceived:Connect(function(player, inputType, data)
+                    if inputType == "MoveTo" and data and data.position then
+                        local humanoid = player.Character and player.Character:FindFirstChild("Humanoid")
+                        if humanoid then
+                            local pos = data.position
+                            humanoid:MoveTo(Vector3.new(pos[1], pos[2], pos[3]))
+                        end
+                    end
+                end)
+            end
+        "#);
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "TestPlayer"));
+        let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+        let user_id = *instance.players.get(&agent_id).unwrap();
+
+        for _ in 0..20 {
+            instance.tick();
+        }
+
+        let start = instance.physics.get_character_position(hrp_id).unwrap();
+        instance.queue_agent_input(
+            user_id,
+            "MoveTo".to_string(),
+            serde_json::json!({"position": [20.0, start[1], 0.0]}),
+        );
+
+        // Wait longer than MoveTo timeout window.
+        for _ in 0..540 {
+            instance.tick();
+        }
+
+        let timeout_count = get_trigger_attr(&instance, "SignalState", "TimeoutCount");
+        let reached_count = get_trigger_attr(&instance, "SignalState", "ReachedCount");
+        let final_pos = instance.physics.get_character_position(hrp_id).unwrap();
+
+        assert!(
+            timeout_count >= 1.0,
+            "MoveToFinished(false) should fire on timeout when blocked. timeout_count={}",
+            timeout_count
+        );
+        assert_eq!(reached_count, 0.0, "Blocked target should not report reached");
+        assert!(
+            final_pos[0] < 6.0,
+            "Character should remain blocked near wall. final_pos={:?}",
+            final_pos
+        );
     }
 
     #[test]

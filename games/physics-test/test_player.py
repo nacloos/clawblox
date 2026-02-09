@@ -26,6 +26,12 @@ API_BASE = os.getenv("CLAWBLOX_API_URL", "http://localhost:8080/api/v1")
 GAME_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"  # Physics Test
 KEYS_CACHE = Path("/tmp/clawblox_physics_keys.json")
 
+# Test movement tolerances (XZ distance in studs)
+RESET_BUTTON_REACH_THRESHOLD = 3.0
+TRIGGER_REACH_THRESHOLD = 2.0
+KILL_APPROACH_THRESHOLD = 6.5
+JUMP_ZONE_REACH_THRESHOLD = 4.5
+
 
 def distance_xz(a: list, b: list) -> float:
     return ((a[0] - b[0]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
@@ -232,7 +238,7 @@ def test_shapes(headers: dict):
     # Walk to reset button to respawn slope objects
     reset_btn = [20, 3, 24]
     print("  Walking to reset button...")
-    pos = wait_until_near(headers, reset_btn, threshold=3.0)
+    pos = wait_until_near(headers, reset_btn, threshold=RESET_BUTTON_REACH_THRESHOLD)
     if not pos:
         print("  SKIP: Could not reach reset button")
         return
@@ -293,7 +299,7 @@ def test_touched_events(headers: dict):
     # Walk through the trigger zone
     print("  Walking through trigger zone...")
     target = [0, 3, -30]
-    pos = wait_until_near(headers, target, threshold=2.0)
+    pos = wait_until_near(headers, target, threshold=TRIGGER_REACH_THRESHOLD)
     if pos:
         print(f"  Reached trigger at xz=({pos[0]:.2f}, {pos[2]:.2f})")
     else:
@@ -323,7 +329,7 @@ def test_touched_events(headers: dict):
         dist_to_spawn = distance_xz(pos, [spawn_xz[0], pos[1], spawn_xz[1]])
 
         # Character capsule touches before center-distance gets very small.
-        if dist_to_kill < 6.5:
+        if dist_to_kill < KILL_APPROACH_THRESHOLD:
             saw_kill_approach = True
         if dist_to_kill < 2.0:
             reached_center = True
@@ -349,7 +355,7 @@ def test_jump(headers: dict):
     print("\n--- TEST 5: Jump Platforms (X=40) ---")
     target = [40, 3, 0]
 
-    pos = wait_until_near(headers, target, threshold=4.5)
+    pos = wait_until_near(headers, target, threshold=JUMP_ZONE_REACH_THRESHOLD)
     if not pos:
         print("  SKIP: Could not reach jump zone")
         return

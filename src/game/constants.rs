@@ -30,6 +30,9 @@ pub mod physics {
     /// Character controller snap to ground distance
     pub const SNAP_TO_GROUND: f32 = 0.2;
 
+    /// Max downward query distance used to find supporting ground/platform body.
+    pub const CHARACTER_GROUND_QUERY_DISTANCE: f32 = 4.0;
+
     /// Small epsilon for float comparisons
     pub const EPSILON: f32 = 0.001;
 }
@@ -53,4 +56,10 @@ pub mod humanoid {
 
     /// Default hip height
     pub const DEFAULT_HIP_HEIGHT: f32 = 2.0;
+
+    /// MoveTo timeout in seconds before MoveToFinished(false) is fired.
+    pub const MOVE_TO_TIMEOUT_SECS: f32 = 8.0;
+
+    /// Horizontal distance threshold at which a MoveTo target is considered reached.
+    pub const MOVE_TO_REACHED_EPSILON_XZ: f32 = 0.5;
 }

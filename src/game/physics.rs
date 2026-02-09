@@ -43,6 +43,8 @@ pub struct CharacterControllerState {
     pub body_handle: RigidBodyHandle,
     pub vertical_velocity: f32,
     pub target_position: Option<[f32; 3]>,
+    /// Seconds elapsed since current MoveTo target was set.
+    pub move_to_elapsed: f32,
     pub grounded: bool,
 }
 
@@ -425,6 +427,7 @@ impl PhysicsWorld {
             body_handle,
             vertical_velocity: 0.0,
             target_position: None,
+            move_to_elapsed: 0.0,
             grounded: false,
         };
 
@@ -440,6 +443,7 @@ impl PhysicsWorld {
     pub fn set_character_target(&mut self, lua_id: u64, target: Option<[f32; 3]>) {
         if let Some(state) = self.character_controllers.get_mut(&lua_id) {
             state.target_position = target;
+            state.move_to_elapsed = 0.0;
         }
     }
 
@@ -451,6 +455,7 @@ impl PhysicsWorld {
             }
             state.target_position = None;
             state.vertical_velocity = 0.0;
+            state.move_to_elapsed = 0.0;
         }
     }
 

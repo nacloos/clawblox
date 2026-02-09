@@ -34,7 +34,7 @@ pub fn build_motion_plan(
         let tz = target[2] - current_pos[2];
         let dist_xz = (tx * tx + tz * tz).sqrt();
 
-        if dist_xz > 0.5 {
+        if dist_xz > humanoid_consts::MOVE_TO_REACHED_EPSILON_XZ {
             let speed = walk_speed * dt;
             dx = (tx / dist_xz) * speed;
             dz = (tz / dist_xz) * speed;
@@ -80,4 +80,4 @@ pub fn resolve_vertical_velocity_after_move(
     }
     v
 }
-
+use super::constants::humanoid as humanoid_consts;
