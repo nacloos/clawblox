@@ -80,11 +80,27 @@ let latestEntities: SpectatorEntity[] = []
 let latestTick = 0
 let wsState = 'connecting'
 let lastDebugLogAt = 0
+let showStaticOnly = true
 
 function rotationToQuaternion(rot: [[number, number, number], [number, number, number], [number, number, number]]): THREE.Quaternion {
   const m = new THREE.Matrix4()
   m.set(rot[0][0], rot[0][1], rot[0][2], 0, rot[1][0], rot[1][1], rot[1][2], 0, rot[2][0], rot[2][1], rot[2][2], 0, 0, 0, 0, 1)
   return new THREE.Quaternion().setFromRotationMatrix(m)
+}
+
+function makeMeshForEntity(e: SpectatorEntity): THREE.Mesh {
+  const preset = e.render.preset_id ?? ''
+  const isFloorOrCeiling = preset === 'fps_arena/floor' || preset === 'fps_arena/ceiling'
+
+  const geometry = isFloorOrCeiling
+    ? new THREE.PlaneGeometry(e.size[0], e.size[2])
+    : geometryFromRender(e.render, e.size)
+
+  const mesh = new THREE.Mesh(geometry, materialFromRender(e.render))
+  if (isFloorOrCeiling) {
+    mesh.rotation.x = preset === 'fps_arena/floor' ? -Math.PI / 2 : Math.PI / 2
+  }
+  return mesh
 }
 
 function syncEntities(obs: SpectatorObservation): void {
@@ -96,16 +112,21 @@ function syncEntities(obs: SpectatorObservation): void {
     seen.add(e.id)
     let mesh = entityObjects.get(e.id)
     if (!mesh) {
-      mesh = new THREE.Mesh(geometryFromRender(e.render, e.size), materialFromRender(e.render))
+      mesh = makeMeshForEntity(e)
       mesh.castShadow = e.render.casts_shadow
       mesh.receiveShadow = e.render.receives_shadow
       scene.add(mesh)
       entityObjects.set(e.id, mesh)
     }
 
-    mesh.position.set(e.position[0], e.position[1], e.position[2])
+    const preset = e.render.preset_id ?? ''
+    if (preset === 'fps_arena/floor') {
+      mesh.position.set(e.position[0], e.position[1] + e.size[1] * 0.5, e.position[2])
+    } else {
+      mesh.position.set(e.position[0], e.position[1], e.position[2])
+    }
     if (e.rotation) mesh.quaternion.copy(rotationToQuaternion(e.rotation))
-    mesh.visible = e.render.visible
+    mesh.visible = e.render.visible && (!showStaticOnly || e.render.static)
   }
 
   for (const [id, mesh] of entityObjects) {
@@ -210,6 +231,9 @@ window.addEventListener('mousemove', (event) => {
 
 window.addEventListener('keydown', (event) => { moveKeys[event.code] = true })
 window.addEventListener('keyup', (event) => { moveKeys[event.code] = false })
+window.addEventListener('keydown', (event) => {
+  if (event.code === 'KeyV') showStaticOnly = !showStaticOnly
+})
 
 function updateCamera(dt: number): void {
   camera.rotation.order = 'YXZ'
@@ -236,8 +260,9 @@ function updateHud(): void {
     `Server map viewer\n` +
     `game=${gameId}\n` +
     `ws=${wsState} tick=${latestTick} entities=${entityObjects.size}\n` +
+    `view=${showStaticOnly ? 'static-only' : 'all-replicated'}\n` +
     `camera=(${camera.position.x.toFixed(1)}, ${camera.position.y.toFixed(1)}, ${camera.position.z.toFixed(1)})\n` +
-    `click: lock mouse | WASD: move | E/Q: up/down | Shift: boost\n` +
+    `click: lock mouse | WASD: move | E/Q: up/down | Shift: boost | V: toggle static/all\n` +
     `\n${summary}`
 
   const now = performance.now()
@@ -260,9 +285,9 @@ function frame(): void {
   requestAnimationFrame(frame)
   const dt = Math.min(clock.getDelta(), 0.05)
   updateCamera(dt)
-  const t = performance.now() * 0.001
+  const t = Date.now() * 0.001
   accentLights.forEach((l, i) => {
-    l.intensity = 1.5 + Math.sin(t * 2 + i * 0.7) * 0.8
+    l.intensity = 1.5 + Math.sin(t + i * 0.7) * 0.8
   })
   updateHud()
   renderer.render(scene, camera)

@@ -46,6 +46,12 @@ fn build_render(
         .unwrap_or([part_data.color.r, part_data.color.g, part_data.color.b]);
     let is_static = attr_bool(&data.attributes, "RenderStatic")
         .unwrap_or(data.tags.contains("Static") || part_data.anchored);
+    let visible = attr_bool(&data.attributes, "RenderVisible")
+        .unwrap_or(part_data.transparency < 1.0);
+    let casts_shadow = attr_bool(&data.attributes, "RenderCastsShadow")
+        .unwrap_or(true);
+    let receives_shadow = attr_bool(&data.attributes, "RenderReceivesShadow")
+        .unwrap_or(true);
 
     SpectatorRender {
         kind,
@@ -55,9 +61,9 @@ fn build_render(
         material,
         color,
         is_static,
-        casts_shadow: true,
-        receives_shadow: true,
-        visible: part_data.transparency < 1.0,
+        casts_shadow,
+        receives_shadow,
+        visible,
         double_sided: false,
         transparency: if part_data.transparency != 0.0 { Some(part_data.transparency) } else { None },
     }

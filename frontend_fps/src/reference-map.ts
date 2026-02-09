@@ -22,7 +22,7 @@ scene.fog = new THREE.FogExp2(0x1a1a2a, 0.008)
 scene.background = new THREE.Color(0x1a1a2a)
 
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 500)
-camera.position.set(0, 8, 18)
+camera.position.set(0, 2.2, 18)
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' })
 renderer.setSize(window.innerWidth, window.innerHeight)
@@ -55,11 +55,13 @@ const lightPositions = [
   [0, 3, -20], [0, 3, 20], [-20, 3, 0], [20, 3, 0],
   [-8, 3, -8], [8, 3, 8], [-8, 3, 8], [8, 3, -8],
 ]
+const accentLights: THREE.PointLight[] = []
 for (let i = 0; i < lightPositions.length; i++) {
   const p = lightPositions[i]
   const light = new THREE.PointLight(accentColors[i % accentColors.length], 4, 20)
   light.position.set(p[0], p[1], p[2])
   scene.add(light)
+  accentLights.push(light)
 }
 
 function createFloorTexture(): THREE.CanvasTexture {
@@ -406,6 +408,10 @@ const clock = new THREE.Clock()
 function frame(): void {
   requestAnimationFrame(frame)
   const dt = Math.min(clock.getDelta(), 0.05)
+  const t = Date.now() * 0.001
+  accentLights.forEach((l, i) => {
+    l.intensity = 1.5 + Math.sin(t + i * 0.7) * 0.8
+  })
   updateCamera(dt)
   updateHud()
   renderer.render(scene, camera)

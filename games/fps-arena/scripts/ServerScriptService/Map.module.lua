@@ -2,7 +2,7 @@ local Map = {}
 
 local spawnParts = {}
 
-local function makePart(name, size, position, color, anchored, material, renderRole, renderPresetId)
+local function makePart(name, size, position, color, anchored, material, renderRole, renderPresetId, renderPrimitive)
     local part = Instance.new("Part")
     part.Name = name
     part.Size = size
@@ -14,9 +14,26 @@ local function makePart(name, size, position, color, anchored, material, renderR
     part:SetAttribute("RenderRole", renderRole or string.lower(name))
     part:SetAttribute("RenderPresetId", renderPresetId or ("fps_arena/" .. string.lower(name)))
     part:SetAttribute("RenderStatic", anchored == true)
-    part:SetAttribute("RenderPrimitive", string.lower(part.Shape.Name))
-    part:SetAttribute("RenderMaterial", part.Material.Name)
+    part:SetAttribute("RenderPrimitive", renderPrimitive or string.lower(part.Shape.Name))
+    part:SetAttribute("RenderMaterial", (material or part.Material).Name)
     part:SetAttribute("RenderColor", part.Color)
+
+    local role = renderRole or string.lower(name)
+    local castsShadow = true
+    local receivesShadow = true
+    if role == "floor" then
+        castsShadow = false
+        receivesShadow = true
+    elseif role == "ceiling" then
+        castsShadow = false
+        receivesShadow = false
+    elseif role == "trim_red" or role == "trim_blue" or role == "spawn" then
+        castsShadow = false
+        receivesShadow = false
+    end
+    part:SetAttribute("RenderCastsShadow", castsShadow)
+    part:SetAttribute("RenderReceivesShadow", receivesShadow)
+
     part.Parent = Workspace
     return part
 end
@@ -37,6 +54,7 @@ local function addSpawn(position)
     p:SetAttribute("RenderPrimitive", "box")
     p:SetAttribute("RenderMaterial", p.Material.Name)
     p:SetAttribute("RenderColor", p.Color)
+    p:SetAttribute("RenderVisible", false)
     p.Parent = Workspace
     table.insert(spawnParts, p)
 end
@@ -50,7 +68,8 @@ local function addWall(x, z, sx, sz, ht)
         true,
         Enum.Material.Concrete,
         "wall",
-        "fps_arena/wall"
+        "fps_arena/wall",
+        "box"
     )
     return wall
 end
@@ -64,7 +83,8 @@ local function addCrate(x, z, size, ht)
         true,
         Enum.Material.Wood,
         "crate",
-        "fps_arena/crate"
+        "fps_arena/crate",
+        "box"
     )
 
     local edgeColor = Color3.fromRGB(68, 68, 68)
@@ -76,7 +96,8 @@ local function addCrate(x, z, size, ht)
         true,
         Enum.Material.Metal,
         "crate_edge",
-        "fps_arena/crate_edge"
+        "fps_arena/crate_edge",
+        "box"
     )
     local edge2 = makePart(
         "CrateEdge",
@@ -86,7 +107,8 @@ local function addCrate(x, z, size, ht)
         true,
         Enum.Material.Metal,
         "crate_edge",
-        "fps_arena/crate_edge"
+        "fps_arena/crate_edge",
+        "box"
     )
 
     return crate, edge1, edge2
@@ -101,7 +123,8 @@ local function addPillar(x, z, radius, ht)
         true,
         Enum.Material.Metal,
         "pillar",
-        "fps_arena/pillar"
+        "fps_arena/pillar",
+        "cylinder"
     )
     p.Shape = Enum.PartType.Cylinder
     p:SetAttribute("RenderPrimitive", "cylinder")
@@ -124,7 +147,8 @@ function Map.Build(config)
         true,
         Enum.Material.Slate,
         "floor",
-        "fps_arena/floor"
+        "fps_arena/floor",
+        "box"
     )
     floor:AddTag("NoCollision")
 
@@ -136,7 +160,8 @@ function Map.Build(config)
         true,
         Enum.Material.Concrete,
         "ceiling",
-        "fps_arena/ceiling"
+        "fps_arena/ceiling",
+        "box"
     )
 
     addWall(0, -half, mapSize, wt, wallH)
@@ -191,7 +216,7 @@ function Map.Build(config)
     }
     for _, p in ipairs(crates) do
         local size = 1.2
-        local height = 1.0
+        local height = 1.2
         addCrate(p[1], p[2], size, height)
     end
 
@@ -209,7 +234,8 @@ function Map.Build(config)
             true,
             Enum.Material.Metal,
             "platform",
-            "fps_arena/platform"
+            "fps_arena/platform",
+            "box"
         )
     end
 
@@ -221,7 +247,8 @@ function Map.Build(config)
         true,
         Enum.Material.Neon,
         "trim_red",
-        "fps_arena/trim_red"
+        "fps_arena/trim_red",
+        "box"
     )
     local stripRight = makePart(
         "TrimBlue",
@@ -231,7 +258,8 @@ function Map.Build(config)
         true,
         Enum.Material.Neon,
         "trim_blue",
-        "fps_arena/trim_blue"
+        "fps_arena/trim_blue",
+        "box"
     )
     local stripBottom = makePart(
         "TrimRed",
@@ -241,7 +269,8 @@ function Map.Build(config)
         true,
         Enum.Material.Neon,
         "trim_red",
-        "fps_arena/trim_red"
+        "fps_arena/trim_red",
+        "box"
     )
     local stripTop = makePart(
         "TrimBlue",
@@ -251,7 +280,8 @@ function Map.Build(config)
         true,
         Enum.Material.Neon,
         "trim_blue",
-        "fps_arena/trim_blue"
+        "fps_arena/trim_blue",
+        "box"
     )
 
     local _ = stripLeft
