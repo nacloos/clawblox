@@ -42,6 +42,7 @@ fi
 ARSENAL_ID="6dd3ff88-150c-440e-b6fb-c80b7df715c0"
 TSUNAMI_ID="0a62727e-b45e-4175-be9f-1070244f8885"
 FLATTEST_ID="26c869ee-da7b-48a4-a198-3daa870ef652"
+PHYSICS_TEST_ID="f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
 # Function to extract value from TOML file
 get_toml_value() {
@@ -111,7 +112,8 @@ $PSQL_CMD -c "
 DELETE FROM games WHERE id IN (
     '$ARSENAL_ID',
     '$TSUNAMI_ID',
-    '$FLATTEST_ID'
+    '$FLATTEST_ID',
+    '$PHYSICS_TEST_ID'
 );
 "
 
@@ -119,5 +121,6 @@ DELETE FROM games WHERE id IN (
 seed_game "$PROJECT_ROOT/games/arsenal" "$ARSENAL_ID"
 seed_game "$PROJECT_ROOT/games/tsunami-brainrot" "$TSUNAMI_ID"
 seed_game "$PROJECT_ROOT/games/flat-test" "$FLATTEST_ID"
+seed_game "$PROJECT_ROOT/games/physics-test" "$PHYSICS_TEST_ID"
 
 echo "Games seeded successfully!"

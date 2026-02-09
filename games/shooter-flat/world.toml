@@ -1,0 +1,7 @@
+name = "Shooter Flat"
+description = "Minimal flat world for one-direction shooting animation test"
+max_players = 1
+game_type = "lua"
+
+[scripts]
+main = "game.lua"
