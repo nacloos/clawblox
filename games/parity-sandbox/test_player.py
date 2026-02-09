@@ -34,6 +34,8 @@ DEFAULT_GAME_NAME = "Parity Sandbox"
 DEFAULT_TIMEOUT_SECS = 45.0
 MOVE_INTERVAL_SECS = 0.30
 OBS_INTERVAL_SECS = 0.20
+MOVEMENT_MIN_TOTAL_XZ = 12.0
+MOVEMENT_MIN_STEP_XZ = 0.75
 
 # Keep movement inside the current map bounds around spawn/cover.
 ROAM_MIN_X = -28.0
@@ -51,6 +53,12 @@ ENEMY_SPAWN_POINTS = [
 
 class TestFailure(RuntimeError):
     pass
+
+
+def distance_xz(a: list[float], b: list[float]) -> float:
+    dx = float(a[0]) - float(b[0])
+    dz = float(a[2]) - float(b[2])
+    return (dx * dx + dz * dz) ** 0.5
 
 
 def load_cached_keys() -> list[str]:
@@ -268,13 +276,22 @@ def main() -> int:
     last_move_at = 0.0
     last_obs_log_at = 0.0
     next_spawn_idx = 0
+    move_commands_sent = 0
+    fire_commands_sent = 0
+    total_moved_xz = 0.0
+    max_step_xz = 0.0
 
     saw_active_phase = False
     saw_enemy_target = False
     saw_shot = False
     saw_damage = False
     saw_kill = False
+    saw_observed_movement = False
     rejoin_attempts = 0
+    last_obs_pos: list[float] | None = None
+    last_seen_shots = 0.0
+    last_seen_damage = 0.0
+    last_seen_kills = 0.0
 
     try:
         # Keep weapon deterministic.
@@ -296,6 +313,12 @@ def main() -> int:
                 saw_enemy_target = True
                 # Aim roughly at torso/head level.
                 fire_target = [enemy_target[0], enemy_target[1] + 1.0, enemy_target[2]]
+                fire_commands_sent += 1
+                if fire_commands_sent % 6 == 1:
+                    print(
+                        f"ACTION fire#{fire_commands_sent} mode=target "
+                        f"target=({fire_target[0]:.1f},{fire_target[1]:.1f},{fire_target[2]:.1f})"
+                    )
                 send_input(
                     game_id,
                     headers,
@@ -305,6 +328,12 @@ def main() -> int:
             elif phase == "Active":
                 fallback_target = ENEMY_SPAWN_POINTS[next_spawn_idx % len(ENEMY_SPAWN_POINTS)]
                 next_spawn_idx += 1
+                fire_commands_sent += 1
+                if fire_commands_sent % 6 == 1:
+                    print(
+                        f"ACTION fire#{fire_commands_sent} mode=fallback "
+                        f"target=({fallback_target[0]:.1f},{fallback_target[1] + 1.0:.1f},{fallback_target[2]:.1f})"
+                    )
                 send_input(
                     game_id,
                     headers,
@@ -317,10 +346,30 @@ def main() -> int:
                 if phase == "Active":
                     lane_target = ENEMY_SPAWN_POINTS[next_spawn_idx % len(ENEMY_SPAWN_POINTS)]
                     move_target = [lane_target[0] * 0.6, ROAM_Y, lane_target[2] * 0.6]
+                    move_commands_sent += 1
+                    print(
+                        f"ACTION move#{move_commands_sent} mode=lane "
+                        f"target=({move_target[0]:.1f},{move_target[1]:.1f},{move_target[2]:.1f})"
+                    )
                     send_input(game_id, headers, "MoveTo", {"position": move_target})
                 else:
-                    send_input(game_id, headers, "MoveTo", {"position": random_roam_target()})
+                    roam_target = random_roam_target()
+                    move_commands_sent += 1
+                    print(
+                        f"ACTION move#{move_commands_sent} mode=roam "
+                        f"target=({roam_target[0]:.1f},{roam_target[1]:.1f},{roam_target[2]:.1f})"
+                    )
+                    send_input(game_id, headers, "MoveTo", {"position": roam_target})
                 last_move_at = now
+
+            if last_obs_pos is not None:
+                step_xz = distance_xz(player_pos, last_obs_pos)
+                total_moved_xz = total_moved_xz + step_xz
+                if step_xz > max_step_xz:
+                    max_step_xz = step_xz
+                if step_xz >= MOVEMENT_MIN_STEP_XZ:
+                    saw_observed_movement = True
+            last_obs_pos = [float(player_pos[0]), float(player_pos[1]), float(player_pos[2])]
 
             if shots > 0:
                 saw_shot = True
@@ -329,8 +378,31 @@ def main() -> int:
             if kills > 0:
                 saw_kill = True
 
+            if shots > last_seen_shots:
+                print(
+                    f"EVENT shots +{shots - last_seen_shots:.0f} => {shots:.0f}"
+                )
+                last_seen_shots = shots
+            if damage > last_seen_damage:
+                print(
+                    f"EVENT damage +{damage - last_seen_damage:.0f} => {damage:.0f}"
+                )
+                last_seen_damage = damage
+            if kills > last_seen_kills:
+                print(
+                    f"EVENT kills +{kills - last_seen_kills:.0f} => {kills:.0f}"
+                )
+                last_seen_kills = kills
+
             # Treat this as a successful play test as soon as combat is clearly happening.
-            if saw_active_phase and saw_shot and saw_damage and saw_kill:
+            if (
+                saw_active_phase
+                and saw_shot
+                and saw_damage
+                and saw_kill
+                and saw_observed_movement
+                and total_moved_xz >= MOVEMENT_MIN_TOTAL_XZ
+            ):
                 print("PASS: player actively played shooter loop with combat progression.")
                 return 0
 
@@ -338,7 +410,9 @@ def main() -> int:
                 enemy_count = count_alive_enemies(obs)
                 print(
                     f"phase={phase or '?'} shots={shots:.0f} damage={damage:.0f} "
-                    f"kills={kills:.0f} alive_enemies={enemy_count} target={'yes' if enemy_target else 'no'}"
+                    f"kills={kills:.0f} alive_enemies={enemy_count} target={'yes' if enemy_target else 'no'} "
+                    f"move_cmds={move_commands_sent} fire_cmds={fire_commands_sent} "
+                    f"move_xz_total={total_moved_xz:.1f} move_xz_max={max_step_xz:.2f}"
                 )
                 last_obs_log_at = now
 
@@ -376,6 +450,14 @@ def main() -> int:
             raise TestFailure("No damage was recorded (DamageDealt stayed at 0).")
         if not saw_kill:
             raise TestFailure("No kill was recorded (Kills stayed at 0).")
+        if move_commands_sent == 0:
+            raise TestFailure("No MoveTo commands were sent.")
+        if not saw_observed_movement:
+            raise TestFailure("Player position never showed a meaningful movement step.")
+        if total_moved_xz < MOVEMENT_MIN_TOTAL_XZ:
+            raise TestFailure(
+                f"Player moved too little (total xz={total_moved_xz:.1f} < {MOVEMENT_MIN_TOTAL_XZ:.1f})."
+            )
 
         print("PASS: player actively played shooter loop with combat progression.")
         return 0
