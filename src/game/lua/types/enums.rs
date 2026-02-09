@@ -1,4 +1,4 @@
-use mlua::{FromLua, Lua, Result, UserData, UserDataMethods, Value};
+use mlua::{FromLua, Lua, Result, UserData, UserDataFields, UserDataMethods, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartType {
@@ -42,6 +42,11 @@ impl FromLua for PartType {
 }
 
 impl UserData for PartType {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("Name", |_, this| Ok(this.name().to_string()));
+        fields.add_field_method_get("Value", |_, this| Ok(this.value()));
+    }
+
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
             Ok(format!("Enum.PartType.{}", this.name()))
@@ -130,6 +135,11 @@ impl FromLua for Material {
 }
 
 impl UserData for Material {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("Name", |_, this| Ok(this.name().to_string()));
+        fields.add_field_method_get("Value", |_, this| Ok(this.value()));
+    }
+
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
             Ok(format!("Enum.Material.{}", this.name()))
@@ -177,6 +187,10 @@ impl FromLua for HumanoidStateType {
 }
 
 impl UserData for HumanoidStateType {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("Name", |_, this| Ok(this.name().to_string()));
+    }
+
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
             Ok(format!("Enum.HumanoidStateType.{}", this.name()))
@@ -217,6 +231,10 @@ impl FromLua for RaycastFilterType {
 }
 
 impl UserData for RaycastFilterType {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("Name", |_, this| Ok(this.name().to_string()));
+    }
+
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
             Ok(format!("Enum.RaycastFilterType.{}", this.name()))
@@ -246,6 +264,10 @@ impl TextXAlignmentEnum {
 }
 
 impl UserData for TextXAlignmentEnum {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("Name", |_, this| Ok(this.name().to_string()));
+    }
+
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
             Ok(format!("Enum.TextXAlignment.{}", this.name()))
@@ -271,6 +293,10 @@ impl TextYAlignmentEnum {
 }
 
 impl UserData for TextYAlignmentEnum {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("Name", |_, this| Ok(this.name().to_string()));
+    }
+
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
             Ok(format!("Enum.TextYAlignment.{}", this.name()))
@@ -298,6 +324,10 @@ impl FontEnum {
 }
 
 impl UserData for FontEnum {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("Name", |_, this| Ok(this.name().to_string()));
+    }
+
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
             Ok(format!("Enum.Font.{}", this.name()))
