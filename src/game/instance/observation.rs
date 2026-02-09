@@ -285,6 +285,7 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
                                 .map(|track| SpectatorPlayerAnimation {
                                     track_id: track.track_id,
                                     animation_id: track.animation_id,
+                                    length: round_f32(track.length),
                                     priority: track.priority,
                                     time_position: round_f32(track.time_position),
                                     speed: round_f32(track.speed),

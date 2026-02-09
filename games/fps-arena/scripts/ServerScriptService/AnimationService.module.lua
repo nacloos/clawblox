@@ -3,6 +3,7 @@ local Players = game:GetService("Players")
 local AnimationService = {}
 
 local playerStates = {}
+local DEBUG_LOCOMOTION = true
 local TRACK_CONFIG = {
     idle = {
         animation_id = "local://idle_default",
@@ -37,8 +38,7 @@ local TRACK_CONFIG = {
         fade_out = 0.06,
     },
 }
-local WALK_START_SPEED = 1.2
-local WALK_STOP_SPEED = 0.7
+local WALK_MOVE_EPSILON = 0.01
 
 local function getHumanoid(character)
     if not character then
@@ -142,6 +142,7 @@ function AnimationService.BindCharacter(player, character)
         humanoid = humanoid,
         tracks = {},
         locomotion = "idle",
+        lastMoveMag = 0,
     }
 
     playTrack(player, TRACK_CONFIG.idle.animation_id, TRACK_CONFIG.idle)
@@ -180,6 +181,14 @@ local function setLocomotionState(player, pstate, locomotion)
         playTrack(player, TRACK_CONFIG.idle.animation_id, TRACK_CONFIG.idle)
     end
 
+    if DEBUG_LOCOMOTION then
+        print(string.format(
+            "[AnimService] locomotion player=%s from=%s to=%s",
+            player.Name,
+            tostring(pstate.locomotion),
+            tostring(locomotion)
+        ))
+    end
     pstate.locomotion = locomotion
 end
 
@@ -188,23 +197,30 @@ local function updateLocomotionForPlayer(player, pstate)
     if not character then
         return
     end
-    local root = character:FindFirstChild("HumanoidRootPart")
     local humanoid = character:FindFirstChild("Humanoid")
-    if not root or not humanoid or humanoid.Health <= 0 then
+    if not humanoid or humanoid.Health <= 0 then
         setLocomotionState(player, pstate, "idle")
         return
     end
 
-    local v = root.Velocity
-    local horizontalSpeed = math.sqrt(v.X * v.X + v.Z * v.Z)
-    if pstate.locomotion == "walk" then
-        if horizontalSpeed <= WALK_STOP_SPEED then
-            setLocomotionState(player, pstate, "idle")
-        end
-        return
+    local moveDir = humanoid.MoveDirection
+    local moveMag = math.sqrt(moveDir.X * moveDir.X + moveDir.Z * moveDir.Z)
+    if DEBUG_LOCOMOTION and (pstate.lastMoveMag == nil or math.abs(moveMag - pstate.lastMoveMag) >= 0.2) then
+        print(string.format(
+            "[AnimService] move player=%s mag=%.3f dir=(%.3f,%.3f,%.3f) state=%s",
+            player.Name,
+            moveMag,
+            moveDir.X,
+            moveDir.Y,
+            moveDir.Z,
+            tostring(pstate.locomotion)
+        ))
     end
-    if horizontalSpeed >= WALK_START_SPEED then
+    pstate.lastMoveMag = moveMag
+    if moveMag > WALK_MOVE_EPSILON then
         setLocomotionState(player, pstate, "walk")
+    else
+        setLocomotionState(player, pstate, "idle")
     end
 end
 

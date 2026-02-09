@@ -12,7 +12,7 @@ pub fn default_animation_length_seconds(animation_id: &str) -> f32 {
         "local://reload_rifle" => 1.15,
         "local://reload_shotgun" => 1.35,
         "local://idle_default" => 0.9,
-        "local://walk_default" => 0.7,
+        "local://walk_default" => 1.2,
         _ => 0.5,
     }
 }
@@ -190,6 +190,8 @@ impl UserData for AnimationTrack {
             let mut data = this.data.lock().unwrap();
             let fade = fade_time.unwrap_or(0.0).max(0.0);
             let target_weight = weight.unwrap_or(1.0).max(0.0);
+            let was_playing = data.is_playing;
+            let prev_time = data.time_position;
             data.time_position = 0.0;
             data.is_playing = true;
             data.is_stopping = false;
@@ -209,12 +211,40 @@ impl UserData for AnimationTrack {
                 data.fade_to = target_weight;
                 data.weight_current = target_weight;
             }
+            if data.animation_id == "local://walk_default" || data.animation_id == "local://idle_default" {
+                eprintln!(
+                    "[AnimTrack] Play track={} anim={} owner={} len={:.3} prev_playing={} prev_time={:.3} fade={:.3} weight={:.3} speed={:.3}",
+                    data.track_id,
+                    data.animation_id,
+                    data.owner_animator_id,
+                    data.length,
+                    was_playing,
+                    prev_time,
+                    fade,
+                    target_weight,
+                    data.speed,
+                );
+            }
             Ok(())
         });
         methods.add_method("Stop", |lua, this, fade_time: Option<f32>| {
             let fade = fade_time.unwrap_or(0.0).max(0.0);
             let stopped = {
                 let mut data = this.data.lock().unwrap();
+                let should_log = data.animation_id == "local://walk_default"
+                    || data.animation_id == "local://idle_default";
+                if should_log {
+                    eprintln!(
+                        "[AnimTrack] Stop track={} anim={} owner={} time={:.3} fade={:.3} is_playing={} is_stopping={}",
+                        data.track_id,
+                        data.animation_id,
+                        data.owner_animator_id,
+                        data.time_position,
+                        fade,
+                        data.is_playing,
+                        data.is_stopping,
+                    );
+                }
                 if !data.is_playing && !data.is_stopping {
                     None
                 } else if fade > 0.0 {
@@ -284,6 +314,7 @@ pub struct AnimationTrackSnapshot {
     pub track_id: u64,
     pub animation_id: String,
     pub owner_animator_id: u64,
+    pub length: f32,
     pub priority: i32,
     pub time_position: f32,
     pub speed: f32,
@@ -374,6 +405,7 @@ impl AnimationScheduler {
                     track_id: data.track_id,
                     animation_id: data.animation_id.clone(),
                     owner_animator_id: data.owner_animator_id,
+                    length: data.length,
                     priority: data.priority,
                     time_position: data.time_position,
                     speed: data.speed,

@@ -17,6 +17,7 @@ interface SpectatorPlayerInfo {
   active_animations?: Array<{
     track_id?: number
     animation_id: string
+    length?: number
     priority?: number
     time_position: number
     speed: number
@@ -47,13 +48,6 @@ interface SpectatorObservation {
   entities: SpectatorEntity[]
 }
 
-interface LeaderboardEntry {
-  rank: number
-  key: string
-  score: number
-  name?: string
-}
-
 const canvas = document.getElementById('game') as HTMLCanvasElement
 const healthTextEl = document.getElementById('health-text') as HTMLDivElement
 const healthBarEl = document.getElementById('health-bar') as HTMLDivElement
@@ -64,11 +58,8 @@ const scoreTextEl = document.getElementById('score-text') as HTMLDivElement
 const waveTextEl = document.getElementById('wave-text') as HTMLDivElement
 const spectateTextEl = document.getElementById('spectate-text') as HTMLDivElement
 const killfeedEl = document.getElementById('killfeed') as HTMLDivElement
-const leaderboardEl = document.getElementById('leaderboard') as HTMLDivElement
 const damageOverlayEl = document.getElementById('damage-overlay') as HTMLDivElement
-const minimapCanvas = document.getElementById('minimap-canvas') as HTMLCanvasElement
-const minimapCtx = minimapCanvas.getContext('2d')
-if (!minimapCtx) throw new Error('Minimap context unavailable')
+const DEBUG_ANIM = new URLSearchParams(window.location.search).get('debugAnim') === '1'
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' })
 renderer.setSize(window.innerWidth, window.innerHeight)
@@ -170,10 +161,105 @@ const modelEntityStates = new Map<number, {
 const clock = new THREE.Clock()
 let latestObservation: SpectatorObservation | null = null
 let selectedPlayerId: string | null = null
-let leaderboardData: LeaderboardEntry[] = []
+
+// ─── Interpolation buffer ───────────────────────────────────────────────
+const INTERP_DELAY = 0.10 // seconds behind real-time
+const SNAPSHOT_BUFFER_SIZE = 8
+
+interface TimestampedSnapshot {
+  time: number // performance.now() / 1000
+  obs: SpectatorObservation
+}
+
+const snapshotBuffer: TimestampedSnapshot[] = []
+
+function pushSnapshot(obs: SpectatorObservation): void {
+  snapshotBuffer.push({ time: performance.now() / 1000, obs })
+  while (snapshotBuffer.length > SNAPSHOT_BUFFER_SIZE) {
+    snapshotBuffer.shift()
+  }
+}
+
+function lerpPos(
+  a: [number, number, number],
+  b: [number, number, number],
+  t: number,
+): [number, number, number] {
+  return [
+    a[0] + (b[0] - a[0]) * t,
+    a[1] + (b[1] - a[1]) * t,
+    a[2] + (b[2] - a[2]) * t,
+  ]
+}
+
+function interpolatedObservation(): SpectatorObservation | null {
+  if (snapshotBuffer.length === 0) return null
+  if (snapshotBuffer.length === 1) return snapshotBuffer[0].obs
+
+  const renderTime = performance.now() / 1000 - INTERP_DELAY
+
+  // Before first snapshot — use oldest
+  if (renderTime <= snapshotBuffer[0].time) return snapshotBuffer[0].obs
+
+  // Find the two snapshots straddling renderTime
+  let from: TimestampedSnapshot | null = null
+  let to: TimestampedSnapshot | null = null
+  for (let i = 0; i < snapshotBuffer.length - 1; i++) {
+    if (snapshotBuffer[i].time <= renderTime && snapshotBuffer[i + 1].time >= renderTime) {
+      from = snapshotBuffer[i]
+      to = snapshotBuffer[i + 1]
+      break
+    }
+  }
+
+  // Past last snapshot — use newest
+  if (!from || !to) return snapshotBuffer[snapshotBuffer.length - 1].obs
+
+  const span = to.time - from.time
+  const t = span > 0.0001 ? Math.min(1, Math.max(0, (renderTime - from.time) / span)) : 1
+
+  const obsA = from.obs
+  const obsB = to.obs
+
+  // Interpolate player positions and animation time_position
+  const players: SpectatorPlayerInfo[] = obsB.players.map((pb) => {
+    const pa = obsA.players.find((p) => p.id === pb.id)
+    if (!pa) return pb
+    let animations = pb.active_animations
+    if (pa.active_animations && pb.active_animations) {
+      animations = pb.active_animations.map((trackB) => {
+        const trackA = pa.active_animations!.find(
+          (ta) => ta.animation_id === trackB.animation_id && ta.track_id === trackB.track_id,
+        )
+        if (!trackA) return trackB
+        const tpA = trackA.time_position
+        const tpB = trackB.time_position
+        // Avoid interpolating across a loop wrap (large backward jump)
+        if (tpB < tpA - 0.1) return trackB
+        return { ...trackB, time_position: tpA + (tpB - tpA) * t }
+      })
+    }
+    return { ...pb, position: lerpPos(pa.position, pb.position, t), active_animations: animations }
+  })
+
+  // Interpolate entity positions
+  const entities: SpectatorEntity[] = obsB.entities.map((eb) => {
+    const ea = obsA.entities.find((e) => e.id === eb.id)
+    if (!ea) return eb
+    return { ...eb, position: lerpPos(ea.position, eb.position, t) }
+  })
+
+  return { ...obsB, players, entities }
+}
 let lastObservedHealth: number | null = null
 
 const prevPlayerHealth = new Map<string, number>()
+let animDebugAccumulator = 0
+const animDebugStateByPlayer = new Map<string, {
+  lastTrackId?: number
+  lastTrackTime?: number
+  lastActionTime?: number
+}>()
 
 function numberAttr(attrs: Record<string, unknown> | undefined, keys: string[]): number | null {
   if (!attrs) return null
@@ -278,6 +364,7 @@ function queueKillfeed(text: string): void {
 
 function buildWeaponModel(slot: number): THREE.Group {
   const group = new THREE.Group()
+  group.scale.setScalar(1.35)
   const darkMetal = 0x222222
   const addBox = (
     size: [number, number, number],
@@ -629,6 +716,16 @@ async function attachModelToEntityRoot(
       const mixer = new THREE.AnimationMixer(clone)
       const walkClip = findClip(loaded.animations, /(walk|run|jog|locomotion)/i) ?? loaded.animations[0]
       const idleClip = findClip(loaded.animations, /idle/i)
+      if (DEBUG_ANIM) {
+        console.log('[AnimDebug] model', {
+          entityId,
+          modelUrl,
+          walkClip: walkClip?.name,
+          walkDuration: walkClip?.duration,
+          idleClip: idleClip?.name,
+          idleDuration: idleClip?.duration,
+        })
+      }
       const walkAction = walkClip ? mixer.clipAction(walkClip) : undefined
       const idleAction = idleClip ? mixer.clipAction(idleClip) : undefined
 
@@ -661,7 +758,6 @@ function applyActionFromTrack(
   if (!action) return
   if (!track || !track.is_playing) {
     action.paused = true
-    action.time = 0
     action.weight = 0
     return
   }
@@ -672,6 +768,16 @@ function applyActionFromTrack(
   action.timeScale = typeof track.speed === 'number'
     ? Math.max(0, track.speed)
     : 1
+
+  // Spectator mode: let the local mixer drive animation time smoothly.
+  // Only do a hard sync when the action first starts (time is still 0)
+  // to pick up the correct phase.
+  if (action.time < 0.001 && Number.isFinite(track.time_position)) {
+    const clipDuration = action.getClip().duration
+    if (clipDuration > 1e-5) {
+      action.time = ((track.time_position % clipDuration) + clipDuration) % clipDuration
+    }
+  }
 }
 
 function findBestTrack(
@@ -721,6 +827,81 @@ function updateModelAnimations(obs: SpectatorObservation, dt: number): void {
 
     state.mixer.update(dt)
   }
+
+  if (!DEBUG_ANIM) return
+  animDebugAccumulator += dt
+  if (animDebugAccumulator < 0.6) return
+  animDebugAccumulator = 0
+
+  const selected = obs.players.find((p) => p.id === selectedPlayerId)
+  if (!selected || typeof selected.root_part_id !== 'number') return
+  const tracks = tracksByRootEntity.get(selected.root_part_id)
+  const walkTrack = findBestTrack(tracks, isWalkAnimationId)
+  const state = modelEntityStates.get(selected.root_part_id)
+  if (!state?.walkAction) return
+
+  const clip = state.walkAction.getClip()
+  const prev = animDebugStateByPlayer.get(selected.id) ?? {}
+  const currentTrackId = typeof walkTrack?.track_id === 'number' ? walkTrack.track_id : undefined
+  const currentTrackTime = typeof walkTrack?.time_position === 'number' ? walkTrack.time_position : undefined
+  const currentActionTime = state.walkAction.time
+
+  if (currentTrackId !== undefined && prev.lastTrackId !== undefined && currentTrackId !== prev.lastTrackId) {
+    console.log('[AnimDebug] walk-track-changed', {
+      playerId: selected.id,
+      fromTrackId: prev.lastTrackId,
+      toTrackId: currentTrackId,
+      fromTrackTime: prev.lastTrackTime,
+      toTrackTime: currentTrackTime,
+    })
+  }
+  if (
+    currentTrackId !== undefined &&
+    prev.lastTrackId === currentTrackId &&
+    currentTrackTime !== undefined &&
+    prev.lastTrackTime !== undefined
+  ) {
+    const dtTrack = currentTrackTime - prev.lastTrackTime
+    if (dtTrack < -0.25 && (walkTrack?.track_id ?? 0) > 0) {
+      console.warn('[AnimDebug] walk-track-regressed', {
+        playerId: selected.id,
+        trackId: currentTrackId,
+        prevTrackTime: prev.lastTrackTime,
+        trackTime: currentTrackTime,
+        trackLength: walkTrack?.length,
+        looped: walkTrack?.looped,
+      })
+    }
+  }
+  if (walkTrack?.is_playing && state.walkAction.paused) {
+    console.warn('[AnimDebug] walk-desync-playing-paused', {
+      playerId: selected.id,
+      trackId: currentTrackId,
+      trackTime: currentTrackTime,
+      actionTime: currentActionTime,
+    })
+  }
+
+  console.log('[AnimDebug] walk-phase', {
+    playerId: selected.id,
+    rootPartId: selected.root_part_id,
+    trackId: walkTrack?.track_id,
+    trackLength: walkTrack?.length,
+    trackTime: walkTrack?.time_position,
+    trackSpeed: walkTrack?.speed,
+    trackPlaying: walkTrack?.is_playing,
+    clipName: clip.name,
+    clipDuration: clip.duration,
+    actionTime: state.walkAction.time,
+    actionPaused: state.walkAction.paused,
+    actionWeight: state.walkAction.weight,
+  })
+
+  animDebugStateByPlayer.set(selected.id, {
+    lastTrackId: currentTrackId,
+    lastTrackTime: currentTrackTime,
+    lastActionTime: currentActionTime,
+  })
 }
 
 function chooseFollowTarget(obs: SpectatorObservation): string | null {
@@ -878,55 +1059,6 @@ function updateKillfeed(obs: SpectatorObservation): void {
   }
 }
 
-function updateLeaderboard(): void {
-  if (!leaderboardData.length) {
-    leaderboardEl.textContent = 'No data'
-    return
-  }
-
-  leaderboardEl.innerHTML = leaderboardData.slice(0, 8).map((entry) => {
-    const name = entry.name || entry.key
-    return `<div class="lb-row"><span>#${entry.rank}</span><span>${name}</span><span>${Math.round(entry.score)}</span></div>`
-  }).join('')
-}
-
-function drawMinimap(obs: SpectatorObservation): void {
-  const ctx = minimapCtx
-  const w = minimapCanvas.width
-  const h = minimapCanvas.height
-  ctx.clearRect(0, 0, w, h)
-
-  ctx.fillStyle = 'rgba(0,0,0,0.8)'
-  ctx.fillRect(0, 0, w, h)
-
-  const all = [...obs.entities.map((e) => e.position), ...obs.players.map((p) => p.position)]
-  let maxAbs = 30
-  for (const p of all) {
-    maxAbs = Math.max(maxAbs, Math.abs(p[0]), Math.abs(p[2]))
-  }
-  const scale = (w * 0.44) / maxAbs
-
-  const sx = (x: number) => x * scale + w / 2
-  const sz = (z: number) => z * scale + h / 2
-
-  ctx.fillStyle = 'rgba(80,80,100,0.45)'
-  for (const e of obs.entities) {
-    const x = sx(e.position[0])
-    const z = sz(e.position[2])
-    ctx.fillRect(x - 1, z - 1, 2, 2)
-  }
-
-  for (const p of obs.players) {
-    const x = sx(p.position[0])
-    const z = sz(p.position[2])
-    const active = p.id === selectedPlayerId
-    ctx.fillStyle = active ? '#ffad33' : '#ffffff'
-    ctx.beginPath()
-    ctx.arc(x, z, active ? 3 : 2.1, 0, Math.PI * 2)
-    ctx.fill()
-  }
-}
-
 function updateCamera(obs: SpectatorObservation, dt: number): void {
   const target = obs.players.find((p) => p.id === selectedPlayerId)
   if (!target) {
@@ -1004,10 +1136,10 @@ function handleObservation(obs: SpectatorObservation): void {
     if (!activePlayerIds.has(id)) lastPlayerTrackState.delete(id)
   }
   latestObservation = obs
-  updateScene(obs)
+  pushSnapshot(obs)
+  // HUD and killfeed use latest data (no delay)
   updateHud(obs)
   updateKillfeed(obs)
-  drawMinimap(obs)
 }
 
 function setConnectionState(text: string): void {
@@ -1049,18 +1181,6 @@ function connectWs(): void {
   }
 }
 
-async function refreshLeaderboard(): Promise<void> {
-  try {
-    const r = await fetch(`/api/v1/games/${gameId}/leaderboard`)
-    if (!r.ok) return
-    const data = await r.json() as { entries?: LeaderboardEntry[] }
-    leaderboardData = data.entries ?? []
-    updateLeaderboard()
-  } catch {
-    // ignore
-  }
-}
-
 window.addEventListener('keydown', (event) => {
   if (!latestObservation) return
   if (event.code !== 'Tab') return
@@ -1080,16 +1200,16 @@ window.addEventListener('resize', () => {
 })
 
 connectWs()
-void refreshLeaderboard()
-window.setInterval(() => void refreshLeaderboard(), 3000)
 
 function frame(): void {
   requestAnimationFrame(frame)
   const dt = Math.min(clock.getDelta(), 0.05)
 
-  if (latestObservation) {
-    updateCamera(latestObservation, dt)
-    updateModelAnimations(latestObservation, dt)
+  const interpObs = interpolatedObservation()
+  if (interpObs) {
+    updateScene(interpObs)
+    updateCamera(interpObs, dt)
+    updateModelAnimations(interpObs, dt)
   }
   tickWeaponVisual(dt)
 

@@ -179,14 +179,15 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             fire_move_to_finished(instance, agent_id, false);
         }
 
-        if let Some(vel) = instance.physics.get_character_velocity(hrp_id) {
-            update_humanoid_locomotion_state(instance, agent_id, vel);
-            if humanoid_auto_rotate_enabled(instance, agent_id) {
-                let speed = (vel[0] * vel[0] + vel[2] * vel[2]).sqrt();
-                if speed > 0.2 {
-                    let yaw = yaw_from_horizontal_velocity(vel);
-                    instance.physics.set_character_yaw(hrp_id, yaw);
-                }
+        let locomotion_vec = [motion_plan.desired[0], 0.0, motion_plan.desired[2]];
+        update_humanoid_locomotion_state(instance, agent_id, locomotion_vec);
+        if humanoid_auto_rotate_enabled(instance, agent_id) {
+            let speed =
+                (locomotion_vec[0] * locomotion_vec[0] + locomotion_vec[2] * locomotion_vec[2])
+                    .sqrt();
+            if speed > 0.05 {
+                let yaw = yaw_from_horizontal_velocity(locomotion_vec);
+                instance.physics.set_character_yaw(hrp_id, yaw);
             }
         }
     }

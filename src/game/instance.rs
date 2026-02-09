@@ -1406,6 +1406,7 @@ pub struct SpectatorPlayerInfo {
 pub struct SpectatorPlayerAnimation {
     pub track_id: u64,
     pub animation_id: String,
+    pub length: f32,
     pub priority: i32,
     pub time_position: f32,
     pub speed: f32,
