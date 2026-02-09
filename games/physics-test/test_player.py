@@ -430,6 +430,58 @@ def test_jump(headers: dict):
     print("  CHECK: Low/med should be reachable; high depends on exact jump tuning")
 
 
+def test_jump_simple(headers: dict):
+    """Test 7: Minimal jump sanity check (flat -> low platform only)."""
+    print("\n--- TEST 7: Jump Simple (Low Platform Only) ---")
+
+    # Stage on flat ground before the low platform.
+    stage = [30.0, 3.0, 0.0]
+    pos = wait_until_near(headers, stage, threshold=1.0, timeout=10.0)
+    if not pos:
+        print("  SKIP: Could not reach staging point")
+        return
+
+    # Single objective: reach low platform top at (40, 2, 0).
+    required_hrp_y = 4.2  # platform top (~2.5) + standing HRP offset margin
+    start = time.time()
+    success = False
+    best_y = -999.0
+    best_dist = float("inf")
+    last_pos = None
+    jump_sent = False
+
+    while time.time() - start < 6.0:
+        obs = observe(headers)
+        if not obs:
+            time.sleep(0.2)
+            continue
+
+        p = obs["player"]["position"]
+        last_pos = p
+        dist = distance_xz(p, [40.0, p[1], 0.0])
+        best_dist = min(best_dist, dist)
+        best_y = max(best_y, p[1])
+
+        # Aim slightly beyond platform face to avoid stopping on its edge.
+        move_x = 43.0 if dist < 10.0 else 39.0
+        move_to(headers, [move_x, 10.0, 0.0])
+
+        if dist < 9.0 and not jump_sent:
+            send_input(headers, "Jump")
+            jump_sent = True
+
+        if dist <= 2.0 and p[1] >= required_hrp_y:
+            success = True
+            break
+
+        time.sleep(0.2)
+
+    if success:
+        print(f"  PASS: landed on low platform (pos={last_pos})")
+    else:
+        print(f"  FAIL: best_y={best_y:.2f} best_dist_xz={best_dist:.2f} last_pos={last_pos}")
+
+
 def test_kinematic_push(headers: dict):
     """Test 6: Stand in front of pusher, ride elevator, stand near spinner."""
     print("\n--- TEST 6: Kinematic Push (X=-40) ---")
@@ -489,6 +541,7 @@ TESTS = {
     "4": ("touched", test_touched_events),
     "5": ("jump", test_jump),
     "6": ("kinematic", test_kinematic_push),
+    "7": ("jump_simple", test_jump_simple),
 }
 
 # Build reverse lookup: name -> (number, func)
