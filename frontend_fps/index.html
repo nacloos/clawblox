@@ -10,34 +10,37 @@
     <canvas id="game"></canvas>
 
     <div id="hud">
-      <div id="top-left">
-        <div id="status" class="panel">CONNECTING</div>
-        <div id="target" class="panel">FOLLOW: NONE</div>
-        <div id="killfeed"></div>
+      <div id="crosshair"><div class="crosshair-dot"></div></div>
+
+      <div id="health-container">
+        <div id="health-label">Health</div>
+        <div id="health-text">100</div>
+        <div id="health-bar-bg"><div id="health-bar"></div></div>
       </div>
 
-      <div id="top-right" class="panel stack">
-        <div class="label">LEADERBOARD</div>
+      <div id="ammo-container">
+        <div id="ammo-label">Ammo</div>
+        <div id="ammo-text"><span class="mag">30</span><span class="sep">/</span><span class="reserve">120</span></div>
+        <div id="weapon-name">Rifle</div>
+      </div>
+
+      <div id="score-container">
+        <div id="score-label">Score</div>
+        <div id="score-text">0</div>
+        <div id="wave-text">Spectating</div>
+        <div id="spectate-text">Connecting...</div>
+      </div>
+
+      <div id="leaderboard-container">
+        <div id="leaderboard-label">Leaderboard</div>
         <div id="leaderboard">No data</div>
       </div>
 
-      <div id="crosshair"><div class="dot"></div></div>
-
-      <div id="bottom-left" class="panel stack">
-        <div class="label">HEALTH</div>
-        <div id="health-text" class="big">-</div>
-        <div class="bar-bg"><div id="health-bar"></div></div>
-        <canvas id="minimap" width="150" height="150"></canvas>
-      </div>
-
-      <div id="bottom-right" class="panel stack right">
-        <div class="label">LOADOUT</div>
-        <div id="weapon" class="big">-</div>
-        <div id="ammo" class="big small">-</div>
-        <div id="score" class="value">Score: -</div>
-        <div id="phase" class="value">Phase: -</div>
-      </div>
+      <div id="killfeed"></div>
+      <div id="minimap"><canvas id="minimap-canvas" width="140" height="140"></canvas></div>
     </div>
+
+    <div id="damage-overlay"></div>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

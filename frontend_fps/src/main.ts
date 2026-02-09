@@ -1,5 +1,9 @@
 import * as pako from 'pako'
 import * as THREE from 'three'
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js'
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
+import { geometryFromRender, materialFromRender, type RenderSpec } from './render/presets'
 
 interface SpectatorPlayerInfo {
   id: string
@@ -15,18 +19,12 @@ interface SpectatorEntity {
   type: string
   position: [number, number, number]
   rotation?: [[number, number, number], [number, number, number], [number, number, number]]
-  size?: [number, number, number]
-  color?: [number, number, number]
-  material?: string
-  shape?: 'Block' | 'Ball' | 'Cylinder' | 'Wedge'
-  health?: number
-  model_url?: string
+  size: [number, number, number]
+  render: RenderSpec
 }
 
 interface SpectatorObservation {
-  instance_id: string
   tick: number
-  server_time_ms: number
   game_status: string
   players: SpectatorPlayerInfo[]
   entities: SpectatorEntity[]
@@ -40,114 +38,152 @@ interface LeaderboardEntry {
 }
 
 const canvas = document.getElementById('game') as HTMLCanvasElement
-const statusEl = document.getElementById('status') as HTMLDivElement
-const targetEl = document.getElementById('target') as HTMLDivElement
-const killfeedEl = document.getElementById('killfeed') as HTMLDivElement
-const leaderboardEl = document.getElementById('leaderboard') as HTMLDivElement
 const healthTextEl = document.getElementById('health-text') as HTMLDivElement
 const healthBarEl = document.getElementById('health-bar') as HTMLDivElement
-const weaponEl = document.getElementById('weapon') as HTMLDivElement
-const ammoEl = document.getElementById('ammo') as HTMLDivElement
-const scoreEl = document.getElementById('score') as HTMLDivElement
-const phaseEl = document.getElementById('phase') as HTMLDivElement
-const minimapCanvas = document.getElementById('minimap') as HTMLCanvasElement
+const ammoMagEl = document.querySelector('#ammo-text .mag') as HTMLSpanElement
+const ammoReserveEl = document.querySelector('#ammo-text .reserve') as HTMLSpanElement
+const weaponNameEl = document.getElementById('weapon-name') as HTMLDivElement
+const scoreTextEl = document.getElementById('score-text') as HTMLDivElement
+const waveTextEl = document.getElementById('wave-text') as HTMLDivElement
+const spectateTextEl = document.getElementById('spectate-text') as HTMLDivElement
+const killfeedEl = document.getElementById('killfeed') as HTMLDivElement
+const leaderboardEl = document.getElementById('leaderboard') as HTMLDivElement
+const damageOverlayEl = document.getElementById('damage-overlay') as HTMLDivElement
+const minimapCanvas = document.getElementById('minimap-canvas') as HTMLCanvasElement
 const minimapCtx = minimapCanvas.getContext('2d')
+if (!minimapCtx) throw new Error('Minimap context unavailable')
 
-if (!minimapCtx) throw new Error('Minimap 2D context unavailable')
-
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' })
 renderer.setSize(window.innerWidth, window.innerHeight)
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
 renderer.shadowMap.enabled = true
 renderer.shadowMap.type = THREE.PCFSoftShadowMap
-renderer.outputColorSpace = THREE.SRGBColorSpace
 renderer.toneMapping = THREE.ACESFilmicToneMapping
-renderer.toneMappingExposure = 1.35
+renderer.toneMappingExposure = 1.8
+renderer.outputColorSpace = THREE.SRGBColorSpace
 
 const scene = new THREE.Scene()
-scene.background = new THREE.Color(0x151723)
-scene.fog = new THREE.FogExp2(0x141926, 0.01)
+scene.fog = new THREE.FogExp2(0x1a1a2a, 0.008)
+scene.background = new THREE.Color(0x1a1a2a)
 
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 300)
-camera.position.set(0, 5, 10)
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 260)
+camera.position.set(0, 7, 14)
 
-const hemi = new THREE.HemisphereLight(0x7ea2ff, 0x17191f, 0.65)
-scene.add(hemi)
+const composer = new EffectComposer(renderer)
+composer.addPass(new RenderPass(scene, camera))
+const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.6, 0.8, 0.5)
+composer.addPass(bloom)
 
-const moon = new THREE.DirectionalLight(0xb8d1ff, 1.1)
-moon.position.set(18, 24, 10)
-moon.castShadow = true
-moon.shadow.mapSize.set(2048, 2048)
-moon.shadow.camera.left = -80
-moon.shadow.camera.right = 80
-moon.shadow.camera.top = 80
-moon.shadow.camera.bottom = -80
-scene.add(moon)
+const ambientLight = new THREE.AmbientLight(0x8888aa, 1.2)
+scene.add(ambientLight)
 
-const accentLights: THREE.PointLight[] = []
-const accentPositions = [
-  [-26, 4, -26], [26, 4, -26], [-26, 4, 26], [26, 4, 26],
-  [0, 5, -32], [0, 5, 32], [-32, 5, 0], [32, 5, 0],
+const dirLight = new THREE.DirectionalLight(0x8899cc, 1.5)
+dirLight.position.set(20, 30, 10)
+dirLight.castShadow = true
+dirLight.shadow.mapSize.set(2048, 2048)
+dirLight.shadow.camera.left = -40
+dirLight.shadow.camera.right = 40
+dirLight.shadow.camera.top = 40
+dirLight.shadow.camera.bottom = -40
+dirLight.shadow.camera.near = 0.5
+dirLight.shadow.camera.far = 120
+dirLight.shadow.bias = -0.001
+scene.add(dirLight)
+
+const accentColors = [0xff4444, 0x4488ff, 0xff8800, 0x44ff88, 0xff44ff, 0xffff44]
+const lightPositions = [
+  [-15, 3, -15], [15, 3, -15], [-15, 3, 15], [15, 3, 15],
+  [0, 3, -20], [0, 3, 20], [-20, 3, 0], [20, 3, 0],
+  [-8, 3, -8], [8, 3, 8], [-8, 3, 8], [8, 3, -8],
 ]
-const accentColors = [0xff4646, 0x45a9ff, 0xff8f2f, 0x4dff87]
-for (let i = 0; i < accentPositions.length; i++) {
-  const light = new THREE.PointLight(accentColors[i % accentColors.length], 1.7, 44, 2)
-  light.position.set(accentPositions[i][0], accentPositions[i][1], accentPositions[i][2])
+const accentLights: THREE.PointLight[] = []
+lightPositions.forEach((pos, i) => {
+  const light = new THREE.PointLight(accentColors[i % accentColors.length], 4, 20)
+  light.position.set(pos[0], pos[1], pos[2])
   scene.add(light)
   accentLights.push(light)
+})
+
+const floorTexture = createFloorTexture()
+const wallTexture = createWallTexture()
+
+function createFloorTexture(): THREE.CanvasTexture {
+  const c = document.createElement('canvas')
+  c.width = 512
+  c.height = 512
+  const ctx = c.getContext('2d')
+  if (!ctx) throw new Error('canvas 2d unavailable')
+  ctx.fillStyle = '#3a3a3a'
+  ctx.fillRect(0, 0, 512, 512)
+  ctx.strokeStyle = '#4a4a4a'
+  ctx.lineWidth = 2
+  for (let i = 0; i <= 512; i += 64) {
+    ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, 512); ctx.stroke()
+    ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(512, i); ctx.stroke()
+  }
+  for (let i = 0; i < 2000; i++) {
+    const x = Math.random() * 512
+    const y = Math.random() * 512
+    const v = 50 + Math.random() * 20
+    ctx.fillStyle = `rgb(${v},${v},${v})`
+    ctx.fillRect(x, y, 2, 2)
+  }
+  const tex = new THREE.CanvasTexture(c)
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping
+  tex.repeat.set(15, 15)
+  return tex
 }
 
-const grid = new THREE.GridHelper(240, 96, 0x26466a, 0x18273e)
-const mat = grid.material as THREE.Material
-mat.transparent = true
-mat.opacity = 0.24
-scene.add(grid)
+function createWallTexture(): THREE.CanvasTexture {
+  const c = document.createElement('canvas')
+  c.width = 256
+  c.height = 256
+  const ctx = c.getContext('2d')
+  if (!ctx) throw new Error('canvas 2d unavailable')
+  ctx.fillStyle = '#3a3a42'
+  ctx.fillRect(0, 0, 256, 256)
+  for (let i = 0; i < 3000; i++) {
+    const x = Math.random() * 256
+    const y = Math.random() * 256
+    const v = 50 + Math.random() * 25
+    ctx.fillStyle = `rgb(${v},${v},${v + 5})`
+    ctx.fillRect(x, y, Math.random() * 3 + 1, Math.random() * 3 + 1)
+  }
+  ctx.strokeStyle = '#2e2e36'
+  ctx.lineWidth = 2
+  ;[64, 128, 192].forEach((y) => { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(256, y); ctx.stroke() })
+  const tex = new THREE.CanvasTexture(c)
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping
+  return tex
+}
 
-const floor = new THREE.Mesh(
-  new THREE.PlaneGeometry(260, 260),
-  new THREE.MeshStandardMaterial({ color: 0x1f2531, roughness: 0.95, metalness: 0.05 }),
-)
-floor.rotation.x = -Math.PI / 2
-floor.receiveShadow = true
-scene.add(floor)
+function rotationToQuaternion(rot: [[number, number, number], [number, number, number], [number, number, number]]): THREE.Quaternion {
+  const m = new THREE.Matrix4()
+  m.set(rot[0][0], rot[0][1], rot[0][2], 0, rot[1][0], rot[1][1], rot[1][2], 0, rot[2][0], rot[2][1], rot[2][2], 0, 0, 0, 0, 1)
+  return new THREE.Quaternion().setFromRotationMatrix(m)
+}
 
-const clock = new THREE.Clock()
+function materialFromEntity(entity: SpectatorEntity): THREE.Material {
+  return materialFromRender(entity.render)
+}
+
+function geometryFromEntity(entity: SpectatorEntity): THREE.BufferGeometry {
+  return geometryFromRender(entity.render, entity.size)
+}
+
 const entityObjects = new Map<number, THREE.Object3D>()
+const clock = new THREE.Clock()
 let latestObservation: SpectatorObservation | null = null
 let selectedPlayerId: string | null = null
 let leaderboardData: LeaderboardEntry[] = []
+let lastObservedHealth: number | null = null
 
 const prevPlayerHealth = new Map<string, number>()
-const prevPlayers = new Set<string>()
-const prevEntityIds = new Set<number>()
-
-function clamp01(v: number): number {
-  if (v < 0) return 0
-  if (v > 1) return 1
-  return v
-}
-
-function getGameId(): string {
-  const pathMatch = window.location.pathname.match(/\/spectate\/([0-9a-fA-F-]{36})/)
-  if (pathMatch?.[1]) return pathMatch[1]
-
-  const q = new URLSearchParams(window.location.search).get('game')
-  if (q) return q
-
-  throw new Error('Missing game id. Use /spectate/<game_id> or ?game=<game_id>')
-}
-
-const gameId = getGameId()
-
-function toThreeColor(arr?: [number, number, number]): THREE.Color {
-  if (!arr) return new THREE.Color(0x8497b0)
-  return new THREE.Color(arr[0], arr[1], arr[2])
-}
 
 function numberAttr(attrs: Record<string, unknown> | undefined, keys: string[]): number | null {
   if (!attrs) return null
-  for (const k of keys) {
-    const v = attrs[k]
+  for (const key of keys) {
+    const v = attrs[key]
     if (typeof v === 'number' && Number.isFinite(v)) return v
   }
   return null
@@ -155,91 +191,47 @@ function numberAttr(attrs: Record<string, unknown> | undefined, keys: string[]):
 
 function stringAttr(attrs: Record<string, unknown> | undefined, keys: string[]): string | null {
   if (!attrs) return null
-  for (const k of keys) {
-    const v = attrs[k]
-    if (typeof v === 'string' && v.trim().length > 0) return v
+  for (const key of keys) {
+    const v = attrs[key]
+    if (typeof v === 'string' && v.length > 0) return v
   }
   return null
 }
 
-function rotationToQuaternion(rot: [[number, number, number], [number, number, number], [number, number, number]]): THREE.Quaternion {
-  const m = new THREE.Matrix4()
-  m.set(
-    rot[0][0], rot[0][1], rot[0][2], 0,
-    rot[1][0], rot[1][1], rot[1][2], 0,
-    rot[2][0], rot[2][1], rot[2][2], 0,
-    0, 0, 0, 1,
-  )
-  return new THREE.Quaternion().setFromRotationMatrix(m)
-}
-
-function materialFromEntity(entity: SpectatorEntity): THREE.Material {
-  const color = toThreeColor(entity.color)
-
-  switch (entity.material) {
-    case 'Neon':
-      return new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.45, roughness: 0.3, metalness: 0.3 })
-    case 'Metal':
-      return new THREE.MeshStandardMaterial({ color, roughness: 0.18, metalness: 0.94 })
-    case 'Glass':
-      return new THREE.MeshStandardMaterial({ color, roughness: 0.1, metalness: 0.1, transparent: true, opacity: 0.35 })
-    case 'Wood':
-      return new THREE.MeshStandardMaterial({ color, roughness: 0.8, metalness: 0.02 })
-    default:
-      return new THREE.MeshStandardMaterial({ color, roughness: 0.62, metalness: 0.16 })
+function queueKillfeed(text: string): void {
+  const node = document.createElement('div')
+  node.className = 'kill-msg'
+  node.textContent = text
+  killfeedEl.prepend(node)
+  while (killfeedEl.children.length > 8) {
+    killfeedEl.lastElementChild?.remove()
   }
+  window.setTimeout(() => node.remove(), 3400)
 }
 
-function geometryFromEntity(entity: SpectatorEntity): THREE.BufferGeometry {
-  const size = entity.size ?? [1, 1, 1]
-  if (entity.shape === 'Ball') return new THREE.SphereGeometry(Math.max(0.2, size[0] * 0.5), 16, 16)
-  if (entity.shape === 'Cylinder') return new THREE.CylinderGeometry(Math.max(0.2, size[0] * 0.5), Math.max(0.2, size[0] * 0.5), Math.max(0.2, size[1]), 16)
-  return new THREE.BoxGeometry(Math.max(0.2, size[0]), Math.max(0.2, size[1]), Math.max(0.2, size[2]))
+function disposeObject(obj: THREE.Object3D): void {
+  obj.traverse((n) => {
+    const mesh = n as THREE.Mesh
+    if (!mesh.isMesh) return
+    mesh.geometry.dispose()
+    const material = mesh.material
+    if (Array.isArray(material)) material.forEach((m) => m.dispose())
+    else material.dispose()
+  })
 }
 
 function createEntityObject(entity: SpectatorEntity): THREE.Object3D {
-  const geo = geometryFromEntity(entity)
-  const mat = materialFromEntity(entity)
-  const mesh = new THREE.Mesh(geo, mat)
+  const mesh = new THREE.Mesh(geometryFromEntity(entity), materialFromEntity(entity))
   mesh.castShadow = true
   mesh.receiveShadow = true
   return mesh
 }
 
-function disposeObject(obj: THREE.Object3D): void {
-  obj.traverse((node) => {
-    const mesh = node as THREE.Mesh
-    if (!mesh.isMesh) return
-
-    mesh.geometry?.dispose()
-
-    if (Array.isArray(mesh.material)) {
-      for (const m of mesh.material) m.dispose()
-    } else {
-      mesh.material?.dispose()
-    }
-  })
-}
-
-function queueKillfeed(msg: string): void {
-  const item = document.createElement('div')
-  item.className = 'kill-msg'
-  item.textContent = msg
-  killfeedEl.prepend(item)
-  while (killfeedEl.children.length > 6) {
-    killfeedEl.lastElementChild?.remove()
-  }
-  window.setTimeout(() => item.remove(), 3500)
-}
-
 function chooseFollowTarget(obs: SpectatorObservation): string | null {
-  if (selectedPlayerId && obs.players.some((p) => p.id === selectedPlayerId)) {
-    return selectedPlayerId
-  }
+  if (selectedPlayerId && obs.players.some((p) => p.id === selectedPlayerId)) return selectedPlayerId
 
   let best: SpectatorPlayerInfo | null = null
-  let bestScore = Number.NEGATIVE_INFINITY
-
+  let bestScore = -Infinity
   for (const p of obs.players) {
     const score = numberAttr(p.attributes, ['Score', 'Kills', 'Points']) ?? 0
     if (score > bestScore) {
@@ -247,7 +239,6 @@ function chooseFollowTarget(obs: SpectatorObservation): string | null {
       bestScore = score
     }
   }
-
   return best?.id ?? obs.players[0]?.id ?? null
 }
 
@@ -256,7 +247,6 @@ function updateScene(obs: SpectatorObservation): void {
 
   for (const entity of obs.entities) {
     activeIds.add(entity.id)
-
     let obj = entityObjects.get(entity.id)
     if (!obj) {
       obj = createEntityObject(entity)
@@ -275,76 +265,72 @@ function updateScene(obs: SpectatorObservation): void {
       entityObjects.delete(id)
     }
   }
+}
 
-  prevEntityIds.clear()
-  for (const id of activeIds) prevEntityIds.add(id)
+function flashDamageOverlay(): void {
+  damageOverlayEl.style.opacity = '0.58'
+  window.setTimeout(() => {
+    damageOverlayEl.style.opacity = '0'
+  }, 130)
 }
 
 function updateHud(obs: SpectatorObservation): void {
-  statusEl.textContent = `CONNECTED | TICK ${obs.tick}`
-
   selectedPlayerId = chooseFollowTarget(obs)
   const target = obs.players.find((p) => p.id === selectedPlayerId) ?? null
-  targetEl.textContent = `FOLLOW: ${target ? target.name : 'NONE'}`
 
   if (!target) {
+    spectateTextEl.textContent = 'No players'
     healthTextEl.textContent = '-'
     healthBarEl.style.width = '0%'
-    weaponEl.textContent = '-'
-    ammoEl.textContent = '-'
-    scoreEl.textContent = 'Score: -'
-    phaseEl.textContent = `Phase: ${obs.game_status}`
+    ammoMagEl.textContent = '-'
+    ammoReserveEl.textContent = '-'
+    weaponNameEl.textContent = 'Unknown'
+    scoreTextEl.textContent = '0'
+    waveTextEl.textContent = 'Spectating'
     return
   }
 
-  const hp = Math.max(0, Math.round(target.health))
-  healthTextEl.textContent = String(hp)
-  healthBarEl.style.width = `${clamp01(hp / 100) * 100}%`
+  spectateTextEl.textContent = `Following ${target.name} • tick ${obs.tick}`
 
-  if (hp > 60) healthBarEl.style.background = 'linear-gradient(90deg, #3ef67d, #7dffa6)'
-  else if (hp > 30) healthBarEl.style.background = 'linear-gradient(90deg, #ffad32, #ffd35f)'
-  else healthBarEl.style.background = 'linear-gradient(90deg, #ff4545, #ff7777)'
+  const hp = Math.max(0, Math.round(target.health))
+  if (lastObservedHealth !== null && hp < lastObservedHealth) flashDamageOverlay()
+  lastObservedHealth = hp
+
+  healthTextEl.textContent = String(hp)
+  healthBarEl.style.width = `${Math.max(0, Math.min(100, hp))}%`
+
+  if (hp > 60) {
+    healthBarEl.style.background = 'linear-gradient(90deg, #44ff44, #88ff44)'
+  } else if (hp > 30) {
+    healthBarEl.style.background = 'linear-gradient(90deg, #ffaa00, #ffcc44)'
+  } else {
+    healthBarEl.style.background = 'linear-gradient(90deg, #ff2222, #ff4444)'
+  }
 
   const weapon = stringAttr(target.attributes, ['WeaponName', 'CurrentWeaponName', 'Weapon'])
   const ammoMag = numberAttr(target.attributes, ['Ammo', 'AmmoMag', 'CurrentAmmo'])
   const ammoReserve = numberAttr(target.attributes, ['AmmoReserve', 'SpareAmmo', 'Reserve'])
   const score = numberAttr(target.attributes, ['Score', 'Kills', 'Points'])
-  const wave = numberAttr(target.attributes, ['Wave'])
-  const phase = stringAttr(target.attributes, ['Phase', 'RoundState'])
+  const phase = stringAttr(target.attributes, ['MatchState', 'Phase', 'RoundState'])
 
-  weaponEl.textContent = weapon ?? 'Unknown Weapon'
-  ammoEl.textContent = ammoMag !== null && ammoReserve !== null ? `${Math.round(ammoMag)} / ${Math.round(ammoReserve)}` : 'N/A'
-  scoreEl.textContent = `Score: ${score !== null ? Math.round(score) : '-'}`
-
-  const statusParts: string[] = []
-  if (phase) statusParts.push(phase)
-  if (wave !== null) statusParts.push(`Wave ${Math.round(wave)}`)
-  if (!statusParts.length) statusParts.push(obs.game_status)
-  phaseEl.textContent = `Phase: ${statusParts.join(' | ')}`
+  weaponNameEl.textContent = weapon ?? 'Rifle'
+  ammoMagEl.textContent = ammoMag === null ? '-' : `${Math.round(ammoMag)}`
+  ammoReserveEl.textContent = ammoReserve === null ? '-' : `${Math.round(ammoReserve)}`
+  scoreTextEl.textContent = score === null ? '0' : `${Math.round(score)}`
+  waveTextEl.textContent = phase ?? obs.game_status
 }
 
 function updateKillfeed(obs: SpectatorObservation): void {
-  const currentPlayerSet = new Set(obs.players.map((p) => p.id))
-
   for (const p of obs.players) {
-    const prevHealth = prevPlayerHealth.get(p.id)
-    if (prevHealth !== undefined) {
-      const delta = prevHealth - p.health
-      if (delta >= 20) queueKillfeed(`${p.name} took ${Math.round(delta)} damage`)
-      if (prevHealth > 0 && p.health <= 0) queueKillfeed(`${p.name} eliminated`)
-    }
+    const prev = prevPlayerHealth.get(p.id)
     prevPlayerHealth.set(p.id, p.health)
-  }
 
-  for (const prevId of prevPlayers) {
-    if (!currentPlayerSet.has(prevId)) {
-      const gone = Array.from(obs.players).find((p) => p.id === prevId)
-      queueKillfeed(`${gone?.name ?? 'Player'} left view`)
+    if (prev !== undefined) {
+      const delta = prev - p.health
+      if (delta >= 18) queueKillfeed(`${p.name} took ${Math.round(delta)} dmg`)
+      if (prev > 0 && p.health <= 0) queueKillfeed(`${p.name} eliminated`)
     }
   }
-
-  prevPlayers.clear()
-  for (const id of currentPlayerSet) prevPlayers.add(id)
 }
 
 function updateLeaderboard(): void {
@@ -353,158 +339,138 @@ function updateLeaderboard(): void {
     return
   }
 
-  leaderboardEl.innerHTML = leaderboardData
-    .slice(0, 8)
-    .map((entry) => {
-      const name = entry.name || entry.key
-      return `<div class="lb-row"><span>#${entry.rank}</span><span>${name}</span><span>${Math.round(entry.score)}</span></div>`
-    })
-    .join('')
+  leaderboardEl.innerHTML = leaderboardData.slice(0, 8).map((entry) => {
+    const name = entry.name || entry.key
+    return `<div class="lb-row"><span>#${entry.rank}</span><span>${name}</span><span>${Math.round(entry.score)}</span></div>`
+  }).join('')
 }
 
 function drawMinimap(obs: SpectatorObservation): void {
+  const ctx = minimapCtx
   const w = minimapCanvas.width
   const h = minimapCanvas.height
-  minimapCtx.clearRect(0, 0, w, h)
+  ctx.clearRect(0, 0, w, h)
 
-  minimapCtx.fillStyle = 'rgba(6, 8, 14, 0.9)'
-  minimapCtx.fillRect(0, 0, w, h)
+  ctx.fillStyle = 'rgba(0,0,0,0.8)'
+  ctx.fillRect(0, 0, w, h)
 
-  const ents = obs.entities
-  const players = obs.players
-
-  let maxRadius = 20
-  for (const e of ents) {
-    const r = Math.max(Math.abs(e.position[0]), Math.abs(e.position[2]))
-    if (r > maxRadius) maxRadius = r
+  const all = [...obs.entities.map((e) => e.position), ...obs.players.map((p) => p.position)]
+  let maxAbs = 30
+  for (const p of all) {
+    maxAbs = Math.max(maxAbs, Math.abs(p[0]), Math.abs(p[2]))
   }
-  for (const p of players) {
-    const r = Math.max(Math.abs(p.position[0]), Math.abs(p.position[2]))
-    if (r > maxRadius) maxRadius = r
-  }
+  const scale = (w * 0.44) / maxAbs
 
-  const scale = (w * 0.45) / Math.max(20, maxRadius)
+  const sx = (x: number) => x * scale + w / 2
+  const sz = (z: number) => z * scale + h / 2
 
-  const toScreen = (x: number, z: number): [number, number] => [x * scale + w / 2, z * scale + h / 2]
-
-  minimapCtx.strokeStyle = 'rgba(120, 180, 255, 0.35)'
-  minimapCtx.lineWidth = 1
-  minimapCtx.strokeRect(4, 4, w - 8, h - 8)
-
-  for (const e of ents) {
-    const [x, z] = toScreen(e.position[0], e.position[2])
-    minimapCtx.fillStyle = 'rgba(140, 180, 220, 0.55)'
-    minimapCtx.fillRect(x - 1, z - 1, 2, 2)
+  ctx.fillStyle = 'rgba(80,80,100,0.45)'
+  for (const e of obs.entities) {
+    const x = sx(e.position[0])
+    const z = sz(e.position[2])
+    ctx.fillRect(x - 1, z - 1, 2, 2)
   }
 
-  for (const p of players) {
-    const [x, z] = toScreen(p.position[0], p.position[2])
-    const isTarget = p.id === selectedPlayerId
-    minimapCtx.fillStyle = isTarget ? '#ffad33' : '#ffffff'
-    minimapCtx.beginPath()
-    minimapCtx.arc(x, z, isTarget ? 3 : 2, 0, Math.PI * 2)
-    minimapCtx.fill()
+  for (const p of obs.players) {
+    const x = sx(p.position[0])
+    const z = sz(p.position[2])
+    const active = p.id === selectedPlayerId
+    ctx.fillStyle = active ? '#ffad33' : '#ffffff'
+    ctx.beginPath()
+    ctx.arc(x, z, active ? 3 : 2.1, 0, Math.PI * 2)
+    ctx.fill()
   }
 }
 
 function updateCamera(obs: SpectatorObservation, dt: number): void {
-  const targetPlayer = obs.players.find((p) => p.id === selectedPlayerId)
-  if (!targetPlayer) return
+  const target = obs.players.find((p) => p.id === selectedPlayerId)
+  if (!target) return
 
-  const rootEntity = targetPlayer.root_part_id ? obs.entities.find((e) => e.id === targetPlayer.root_part_id) : null
-  const playerPos = new THREE.Vector3(targetPlayer.position[0], targetPlayer.position[1] + 2, targetPlayer.position[2])
+  const root = target.root_part_id ? obs.entities.find((e) => e.id === target.root_part_id) : null
 
+  const pos = new THREE.Vector3(target.position[0], target.position[1] + 1.6, target.position[2])
   const forward = new THREE.Vector3(0, 0, -1)
-  if (rootEntity?.rotation) {
-    const q = rotationToQuaternion(rootEntity.rotation)
-    forward.applyQuaternion(q)
-  }
-
+  if (root?.rotation) forward.applyQuaternion(rotationToQuaternion(root.rotation))
   forward.y = 0
-  if (forward.lengthSq() < 0.001) forward.set(0, 0, -1)
+  if (forward.lengthSq() < 0.0001) forward.set(0, 0, -1)
   forward.normalize()
 
-  const desired = playerPos.clone()
-    .addScaledVector(forward, -7.5)
-    .add(new THREE.Vector3(0, 3.2, 0))
-
+  const desired = pos.clone().addScaledVector(forward, -6.5).add(new THREE.Vector3(0, 2.6, 0))
   const alpha = 1 - Math.exp(-8 * dt)
   camera.position.lerp(desired, alpha)
 
-  const lookAt = playerPos.clone().addScaledVector(forward, 10)
+  const lookAt = pos.clone().addScaledVector(forward, 14)
   camera.lookAt(lookAt)
 }
+
+function getGameId(): string {
+  const fromPath = window.location.pathname.match(/\/spectate\/([0-9a-fA-F-]{36})/)
+  if (fromPath?.[1]) return fromPath[1]
+  const fromQuery = new URLSearchParams(window.location.search).get('game')
+  if (fromQuery) return fromQuery
+  throw new Error('Missing game id. Use /spectate/<game_id> or ?game=<game_id>')
+}
+
+const gameId = getGameId()
 
 function handleObservation(obs: SpectatorObservation): void {
   latestObservation = obs
   updateScene(obs)
-  updateKillfeed(obs)
   updateHud(obs)
+  updateKillfeed(obs)
   drawMinimap(obs)
 }
 
-function setDisconnected(): void {
-  statusEl.textContent = 'DISCONNECTED'
+function setConnectionState(text: string): void {
+  spectateTextEl.textContent = text
 }
 
-function connectSpectateWs(): void {
+function connectWs(): void {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const ws = new WebSocket(`${protocol}//${window.location.host}/api/v1/games/${gameId}/spectate/ws`)
   ws.binaryType = 'arraybuffer'
 
-  statusEl.textContent = 'CONNECTING'
+  setConnectionState('Connecting...')
 
   ws.onmessage = (event) => {
     try {
-      let json: string
+      let raw: string
       if (event.data instanceof ArrayBuffer) {
-        const decompressed = pako.ungzip(new Uint8Array(event.data))
-        json = new TextDecoder().decode(decompressed)
+        raw = new TextDecoder().decode(pako.ungzip(new Uint8Array(event.data)))
       } else {
-        json = event.data
+        raw = String(event.data)
       }
 
-      const payload = JSON.parse(json) as SpectatorObservation | { error: string }
-      if ('error' in payload) {
-        statusEl.textContent = `ERROR: ${payload.error}`
+      const parsed = JSON.parse(raw) as SpectatorObservation | { error: string }
+      if ('error' in parsed) {
+        setConnectionState(`Error: ${parsed.error}`)
         return
       }
 
-      handleObservation(payload)
-    } catch (err) {
-      statusEl.textContent = `PARSE ERROR`
-      console.error(err)
+      handleObservation(parsed)
+    } catch {
+      setConnectionState('Parse error')
     }
   }
 
+  ws.onerror = () => setConnectionState('WS error')
   ws.onclose = () => {
-    setDisconnected()
-    window.setTimeout(connectSpectateWs, 1500)
-  }
-
-  ws.onerror = () => {
-    setDisconnected()
+    setConnectionState('Disconnected - reconnecting...')
+    window.setTimeout(connectWs, 1500)
   }
 }
 
 async function refreshLeaderboard(): Promise<void> {
   try {
-    const resp = await fetch(`/api/v1/games/${gameId}/leaderboard`)
-    if (!resp.ok) return
-
-    const body = await resp.json() as { entries?: LeaderboardEntry[] }
-    leaderboardData = body.entries ?? []
+    const r = await fetch(`/api/v1/games/${gameId}/leaderboard`)
+    if (!r.ok) return
+    const data = await r.json() as { entries?: LeaderboardEntry[] }
+    leaderboardData = data.entries ?? []
     updateLeaderboard()
   } catch {
     // ignore
   }
 }
-
-window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight
-  camera.updateProjectionMatrix()
-  renderer.setSize(window.innerWidth, window.innerHeight)
-})
 
 window.addEventListener('keydown', (event) => {
   if (!latestObservation) return
@@ -513,20 +479,23 @@ window.addEventListener('keydown', (event) => {
 
   const players = latestObservation.players
   if (!players.length) return
-
-  const idx = players.findIndex((p) => p.id === selectedPlayerId)
-  const next = players[(idx + 1) % players.length]
-  selectedPlayerId = next.id
-  targetEl.textContent = `FOLLOW: ${next.name}`
+  const i = players.findIndex((p) => p.id === selectedPlayerId)
+  selectedPlayerId = players[(i + 1) % players.length].id
 })
 
-connectSpectateWs()
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight
+  camera.updateProjectionMatrix()
+  renderer.setSize(window.innerWidth, window.innerHeight)
+  composer.setSize(window.innerWidth, window.innerHeight)
+})
+
+connectWs()
 void refreshLeaderboard()
 window.setInterval(() => void refreshLeaderboard(), 3000)
 
 function frame(): void {
   requestAnimationFrame(frame)
-
   const dt = Math.min(clock.getDelta(), 0.05)
 
   if (latestObservation) {
@@ -534,11 +503,11 @@ function frame(): void {
   }
 
   const t = performance.now() * 0.001
-  accentLights.forEach((light, i) => {
-    light.intensity = 1.2 + Math.sin(t * 2 + i * 0.7) * 0.45
+  accentLights.forEach((l, i) => {
+    l.intensity = 1.5 + Math.sin(t * 2 + i * 0.7) * 0.8
   })
 
-  renderer.render(scene, camera)
+  composer.render()
 }
 
 frame()

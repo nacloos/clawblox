@@ -1457,12 +1457,7 @@ pub struct SpectatorEntity {
     pub rotation: Option<[[f32; 3]; 3]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<[f32; 3]>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub color: Option<[f32; 3]>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub material: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub shape: Option<String>,
+    pub render: SpectatorRender,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1471,6 +1466,25 @@ pub struct SpectatorEntity {
     pub model_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub billboard_gui: Option<BillboardGuiJson>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SpectatorRender {
+    pub kind: String,
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset_id: Option<String>,
+    pub primitive: String,
+    pub material: String,
+    pub color: [f32; 3],
+    #[serde(rename = "static")]
+    pub is_static: bool,
+    pub casts_shadow: bool,
+    pub receives_shadow: bool,
+    pub visible: bool,
+    pub double_sided: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transparency: Option<f32>,
 }
 
 /// BillboardGui serialization for 3D floating labels

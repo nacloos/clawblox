@@ -1,5 +1,68 @@
 use super::*;
 
+fn attr_string(
+    attrs: &std::collections::HashMap<String, AttributeValue>,
+    key: &str,
+) -> Option<String> {
+    match attrs.get(key) {
+        Some(AttributeValue::String(v)) => Some(v.clone()),
+        _ => None,
+    }
+}
+
+fn attr_bool(
+    attrs: &std::collections::HashMap<String, AttributeValue>,
+    key: &str,
+) -> Option<bool> {
+    match attrs.get(key) {
+        Some(AttributeValue::Bool(v)) => Some(*v),
+        _ => None,
+    }
+}
+
+fn attr_color(
+    attrs: &std::collections::HashMap<String, AttributeValue>,
+    key: &str,
+) -> Option<[f32; 3]> {
+    match attrs.get(key) {
+        Some(AttributeValue::Color3(c)) => Some([c.r, c.g, c.b]),
+        Some(AttributeValue::Vector3(v)) => Some([v.x, v.y, v.z]),
+        _ => None,
+    }
+}
+
+fn build_render(
+    data: &crate::game::lua::instance::InstanceData,
+    part_data: &crate::game::lua::instance::PartData,
+) -> SpectatorRender {
+    let role = attr_string(&data.attributes, "RenderRole").unwrap_or_else(|| "unspecified".to_string());
+    let preset_id = attr_string(&data.attributes, "RenderPresetId");
+    let kind = if preset_id.is_some() { "preset" } else { "primitive" }.to_string();
+    let primitive = attr_string(&data.attributes, "RenderPrimitive")
+        .unwrap_or_else(|| part_data.shape.name().to_string().to_lowercase());
+    let material = attr_string(&data.attributes, "RenderMaterial")
+        .unwrap_or_else(|| part_data.material.name().to_string());
+    let color = attr_color(&data.attributes, "RenderColor")
+        .unwrap_or([part_data.color.r, part_data.color.g, part_data.color.b]);
+    let is_static = attr_bool(&data.attributes, "RenderStatic")
+        .unwrap_or(data.tags.contains("Static") || part_data.anchored);
+
+    SpectatorRender {
+        kind,
+        role,
+        preset_id,
+        primitive,
+        material,
+        color,
+        is_static,
+        casts_shadow: true,
+        receives_shadow: true,
+        visible: part_data.transparency < 1.0,
+        double_sided: false,
+        transparency: if part_data.transparency != 0.0 { Some(part_data.transparency) } else { None },
+    }
+}
+
 pub(super) fn build_player_observation(
     instance: &GameInstance,
     agent_id: Uuid,
@@ -137,9 +200,7 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
                         part_data.size.y,
                         part_data.size.z,
                     ])),
-                    color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
-                    material: Some(part_data.material.name().to_string()),
-                    shape: Some(part_data.shape.name().to_string()),
+                    render: build_render(&data, part_data),
                     health: None,
                     pickup_type: None,
                     model_url: GameInstance::extract_model_url(&data.attributes),
