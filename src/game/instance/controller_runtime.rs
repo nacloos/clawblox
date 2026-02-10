@@ -164,6 +164,7 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
         }
 
         let mut post_move_grounded = grounded;
+        let mut applied_horizontal = [motion_plan.desired[0], motion_plan.desired[2]];
         if let Some(movement) = instance.physics.move_character(hrp_id, motion_plan.desired, dt) {
             new_vertical_velocity = resolve_vertical_velocity_after_move(
                 new_vertical_velocity,
@@ -172,6 +173,7 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
                 movement.grounded,
             );
             post_move_grounded = movement.grounded;
+            applied_horizontal = [movement.translation.x, movement.translation.z];
         }
 
         if let Some(state) = instance.physics.get_character_state_mut(hrp_id) {
@@ -184,7 +186,7 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             fire_move_to_finished(instance, agent_id, false);
         }
 
-        let locomotion_vec = [motion_plan.desired[0], 0.0, motion_plan.desired[2]];
+        let locomotion_vec = [applied_horizontal[0], 0.0, applied_horizontal[1]];
         update_humanoid_locomotion_state(
             instance,
             agent_id,
