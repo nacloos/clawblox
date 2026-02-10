@@ -4,6 +4,7 @@ export interface SpectatorPlayerInfo {
   position: [number, number, number]
   root_part_id?: number
   health: number
+  humanoid_state?: string
   attributes?: Record<string, unknown>
 }
 

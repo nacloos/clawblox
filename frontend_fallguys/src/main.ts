@@ -461,6 +461,12 @@ function createEntityVisual(entity: SpectatorEntity): THREE.Object3D {
 // ── Scene update ────────────────────────────────────────────
 function updateScene(obs: SpectatorObservation, dt: number): void {
   const activeIds = new Set<number>()
+  const stateByRootPartId = new Map<number, string>()
+  for (const player of obs.players) {
+    if (typeof player.root_part_id === 'number' && typeof player.humanoid_state === 'string') {
+      stateByRootPartId.set(player.root_part_id, player.humanoid_state)
+    }
+  }
 
   for (const entity of obs.entities) {
     activeIds.add(entity.id)
@@ -523,7 +529,9 @@ function updateScene(obs: SpectatorObservation, dt: number): void {
     // Animate GLB model entities (walk/idle blend)
     const animState = modelAnimStates.get(entity.id)
     if (animState) {
-      const isMoving = speed > 0.5
+      const humanoidState = stateByRootPartId.get(entity.id)
+      const airborneState = humanoidState === 'Jumping' || humanoidState === 'Freefall'
+      const isMoving = speed > 0.5 && !airborneState
       if (animState.walkAction) {
         const targetWeight = isMoving ? 1 : 0
         const current = animState.walkAction.getEffectiveWeight()

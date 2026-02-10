@@ -41,6 +41,9 @@ local CFG = {
     },
 }
 
+-- Keep player physics gravity aligned with Fall Guys scaled world tuning.
+Workspace.Gravity = math.abs(CFG.gravity)
+
 local FINISH_Z = 250 * S
 local SECTION_SPAWNS = {
     Vector3.new(0, 1 * S, 5 * S),

@@ -236,7 +236,7 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
                 let player_data = player.data.lock().unwrap();
 
                 // Get position and health in one pass (avoid redundant locking)
-                let (position, health, root_part_id, animator_id) = player_data
+                let (position, health, humanoid_state, root_part_id, animator_id) = player_data
                     .player_data
                     .as_ref()
                     .and_then(|pd| pd.character.as_ref())
@@ -266,11 +266,13 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
                         // Get health from Humanoid (while we have character locked)
                         let mut hp = 100;
                         let mut animator_id: Option<u64> = None;
+                        let mut humanoid_state: Option<String> = None;
                         for child in &char.children {
                             let child_data = child.lock().unwrap();
                             if child_data.name == "Humanoid" {
                                 if let Some(humanoid) = &child_data.humanoid_data {
                                     hp = humanoid.health as i32;
+                                    humanoid_state = Some(humanoid.state.name().to_string());
                                 }
                                 animator_id = child_data.children.iter().find_map(|anim_child| {
                                     let anim_data = anim_child.lock().unwrap();
@@ -284,9 +286,9 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
                             }
                         }
 
-                        (pos, hp, root_part_id, animator_id)
+                        (pos, hp, humanoid_state, root_part_id, animator_id)
                     })
-                    .unwrap_or(([0.0, 3.0, 0.0], 100, None, None));
+                    .unwrap_or(([0.0, 3.0, 0.0], 100, None, None, None));
 
                 let active_animations = animator_id.and_then(|id| {
                     runtime
@@ -367,6 +369,7 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
                     position: round_position(position),
                     root_part_id,
                     health,
+                    humanoid_state,
                     attributes,
                     gui,
                     active_animations,
