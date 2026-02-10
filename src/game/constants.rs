@@ -72,5 +72,5 @@ pub mod humanoid {
 
     /// Airborne horizontal steering acceleration in studs/s².
     /// Lower than ground response to avoid full walk-control in freefall.
-    pub const AIR_CONTROL_ACCEL: f32 = 24.0;
+    pub const AIR_CONTROL_ACCEL: f32 = 64.0;
 }

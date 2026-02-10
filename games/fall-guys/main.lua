@@ -15,8 +15,8 @@ local AgentInputService = game:GetService("AgentInputService")
 local S = 4 -- spatial scale factor
 
 local CFG = {
-    gravity = -30 * S,
-    jumpForce = 12 * S,
+    gravity = -196.2,
+    jumpForce = 18 * S,
     moveSpeed = 8 * S,
     diveForce = 15 * S,
     friction = 0.85,
@@ -656,8 +656,8 @@ local function setupPlayer(player)
 
     local humanoid = getHumanoid(player)
     if humanoid then
-        humanoid.WalkSpeed = CFG.moveSpeed * 2
-        humanoid.JumpPower = CFG.jumpForce * 3
+    humanoid.WalkSpeed = CFG.moveSpeed * 2
+    humanoid.JumpPower = CFG.jumpForce
     end
 
     local character = player.Character
