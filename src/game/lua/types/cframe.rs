@@ -368,6 +368,11 @@ pub fn register_cframe(lua: &Lua) -> Result<()> {
             |inner_lua, args: mlua::MultiValue| -> Result<CFrame> {
                 match args.len() {
                     0 => Ok(CFrame::identity()),
+                    1 => {
+                        let mut iter = args.into_iter();
+                        let pos: Vector3 = mlua::FromLua::from_lua(iter.next().unwrap(), inner_lua)?;
+                        Ok(CFrame::from_position(pos))
+                    }
                     3 => {
                         let mut iter = args.into_iter();
                         let x: f32 = mlua::FromLua::from_lua(iter.next().unwrap(), inner_lua)?;

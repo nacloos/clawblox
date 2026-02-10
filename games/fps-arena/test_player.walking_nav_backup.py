@@ -90,9 +90,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-players", type=int, default=1, help="Number of bot players to join")
     p.add_argument("--duration", type=float, default=45.0, help="Run duration in seconds")
     p.add_argument("--tick", type=float, default=0.35, help="Loop interval in seconds")
-    p.add_argument("--fire-cooldown", type=float, default=0.28, help="Minimum seconds between Fire inputs")
-    p.add_argument("--engage-range", type=float, default=90.0, help="Only chase/fire enemies within this range")
-    p.add_argument("--chase-refresh", type=float, default=0.75, help="Seconds between chase MoveTo refreshes")
     return p.parse_args()
 
 
@@ -206,74 +203,11 @@ def send_input(sess: Session, input_type: str, data: dict[str, Any] | None = Non
         r = requests.post(f"{sess.api_base}/input", headers=sess.headers, json=payload, timeout=10)
     r.raise_for_status()
 
-def safe_observe(sess: Session) -> dict[str, Any] | None:
-    try:
-        return observe(sess)
-    except requests.Timeout:
-        print(f"[net][{sess.agent_name}] observe timeout; skipping tick")
-        return None
-    except requests.RequestException as exc:
-        print(f"[net][{sess.agent_name}] observe error: {exc}")
-        return None
-
-
-def safe_send_input(sess: Session, input_type: str, data: dict[str, Any] | None = None) -> bool:
-    try:
-        send_input(sess, input_type, data)
-        return True
-    except requests.Timeout:
-        print(f"[net][{sess.agent_name}] input timeout type={input_type}")
-        return False
-    except requests.RequestException as exc:
-        print(f"[net][{sess.agent_name}] input error type={input_type}: {exc}")
-        return False
-
 
 def choose_move_target(t: float, radius: float = 32.0) -> list[float]:
     x = math.cos(t * 0.55) * radius
     z = math.sin(t * 0.55) * radius
     return [x, 2.0, z]
-
-
-def xz_distance(a: list[float], b: list[float]) -> float:
-    dx = float(a[0]) - float(b[0])
-    dz = float(a[2]) - float(b[2])
-    return math.sqrt(dx * dx + dz * dz)
-
-
-def nearest_visible_enemy_from_observation(
-    obs: dict[str, Any],
-    self_pos: list[float],
-) -> tuple[list[float] | None, str | None, float | None]:
-    others_raw = obs.get("other_players")
-    if not isinstance(others_raw, list):
-        return None, None, None
-
-    best_pos: list[float] | None = None
-    best_name: str | None = None
-    best_dist: float | None = None
-    for raw in others_raw:
-        if not isinstance(raw, dict):
-            continue
-        raw_name = raw.get("name")
-        name = raw_name if isinstance(raw_name, str) and raw_name else str(raw.get("id"))
-        health = raw.get("health")
-        if isinstance(health, (int, float)) and float(health) <= 0:
-            continue
-        pos = raw.get("position")
-        if not (isinstance(pos, list) and len(pos) >= 3):
-            continue
-        x, y, z = pos[0], pos[1], pos[2]
-        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)) or not isinstance(z, (int, float)):
-            continue
-        enemy_pos = [float(x), float(y), float(z)]
-        dist = xz_distance(self_pos, enemy_pos)
-        if best_dist is None or dist < best_dist:
-            best_dist = dist
-            best_pos = enemy_pos
-            best_name = name
-
-    return best_pos, best_name, best_dist
 
 
 def offset_target_away_from_obstacle(
@@ -387,17 +321,11 @@ def main() -> int:
         detour_attempts_by_idx = [0 for _ in sessions]
         front_blocked_ticks_by_idx = [0 for _ in sessions]
         last_nav_blocked_log_by_idx = [False for _ in sessions]
-        last_fire_by_idx = [0.0 for _ in sessions]
-        last_chase_refresh_by_idx = [0.0 for _ in sessions]
-        last_enemy_name_by_idx: list[str | None] = [None for _ in sessions]
-        last_visible_any_by_idx = [False for _ in sessions]
 
         while time.time() - start < args.duration:
             now = time.time()
             for i, sess in enumerate(sessions):
-                obs = safe_observe(sess)
-                if obs is None:
-                    continue
+                obs = observe(sess)
 
                 player = obs.get("player") or {}
 
@@ -424,28 +352,6 @@ def main() -> int:
                     f"kills={kills} deaths={deaths} score={score}"
                 )
 
-                enemy_pos, enemy_name, enemy_dist = nearest_visible_enemy_from_observation(obs, pos)
-                visible_count_raw = obs.get("other_players")
-                visible_count = len(visible_count_raw) if isinstance(visible_count_raw, list) else 0
-                visible_any = visible_count > 0
-                if visible_any != last_visible_any_by_idx[i]:
-                    if visible_any:
-                        print(f"[vis][{sess.agent_name}] visible_enemies={visible_count}")
-                    else:
-                        print(f"[vis][{sess.agent_name}] visible_enemies=0")
-                    last_visible_any_by_idx[i] = visible_any
-                has_enemy = (
-                    enemy_pos is not None
-                    and enemy_dist is not None
-                    and enemy_dist <= float(args.engage_range)
-                )
-                if enemy_name != last_enemy_name_by_idx[i]:
-                    if enemy_name is None:
-                        print(f"[target][{sess.agent_name}] none")
-                    else:
-                        print(f"[target][{sess.agent_name}] enemy={enemy_name} dist={enemy_dist:.1f}")
-                    last_enemy_name_by_idx[i] = enemy_name
-
                 nav_blocked = nav_front_clear is False
                 if nav_blocked:
                     front_blocked_ticks_by_idx[i] += 1
@@ -461,48 +367,19 @@ def main() -> int:
                 current_target = current_move_target_by_idx[i]
 
                 if current_target is None:
-                    if has_enemy and enemy_pos is not None:
-                        move_target = [enemy_pos[0], max(2.0, enemy_pos[1]), enemy_pos[2]]
-                        last_chase_refresh_by_idx[i] = now
-                    else:
-                        move_target = choose_move_target((now - start) + (i * 0.9))
+                    move_target = choose_move_target((now - start) + (i * 0.9))
                     current_main_target_by_idx[i] = move_target
                     current_move_target_by_idx[i] = move_target
                     in_detour_by_idx[i] = False
                     detour_attempts_by_idx[i] = 0
                     last_distance_by_idx[i] = None
                     last_progress_by_idx[i] = now
-                    if safe_send_input(sess, "MoveTo", {"position": move_target}):
-                        last_move_by_idx[i] = now
+                    send_input(sess, "MoveTo", {"position": move_target})
+                    last_move_by_idx[i] = now
                     print(
                         f"[move][{sess.agent_name}] main=({move_target[0]:.1f},{move_target[1]:.1f},{move_target[2]:.1f})"
                     )
                     continue
-
-                if (
-                    has_enemy
-                    and enemy_pos is not None
-                    and not in_detour_by_idx[i]
-                    and now - last_chase_refresh_by_idx[i] >= float(args.chase_refresh)
-                ):
-                    chase_target = [enemy_pos[0], max(2.0, enemy_pos[1]), enemy_pos[2]]
-                    current_main_target = current_main_target_by_idx[i]
-                    should_refresh_chase = (
-                        current_main_target is None
-                        or xz_distance(current_main_target, chase_target) >= 4.0
-                    )
-                    if should_refresh_chase:
-                        current_main_target_by_idx[i] = chase_target
-                        current_move_target_by_idx[i] = chase_target
-                        last_distance_by_idx[i] = None
-                        last_progress_by_idx[i] = now
-                        if safe_send_input(sess, "MoveTo", {"position": chase_target}):
-                            last_move_by_idx[i] = now
-                        print(
-                            f"[move][{sess.agent_name}] chase=({chase_target[0]:.1f},{chase_target[1]:.1f},{chase_target[2]:.1f}) "
-                            f"enemy={enemy_name}"
-                        )
-                    last_chase_refresh_by_idx[i] = now
 
                 dx = float(current_target[0]) - float(pos[0])
                 dz = float(current_target[2]) - float(pos[2])
@@ -556,8 +433,8 @@ def main() -> int:
                         detour_attempts_by_idx[i] = 0
                         last_distance_by_idx[i] = None
                         last_progress_by_idx[i] = now
-                        if safe_send_input(sess, "MoveTo", {"position": move_target}):
-                            last_move_by_idx[i] = now
+                        send_input(sess, "MoveTo", {"position": move_target})
+                        last_move_by_idx[i] = now
                         print(
                             f"[move][{sess.agent_name}] resume-main=({move_target[0]:.1f},{move_target[1]:.1f},{move_target[2]:.1f})"
                         )
@@ -570,8 +447,8 @@ def main() -> int:
                         detour_attempts_by_idx[i] = 0
                         last_distance_by_idx[i] = None
                         last_progress_by_idx[i] = now
-                        if safe_send_input(sess, "MoveTo", {"position": move_target}):
-                            last_move_by_idx[i] = now
+                        send_input(sess, "MoveTo", {"position": move_target})
+                        last_move_by_idx[i] = now
                         print(
                             f"[move][{sess.agent_name}] next-main=({move_target[0]:.1f},{move_target[1]:.1f},{move_target[2]:.1f})"
                         )
@@ -616,18 +493,10 @@ def main() -> int:
                     last_progress_by_idx[i] = now
                     front_blocked_ticks_by_idx[i] = 0
                     low_motion_ticks_by_idx[i] = 0
-                    if safe_send_input(sess, "MoveTo", {"position": move_target}):
-                        last_move_by_idx[i] = now
+                    send_input(sess, "MoveTo", {"position": move_target})
+                    last_move_by_idx[i] = now
 
-                if (
-                    has_enemy
-                    and enemy_dist is not None
-                    and enemy_dist <= 65.0
-                    and now - last_fire_by_idx[i] >= float(args.fire_cooldown)
-                ):
-                    if safe_send_input(sess, "Fire"):
-                        last_fire_by_idx[i] = now
-                        print(f"[fire][{sess.agent_name}] enemy={enemy_name} dist={enemy_dist:.1f}")
+                # Fire intentionally disabled while validating walk animation behavior.
 
             time.sleep(args.tick)
 

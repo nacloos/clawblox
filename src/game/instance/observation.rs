@@ -104,11 +104,25 @@ pub(super) fn build_player_observation(
 
     // Read all player attributes generically and convert to JSON
     let player_data = player.data.lock().unwrap();
-    let attributes = attributes_to_json(&player_data.attributes);
+    let mut attributes = attributes_to_json(&player_data.attributes);
+    if let Some(origin) = instance.get_player_view_origin(agent_id) {
+        attributes.insert("ViewOriginX".to_string(), serde_json::Value::from(round_f32(origin[0])));
+        attributes.insert("ViewOriginY".to_string(), serde_json::Value::from(round_f32(origin[1])));
+        attributes.insert("ViewOriginZ".to_string(), serde_json::Value::from(round_f32(origin[2])));
+    }
+    if let Some(forward) = instance.get_player_view_forward(agent_id) {
+        attributes.insert("ViewForwardX".to_string(), serde_json::Value::from(round_f32(forward[0])));
+        attributes.insert("ViewForwardY".to_string(), serde_json::Value::from(round_f32(forward[1])));
+        attributes.insert("ViewForwardZ".to_string(), serde_json::Value::from(round_f32(forward[2])));
+    }
+    attributes.insert(
+        "ViewFovDeg".to_string(),
+        serde_json::Value::from(round_f32(instance.player_view_fov_deg())),
+    );
     drop(player_data);
 
     // Get other players (with LOS filtering)
-    let other_players = instance.get_other_players(agent_id, position);
+    let other_players = instance.get_other_players(agent_id);
 
     // Get dynamic world entities only (static entities fetched via /map endpoint)
     let world = instance.get_dynamic_world_info();
@@ -309,7 +323,37 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
                     .unwrap_or_else(|| format!("Player_{}", agent_id.as_simple()));
 
                 // Get all attributes and convert to JSON Value
-                let attrs = attributes_to_json(&player_data.attributes);
+                let mut attrs = attributes_to_json(&player_data.attributes);
+                if let Some(origin) = instance.get_player_view_origin(agent_id) {
+                    attrs.insert("ViewOriginX".to_string(), serde_json::Value::from(round_f32(origin[0])));
+                    attrs.insert("ViewOriginY".to_string(), serde_json::Value::from(round_f32(origin[1])));
+                    attrs.insert("ViewOriginZ".to_string(), serde_json::Value::from(round_f32(origin[2])));
+                }
+                if let Some(forward) = instance.get_player_view_forward(agent_id) {
+                    attrs.insert("ViewForwardX".to_string(), serde_json::Value::from(round_f32(forward[0])));
+                    attrs.insert("ViewForwardY".to_string(), serde_json::Value::from(round_f32(forward[1])));
+                    attrs.insert("ViewForwardZ".to_string(), serde_json::Value::from(round_f32(forward[2])));
+                }
+                attrs.insert(
+                    "ViewFovDeg".to_string(),
+                    serde_json::Value::from(round_f32(instance.player_view_fov_deg())),
+                );
+                let visible_targets = instance.get_other_players(agent_id);
+                if !visible_targets.is_empty() {
+                    let los_targets = visible_targets
+                        .iter()
+                        .map(|p| serde_json::json!({
+                            "id": p.id,
+                            "name": p.name,
+                            "position": [p.position[0], p.position[1] + 2.0, p.position[2]],
+                            "distance": p.distance,
+                        }))
+                        .collect::<Vec<_>>();
+                    attrs.insert(
+                        "DebugVisibleTargets".to_string(),
+                        serde_json::Value::Array(los_targets),
+                    );
+                }
                 let attributes = if attrs.is_empty() {
                     None
                 } else {
@@ -352,10 +396,14 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
         instance_id: instance.instance_id,
         tick: instance.tick,
         server_time_ms: instance.elapsed_ms(),
-        game_status: match instance.status {
-            GameStatus::Waiting => "waiting".to_string(),
-            GameStatus::Playing => "playing".to_string(),
-            GameStatus::Finished => "finished".to_string(),
+        game_status: if instance.halted_error.is_some() {
+            "failed".to_string()
+        } else {
+            match instance.status {
+                GameStatus::Waiting => "waiting".to_string(),
+                GameStatus::Playing => "playing".to_string(),
+                GameStatus::Finished => "finished".to_string(),
+            }
         },
         players,
         entities,

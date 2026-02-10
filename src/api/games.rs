@@ -388,7 +388,7 @@ async fn join_game(
     let pool = state.pool.clone();
     let instance_id = result.instance_id;
     tokio::spawn(async move {
-        let _ = sqlx::query(
+        if let Err(e) = sqlx::query(
             "INSERT INTO game_players (game_id, agent_id, instance_id) VALUES ($1, $2, $3)
              ON CONFLICT (game_id, agent_id) DO UPDATE SET instance_id = $3",
         )
@@ -396,7 +396,13 @@ async fn join_game(
         .bind(agent_id)
         .bind(instance_id)
         .execute(&pool)
-        .await;
+        .await
+        {
+            eprintln!(
+                "[DB WARN] Failed to upsert game_players game={} agent={} instance={}: {}",
+                game_id, agent_id, instance_id, e
+            );
+        }
     });
 
     Ok(Json(JoinGameResponse {
@@ -431,11 +437,17 @@ async fn leave_game(
 
     let pool = state.pool.clone();
     tokio::spawn(async move {
-        let _ = sqlx::query("DELETE FROM game_players WHERE game_id = $1 AND agent_id = $2")
+        if let Err(e) = sqlx::query("DELETE FROM game_players WHERE game_id = $1 AND agent_id = $2")
             .bind(game_id)
             .bind(agent_id)
             .execute(&pool)
-            .await;
+            .await
+        {
+            eprintln!(
+                "[DB WARN] Failed to delete game_players game={} agent={}: {}",
+                game_id, agent_id, e
+            );
+        }
     });
 
     Ok(Json(LeaveGameResponse {
@@ -443,4 +455,3 @@ async fn leave_game(
         message: "Left game".to_string(),
     }))
 }
-

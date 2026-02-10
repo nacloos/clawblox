@@ -11,6 +11,18 @@ pub fn get_observation(
     let instance_id = get_player_instance(state, agent_id, game_id)
         .ok_or_else(|| "Not in any instance of this game".to_string())?;
 
+    let instance_handle = state
+        .instances
+        .get(&instance_id)
+        .ok_or_else(|| "Instance not found".to_string())?;
+    let halted_error = {
+        let instance = instance_handle.read();
+        instance.halted_error.clone()
+    };
+    if let Some(err) = halted_error {
+        return Err(format!("Game halted: {}", err));
+    }
+
     state
         .observation_cache
         .get(&(instance_id, agent_id))
@@ -34,6 +46,9 @@ pub fn get_spectator_observation(
     for &instance_id in instance_ids.value() {
         if let Some(handle) = state.instances.get(&instance_id) {
             let instance = handle.read();
+            if instance.halted_error.is_some() {
+                continue;
+            }
             let count = instance.players.len();
             if count >= max_players {
                 max_players = count;
@@ -42,7 +57,9 @@ pub fn get_spectator_observation(
         }
     }
 
-    let instance_id = best_instance_id.ok_or_else(|| "No valid instances found".to_string())?;
+    let instance_id = best_instance_id.ok_or_else(|| {
+        "No valid non-halted instances found for this game".to_string()
+    })?;
 
     state
         .spectator_cache
@@ -55,6 +72,18 @@ pub fn get_spectator_observation_for_instance(
     state: &GameManagerHandle,
     instance_id: Uuid,
 ) -> Result<SpectatorObservation, String> {
+    let instance_handle = state
+        .instances
+        .get(&instance_id)
+        .ok_or_else(|| "Instance not found".to_string())?;
+    let halted_error = {
+        let instance = instance_handle.read();
+        instance.halted_error.clone()
+    };
+    if let Some(err) = halted_error {
+        return Err(format!("Game halted: {}", err));
+    }
+
     state
         .spectator_cache
         .get(&instance_id)
@@ -95,4 +124,3 @@ pub fn get_map(
 
     Ok(map_info)
 }
-

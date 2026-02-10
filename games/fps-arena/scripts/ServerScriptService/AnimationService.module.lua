@@ -3,7 +3,7 @@ local Players = game:GetService("Players")
 local AnimationService = {}
 
 local playerStates = {}
-local DEBUG_LOCOMOTION = true
+local DEBUG_LOCOMOTION = false
 local TRACK_CONFIG = {
     idle = {
         animation_id = "local://idle_default",

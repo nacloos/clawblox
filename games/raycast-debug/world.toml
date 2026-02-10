@@ -1,0 +1,7 @@
+name = "Raycast Debug"
+description = "Minimal 2-player flat-world game for LOS/raycast debugging"
+max_players = 4
+game_type = "lua"
+
+[scripts]
+main = "game.lua"

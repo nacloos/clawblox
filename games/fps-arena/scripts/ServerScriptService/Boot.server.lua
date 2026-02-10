@@ -10,6 +10,7 @@ local AnimationService = require(script.Parent.AnimationService)
 local InputService = require(script.Parent.InputService)
 local RoundService = require(script.Parent.RoundService)
 local ReplicateService = require(script.Parent.ReplicateService)
+local NavigationSenseService = require(script.Parent.NavigationSenseService)
 
 Map.Build(Config)
 
@@ -43,6 +44,10 @@ InputService.Init({
 
 ReplicateService.Init({
     config = Config,
+    state = State,
+})
+
+NavigationSenseService.Init({
     state = State,
 })
 
@@ -104,6 +109,7 @@ RunService.Heartbeat:Connect(function(_dt)
     CombatService.Tick(now)
     RoundService.Tick(now)
     ReplicateService.Tick()
+    NavigationSenseService.Tick()
 end)
 
 print("[fps-arena] boot complete")

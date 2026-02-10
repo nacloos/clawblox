@@ -2384,16 +2384,10 @@ impl UserData for Instance {
                 let mut data = this.data.lock().unwrap();
                 let id = data.id.0;
                 if let Some(humanoid) = &mut data.humanoid_data {
-                    eprintln!(
-                        "[Humanoid] MoveTo id={} target=({:.2},{:.2},{:.2})",
-                        id,
-                        position.x,
-                        position.y,
-                        position.z
-                    );
+                    let _ = id;
                     humanoid.move_to_target = Some(position);
                 } else {
-                    eprintln!("[Humanoid WARN] MoveTo called on non-humanoid instance");
+                    // No-op: MoveTo on non-humanoid instance.
                 }
                 Ok(())
             },

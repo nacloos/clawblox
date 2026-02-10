@@ -13,10 +13,14 @@ pub fn list_instances(state: &GameManagerHandle) -> Vec<InstanceInfo> {
             InstanceInfo {
                 instance_id,
                 game_id: instance.game_id,
-                status: match instance.status {
-                    GameStatus::Waiting => "waiting".to_string(),
-                    GameStatus::Playing => "playing".to_string(),
-                    GameStatus::Finished => "finished".to_string(),
+                status: if instance.halted_error.is_some() {
+                    "failed".to_string()
+                } else {
+                    match instance.status {
+                        GameStatus::Waiting => "waiting".to_string(),
+                        GameStatus::Playing => "playing".to_string(),
+                        GameStatus::Finished => "finished".to_string(),
+                    }
                 },
                 player_count: instance.players.len(),
                 max_players: instance.max_players as usize,
@@ -42,7 +46,9 @@ pub fn list_games(state: &GameManagerHandle) -> Vec<GameInfo> {
 
         info.player_count += instance.players.len();
         info.tick = info.tick.max(instance.tick);
-        if instance.status == GameStatus::Playing {
+        if instance.halted_error.is_some() {
+            info.status = "failed".to_string();
+        } else if instance.status == GameStatus::Playing {
             info.status = "playing".to_string();
         }
     }
@@ -56,13 +62,16 @@ pub fn get_game_info(state: &GameManagerHandle, game_id: Uuid) -> Option<GameInf
     let mut total_players = 0;
     let mut max_tick = 0;
     let mut any_playing = false;
+    let mut any_failed = false;
 
     for &instance_id in instance_ids.value() {
         if let Some(handle) = state.instances.get(&instance_id) {
             let instance = handle.read();
             total_players += instance.players.len();
             max_tick = max_tick.max(instance.tick);
-            if instance.status == GameStatus::Playing {
+            if instance.halted_error.is_some() {
+                any_failed = true;
+            } else if instance.status == GameStatus::Playing {
                 any_playing = true;
             }
         }
@@ -70,7 +79,14 @@ pub fn get_game_info(state: &GameManagerHandle, game_id: Uuid) -> Option<GameInf
 
     Some(GameInfo {
         id: game_id,
-        status: if any_playing { "playing" } else { "waiting" }.to_string(),
+        status: if any_playing {
+            "playing"
+        } else if any_failed {
+            "failed"
+        } else {
+            "waiting"
+        }
+        .to_string(),
         player_count: total_players,
         tick: max_tick,
     })

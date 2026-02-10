@@ -4,7 +4,9 @@ use clawblox::{db, game, r2};
 use game::instance::ErrorMode;
 
 use axum::Router;
+use futures_util::FutureExt;
 use std::net::SocketAddr;
+use std::panic;
 use std::thread;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
@@ -13,6 +15,17 @@ use game::GameManager;
 
 #[tokio::main]
 async fn main() {
+    panic::set_hook(Box::new(|info| {
+        let thread = std::thread::current();
+        let thread_name = thread.name().unwrap_or("<unnamed>");
+        let thread_id = format!("{:?}", thread.id());
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        eprintln!(
+            "[PANIC] thread={} id={} {}\n{}",
+            thread_name, thread_id, info, backtrace
+        );
+    }));
+
     let pool = db::create_pool()
         .await
         .expect("Failed to connect to database");
@@ -37,11 +50,30 @@ async fn main() {
     let sync_handle = game_handle.clone();
     let sync_pool = pool.clone();
     tokio::spawn(async move {
-        db::sync_instances_to_db(sync_pool, sync_handle).await;
+        let result = panic::AssertUnwindSafe(db::sync_instances_to_db(sync_pool, sync_handle))
+            .catch_unwind()
+            .await;
+        if let Err(payload) = result {
+            game::panic_reporting::log_panic(
+                "tokio_task",
+                "sync_instances_to_db",
+                &*payload,
+            );
+        }
     });
 
-    thread::spawn(move || {
+    let game_thread = thread::spawn(move || {
         game_manager.run();
+    });
+    thread::spawn(move || {
+        if let Err(payload) = game_thread.join() {
+            game::panic_reporting::log_panic(
+                "game_manager_thread",
+                "game_manager.run",
+                &*payload,
+            );
+            std::process::exit(1);
+        }
     });
 
     let cors = CorsLayer::new()

@@ -9,6 +9,8 @@ use super::character_controller::{
 };
 use super::GameInstance;
 
+const AUTO_ROTATE_TURN_RATE_RAD_PER_SEC: f32 = 10.0;
+
 /// Sync Lua Humanoid move targets/cancels into physics character targets.
 pub(super) fn sync_move_targets(instance: &mut GameInstance) {
     if instance.lua_runtime.is_none() {
@@ -186,8 +188,8 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
                 (locomotion_vec[0] * locomotion_vec[0] + locomotion_vec[2] * locomotion_vec[2])
                     .sqrt();
             if speed > 0.05 {
-                let yaw = yaw_from_horizontal_velocity(locomotion_vec);
-                instance.physics.set_character_yaw(hrp_id, yaw);
+                let target_yaw = yaw_from_horizontal_velocity(locomotion_vec);
+                apply_smoothed_auto_rotate(instance, hrp_id, target_yaw, dt);
             }
         }
     }
@@ -207,6 +209,43 @@ fn warn_once_move_to(instance: &GameInstance, agent_id: Uuid, reason: &str) {
 /// aligns with movement direction in the shared physics/render convention.
 fn yaw_from_horizontal_velocity(vel: [f32; 3]) -> f32 {
     (-vel[0]).atan2(-vel[2])
+}
+
+fn wrap_angle_signed_pi(angle: f32) -> f32 {
+    let two_pi = std::f32::consts::TAU;
+    ((angle + std::f32::consts::PI).rem_euclid(two_pi)) - std::f32::consts::PI
+}
+
+fn yaw_from_quaternion_xyzw(q: [f32; 4]) -> f32 {
+    let x = q[0];
+    let y = q[1];
+    let z = q[2];
+    let w = q[3];
+    let siny_cosp = 2.0 * (w * y + x * z);
+    let cosy_cosp = 1.0 - 2.0 * (y * y + z * z);
+    siny_cosp.atan2(cosy_cosp)
+}
+
+fn apply_smoothed_auto_rotate(
+    instance: &mut GameInstance,
+    hrp_id: u64,
+    target_yaw: f32,
+    dt: f32,
+) {
+    let Some(handle) = instance.physics.get_handle(hrp_id) else {
+        return;
+    };
+    let current_yaw = instance
+        .physics
+        .get_rotation(handle)
+        .map(yaw_from_quaternion_xyzw)
+        .unwrap_or(target_yaw);
+
+    let delta = wrap_angle_signed_pi(target_yaw - current_yaw);
+    let max_step = AUTO_ROTATE_TURN_RATE_RAD_PER_SEC * dt.max(0.0);
+    let step = delta.clamp(-max_step, max_step);
+    let next_yaw = current_yaw + step;
+    instance.physics.set_character_yaw(hrp_id, next_yaw);
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js'
 import { geometryFromRender, materialFromRender, type RenderSpec } from './render/presets'
+import { FollowCameraController } from './render/camera_controller'
 
 interface SpectatorPlayerInfo {
   id: string
@@ -70,6 +71,7 @@ const spectateTextEl = document.getElementById('spectate-text') as HTMLDivElemen
 const killfeedEl = document.getElementById('killfeed') as HTMLDivElement
 const damageOverlayEl = document.getElementById('damage-overlay') as HTMLDivElement
 const DEBUG_ANIM = new URLSearchParams(window.location.search).get('debugAnim') === '1'
+const DEBUG_RAYS = new URLSearchParams(window.location.search).get('debugRays') === '1'
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' })
 renderer.setSize(window.innerWidth, window.innerHeight)
@@ -122,14 +124,17 @@ lightPositions.forEach((pos, i) => {
   accentLights.push(light)
 })
 
-const CAMERA_SMOOTHING = 8
-const FOLLOW_DISTANCE = 10
-const FOLLOW_HEIGHT = 4.5
-const MIN_CAMERA_DISTANCE = 5
-const followRaycaster = new THREE.Raycaster()
-const followRayDirection = new THREE.Vector3()
-let lastFollowPlayerPos: THREE.Vector3 | null = null
-const lastFollowForward = new THREE.Vector3(0, 0, -1)
+const followCameraController = new FollowCameraController(camera, {
+  followDistance: 7.5,
+  followHeight: 1.3,
+  shoulderOffset: 0.8,
+  minDistance: 4,
+  obstructionPadding: 1,
+  positionSmoothing: 10,
+  rotationSmoothing: 16,
+  movementDeadzone: 0.0004,
+  lookAheadDistance: 14,
+})
 let followWeapon: THREE.Group | null = null
 let followWeaponSlot: number | null = null
 let followWeaponKick = 0
@@ -140,6 +145,12 @@ let followWeaponReloadBlend = 0
 let followWeaponWalkTarget = 0
 let followWeaponWalkBlend = 0
 let followWeaponWalkPhase = 0
+const worldWeaponStates = new Map<string, {
+  group: THREE.Group
+  slot: number
+  lastPos: THREE.Vector3 | null
+  forward: THREE.Vector3
+}>()
 
 const lastPlayerTrackState = new Map<string, {
   fireTrackId: number | null
@@ -176,6 +187,7 @@ let lastProcessedReplicatedEventId = 0
 
 const shotParticles: Array<{ mesh: THREE.Mesh, vel: THREE.Vector3, life: number }> = []
 const shotDecals: Array<{ mesh: THREE.Mesh, life: number }> = []
+const debugRayLines: THREE.Line[] = []
 
 function vec3FromUnknown(value: unknown): THREE.Vector3 | null {
   if (!Array.isArray(value) || value.length < 3) return null
@@ -249,6 +261,80 @@ function spawnImpactDecal(pos: THREE.Vector3, normal: THREE.Vector3): void {
   }
 }
 
+function clearDebugRays(): void {
+  while (debugRayLines.length > 0) {
+    const line = debugRayLines.pop()
+    if (!line) break
+    scene.remove(line)
+    line.geometry.dispose()
+    const material = line.material
+    if (Array.isArray(material)) material.forEach((m) => m.dispose())
+    else material.dispose()
+  }
+}
+
+function drawDebugRay(from: THREE.Vector3, to: THREE.Vector3, color: number): void {
+  const geometry = new THREE.BufferGeometry().setFromPoints([from, to])
+  const material = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.95 })
+  const line = new THREE.Line(geometry, material)
+  debugRayLines.push(line)
+  scene.add(line)
+}
+
+function drawNavDebugRays(obs: SpectatorObservation): void {
+  clearDebugRays()
+  if (!DEBUG_RAYS || !selectedPlayerId) return
+  const target = obs.players.find((p) => p.id === selectedPlayerId)
+  if (!target?.attributes) return
+  const attrs = target.attributes as Record<string, unknown>
+
+  const ox = numberAttr(attrs, ['ViewOriginX'])
+  const oy = numberAttr(attrs, ['ViewOriginY'])
+  const oz = numberAttr(attrs, ['ViewOriginZ'])
+  const fx = numberAttr(attrs, ['ViewForwardX'])
+  const fz = numberAttr(attrs, ['ViewForwardZ'])
+  if (ox === null || oy === null || oz === null || fx === null || fz === null) return
+
+  const origin = new THREE.Vector3(ox, oy, oz)
+  const forward = new THREE.Vector3(fx, 0, fz)
+  if (forward.lengthSq() < 1e-4) return
+  forward.normalize()
+  const left = new THREE.Vector3(-forward.z, 0, forward.x).normalize()
+  const right = left.clone().multiplyScalar(-1)
+
+  const frontClear = numberAttr(attrs, ['NavClearanceFront']) ?? 0
+  const leftClear = numberAttr(attrs, ['NavClearanceLeft']) ?? 0
+  const rightClear = numberAttr(attrs, ['NavClearanceRight']) ?? 0
+  const frontIsClear = frontClear >= 2.8
+  const leftIsClear = leftClear >= 2.8
+  const rightIsClear = rightClear >= 2.8
+
+  drawDebugRay(origin, origin.clone().addScaledVector(forward, frontClear), frontIsClear ? 0x33ff66 : 0xff3344)
+  drawDebugRay(origin, origin.clone().addScaledVector(left, leftClear), leftIsClear ? 0x44bbff : 0xffaa33)
+  drawDebugRay(origin, origin.clone().addScaledVector(right, rightClear), rightIsClear ? 0x44bbff : 0xffaa33)
+
+  const bestX = numberAttr(attrs, ['NavBestDirX'])
+  const bestZ = numberAttr(attrs, ['NavBestDirZ'])
+  if (bestX !== null && bestZ !== null) {
+    const best = new THREE.Vector3(bestX, 0, bestZ)
+    if (best.lengthSq() > 1e-4) {
+      best.normalize()
+      drawDebugRay(origin, origin.clone().addScaledVector(best, 6.0), 0xff00ff)
+    }
+  }
+
+  const visibleTargets = attrs.DebugVisibleTargets
+  if (Array.isArray(visibleTargets)) {
+    for (const item of visibleTargets) {
+      if (!item || typeof item !== 'object') continue
+      const rawPos = (item as Record<string, unknown>).position
+      const pos = vec3FromUnknown(rawPos)
+      if (!pos) continue
+      drawDebugRay(origin, pos, 0x00ffff)
+    }
+  }
+}
+
 function processShotTraceEvent(payload: Record<string, unknown>): void {
   const serverOrigin = vec3FromUnknown(payload.origin)
   const end = vec3FromUnknown(payload.end_position)
@@ -257,7 +343,7 @@ function processShotTraceEvent(payload: Record<string, unknown>): void {
   // Use weapon muzzle position if available, otherwise fall back to server origin
   let muzzleOrigin = serverOrigin
   if (followWeapon && followWeapon.visible) {
-    const forward = lastFollowForward.clone().normalize()
+    const forward = followCameraController.getForward()
     muzzleOrigin = followWeapon.position.clone().addScaledVector(forward, 1.4)
   }
 
@@ -522,7 +608,7 @@ function queueKillfeed(text: string): void {
 
 function buildWeaponModel(slot: number): THREE.Group {
   const group = new THREE.Group()
-  group.scale.setScalar(1.35)
+  group.scale.setScalar(1.6)
   const darkMetal = 0x222222
   const addBox = (
     size: [number, number, number],
@@ -676,9 +762,82 @@ function buildWeaponModel(slot: number): THREE.Group {
   return group
 }
 
-function syncFollowWeapon(playerPos: THREE.Vector3, forward: THREE.Vector3, attrs: Record<string, unknown> | undefined): void {
+function weaponSlotFromAttrs(attrs: Record<string, unknown> | undefined): number {
   const slotValue = numberAttr(attrs, ['WeaponSlot', 'weapon_slot', 'WeaponIndex'])
-  const slot = slotValue ? Math.max(1, Math.min(3, Math.round(slotValue))) : 2
+  return slotValue ? Math.max(1, Math.min(3, Math.round(slotValue))) : 2
+}
+
+function getOrCreateWorldWeaponState(playerId: string, slot: number): {
+  group: THREE.Group
+  slot: number
+  lastPos: THREE.Vector3 | null
+  forward: THREE.Vector3
+} {
+  const current = worldWeaponStates.get(playerId)
+  if (current && current.slot === slot) return current
+
+  if (current) {
+    scene.remove(current.group)
+    disposeObject(current.group)
+    worldWeaponStates.delete(playerId)
+  }
+
+  const group = buildWeaponModel(slot)
+  const muzzleFlash = group.userData.muzzleFlash as THREE.PointLight | undefined
+  if (muzzleFlash) muzzleFlash.intensity = 0
+  scene.add(group)
+
+  const state = {
+    group,
+    slot,
+    lastPos: null as THREE.Vector3 | null,
+    forward: new THREE.Vector3(0, 0, -1),
+  }
+  worldWeaponStates.set(playerId, state)
+  return state
+}
+
+function syncWorldWeapons(obs: SpectatorObservation): void {
+  const activeIds = new Set<string>()
+  for (const player of obs.players) {
+    // Selected player uses dedicated follow-weapon visuals.
+    if (player.id === selectedPlayerId) continue
+
+    const slot = weaponSlotFromAttrs(player.attributes)
+    const state = getOrCreateWorldWeaponState(player.id, slot)
+    activeIds.add(player.id)
+
+    const root = player.root_part_id ? obs.entities.find((e) => e.id === player.root_part_id) : null
+    const pos = new THREE.Vector3(player.position[0], player.position[1], player.position[2])
+    if (root?.rotation) {
+      state.forward.set(0, 0, -1).applyQuaternion(rotationToQuaternion(root.rotation)).setY(0)
+    } else if (state.lastPos) {
+      const movement = pos.clone().sub(state.lastPos).setY(0)
+      if (movement.lengthSq() > 0.0004) state.forward.copy(movement.normalize())
+    }
+    if (state.forward.lengthSq() < 0.0001) state.forward.set(0, 0, -1)
+    state.forward.normalize()
+    state.lastPos = pos.clone()
+
+    const right = new THREE.Vector3().crossVectors(state.forward, new THREE.Vector3(0, 1, 0)).normalize()
+    const weaponPos = pos.clone()
+      .addScaledVector(state.forward, 0.55)
+      .addScaledVector(right, 0.78)
+      .add(new THREE.Vector3(0, 1.0, 0.06))
+    state.group.position.copy(weaponPos)
+    state.group.lookAt(weaponPos.clone().addScaledVector(state.forward, -5))
+  }
+
+  for (const [playerId, state] of worldWeaponStates) {
+    if (activeIds.has(playerId)) continue
+    scene.remove(state.group)
+    disposeObject(state.group)
+    worldWeaponStates.delete(playerId)
+  }
+}
+
+function syncFollowWeapon(playerPos: THREE.Vector3, forward: THREE.Vector3, attrs: Record<string, unknown> | undefined): void {
+  const slot = weaponSlotFromAttrs(attrs)
   if (!followWeapon || followWeaponSlot !== slot) {
     if (followWeapon) {
       scene.remove(followWeapon)
@@ -694,12 +853,12 @@ function syncFollowWeapon(playerPos: THREE.Vector3, forward: THREE.Vector3, attr
   const weaponPos = playerPos.clone()
     .addScaledVector(forward, 0.75 - 0.28 * followWeaponKick)
     .addScaledVector(right, 1.05)
-    .add(new THREE.Vector3(0, -0.25 - followWeaponReloadBlend * 0.22, followWeaponReloadBlend * 0.08))
+    .add(new THREE.Vector3(0, -1.2 - followWeaponReloadBlend * 0.22, followWeaponReloadBlend * 0.08))
   weaponPos.y += Math.sin(followWeaponWalkPhase) * 0.03 * followWeaponWalkBlend
   weaponPos.addScaledVector(forward, (Math.cos(followWeaponWalkPhase * 2) - 1) * 0.015 * followWeaponWalkBlend)
   followWeapon.position.copy(weaponPos)
 
-  const lookTarget = weaponPos.clone().addScaledVector(forward, 5)
+  const lookTarget = weaponPos.clone().addScaledVector(forward, -5)
   followWeapon.lookAt(lookTarget)
   followWeapon.rotation.z -= followWeaponReloadBlend * 0.2
   followWeapon.rotation.x += followWeaponReloadBlend * 0.1
@@ -1221,68 +1380,58 @@ function updateCamera(obs: SpectatorObservation, dt: number): void {
   const target = obs.players.find((p) => p.id === selectedPlayerId)
   if (!target) {
     if (followWeapon) followWeapon.visible = false
+    followCameraController.reset()
     return
   }
 
   const root = target.root_part_id ? obs.entities.find((e) => e.id === target.root_part_id) : null
-  const playerPos = new THREE.Vector3(target.position[0], target.position[1] + 2, target.position[2])
-  const forward = new THREE.Vector3(0, 0, -1)
+  const rootObject = target.root_part_id ? entityObjects.get(target.root_part_id) ?? null : null
+  const attrs = target.attributes
+  const viewOriginX = numberAttr(attrs, ['ViewOriginX'])
+  const viewOriginY = numberAttr(attrs, ['ViewOriginY'])
+  const viewOriginZ = numberAttr(attrs, ['ViewOriginZ'])
+  const playerPos = (
+    viewOriginX !== null
+    && viewOriginY !== null
+    && viewOriginZ !== null
+  )
+    ? new THREE.Vector3(viewOriginX, viewOriginY, viewOriginZ)
+    : new THREE.Vector3(target.position[0], target.position[1] + 2, target.position[2])
+  const viewForwardX = numberAttr(attrs, ['ViewForwardX'])
+  const viewForwardY = numberAttr(attrs, ['ViewForwardY'])
+  const viewForwardZ = numberAttr(attrs, ['ViewForwardZ'])
+  const rootQuaternion = (
+    viewForwardX !== null
+    && viewForwardZ !== null
+  )
+    ? new THREE.Quaternion().setFromUnitVectors(
+      new THREE.Vector3(0, 0, -1),
+      new THREE.Vector3(viewForwardX, viewForwardY ?? 0, viewForwardZ).normalize(),
+    )
+    : (root?.rotation ? rotationToQuaternion(root.rotation) : null)
 
-  if (root?.rotation) {
-    forward.applyQuaternion(rotationToQuaternion(root.rotation))
-    forward.y = 0
-  } else if (lastFollowPlayerPos) {
-    const movement = playerPos.clone().sub(lastFollowPlayerPos)
-    movement.y = 0
-    if (movement.lengthSq() > 0.0004) {
-      forward.copy(movement.normalize())
-    } else {
-      forward.copy(lastFollowForward)
-    }
-  } else {
-    forward.copy(lastFollowForward)
-  }
-  if (forward.lengthSq() < 0.0001) forward.set(0, 0, -1)
-  forward.normalize()
-  lastFollowForward.copy(forward)
-  lastFollowPlayerPos = playerPos.clone()
+  followCameraController.update({
+    playerPosition: playerPos,
+    rootQuaternion,
+    dt,
+    collisionObjects: scene.children,
+    ignoreObjects: [rootObject, followWeapon],
+  })
+  const forward = followCameraController.getForward()
 
   syncFollowWeapon(playerPos, forward, target.attributes)
   if (followWeapon) followWeapon.visible = true
-
-  const desiredPos = playerPos
-    .clone()
-    .addScaledVector(forward, -FOLLOW_DISTANCE)
-    .add(new THREE.Vector3(0, FOLLOW_HEIGHT, 0))
-
-  followRayDirection.copy(desiredPos).sub(playerPos).normalize()
-  const desiredDistance = desiredPos.distanceTo(playerPos)
-  followRaycaster.set(playerPos, followRayDirection)
-  followRaycaster.far = desiredDistance
-
-  const hits = followRaycaster.intersectObjects(scene.children, true)
-  const validHits = hits.filter((hit) => {
-    const obj = hit.object as THREE.Object3D
-    return (obj as THREE.Mesh).isMesh && obj.visible
-  })
-
-  const cameraTargetPos = desiredPos.clone()
-  if (validHits.length > 0 && validHits[0].distance < desiredDistance) {
-    const safeDistance = Math.max(validHits[0].distance - 1, MIN_CAMERA_DISTANCE)
-    cameraTargetPos.copy(playerPos).addScaledVector(followRayDirection, safeDistance)
-  }
-
-  const alpha = 1 - Math.exp(-CAMERA_SMOOTHING * dt)
-  camera.position.lerp(cameraTargetPos, alpha)
-  const lookAt = playerPos.clone().addScaledVector(forward, 12)
-  camera.lookAt(lookAt)
 }
 
 function getGameId(): string {
+  const uuidPattern = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/
   const fromPath = window.location.pathname.match(/\/spectate\/([0-9a-fA-F-]{36})/)
   if (fromPath?.[1]) return fromPath[1]
   const fromQuery = new URLSearchParams(window.location.search).get('game')
-  if (fromQuery) return fromQuery
+  if (fromQuery) {
+    const extracted = fromQuery.match(uuidPattern)?.[0]
+    if (extracted) return extracted
+  }
   throw new Error('Missing game id. Use /spectate/<game_id> or ?game=<game_id>')
 }
 
@@ -1367,8 +1516,12 @@ function frame(): void {
   const interpObs = interpolatedObservation()
   if (interpObs) {
     updateScene(interpObs)
+    syncWorldWeapons(interpObs)
     updateCamera(interpObs, dt)
     updateModelAnimations(interpObs, dt)
+    drawNavDebugRays(interpObs)
+  } else if (DEBUG_RAYS) {
+    clearDebugRays()
   }
   tickWeaponVisual(dt)
   tickShotEffects(dt)

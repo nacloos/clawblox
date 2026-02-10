@@ -955,6 +955,9 @@ impl GameInstance {
 
     /// Get the game status from Lua if available
     fn get_game_status_from_lua(&self) -> String {
+        if self.halted_error.is_some() {
+            return "failed".to_string();
+        }
         // Default to instance status
         match self.status {
             GameStatus::Waiting => "waiting".to_string(),
@@ -1116,11 +1119,48 @@ impl GameInstance {
         WorldInfo { entities }
     }
 
-    /// Get info about other players with distance and line-of-sight filtering
-    fn get_other_players(&self, exclude_agent_id: Uuid, observer_pos: [f32; 3]) -> Vec<OtherPlayerInfo> {
+    fn get_player_view_origin(&self, agent_id: Uuid) -> Option<[f32; 3]> {
+        let pos = self.get_player_position(agent_id)?;
+        Some([pos[0], pos[1] + 2.0, pos[2]])
+    }
+
+    fn get_player_view_forward(&self, agent_id: Uuid) -> Option<[f32; 3]> {
+        let hrp_id = *self.player_hrp_ids.get(&agent_id)?;
+        let state = self.physics.get_character_state(hrp_id)?;
+        let rot = self.physics.get_rotation_matrix(state.body_handle)?;
+        // Roblox/CFrame look vector convention: local -Z points forward.
+        let mut fx = -rot[0][2];
+        let mut fz = -rot[2][2];
+        let mag = (fx * fx + fz * fz).sqrt();
+        if mag <= 1e-4 {
+            return Some([0.0, 0.0, -1.0]);
+        }
+        fx /= mag;
+        fz /= mag;
+        Some([fx, 0.0, fz])
+    }
+
+    fn player_view_fov_deg(&self) -> f32 {
+        // Matches spectator camera intent (75deg vertical perspective on widescreen ~= ~105deg horizontal).
+        105.0
+    }
+
+    /// Get info about other players with distance, line-of-sight and view-cone filtering.
+    fn get_other_players(&self, exclude_agent_id: Uuid) -> Vec<OtherPlayerInfo> {
         const MAX_VISIBILITY_DISTANCE: f32 = 100.0;
 
         let mut others = Vec::new();
+        let observer_pos = self
+            .get_player_position(exclude_agent_id)
+            .unwrap_or([0.0, 0.0, 0.0]);
+        let observer_eye = self
+            .get_player_view_origin(exclude_agent_id)
+            .unwrap_or([observer_pos[0], observer_pos[1] + 2.0, observer_pos[2]]);
+        let observer_forward = self
+            .get_player_view_forward(exclude_agent_id)
+            .unwrap_or([0.0, 0.0, -1.0]);
+        let half_fov_rad = (self.player_view_fov_deg().to_radians()) * 0.5;
+        let min_dot = half_fov_rad.cos();
 
         // Get observer's body handle for LOS exclusion
         let observer_body = self.player_hrp_ids.get(&exclude_agent_id)
@@ -1144,8 +1184,22 @@ impl GameInstance {
                 continue;
             }
 
-            // Line-of-sight check (only for nearby players)
-            if !self.physics.has_line_of_sight(observer_pos, position, observer_body) {
+            // View-cone check in horizontal plane.
+            let to_target_x = position[0] - observer_eye[0];
+            let to_target_z = position[2] - observer_eye[2];
+            let horiz_dist = (to_target_x * to_target_x + to_target_z * to_target_z).sqrt();
+            if horiz_dist > 1e-4 {
+                let nx = to_target_x / horiz_dist;
+                let nz = to_target_z / horiz_dist;
+                let dot = nx * observer_forward[0] + nz * observer_forward[2];
+                if dot < min_dot {
+                    continue;
+                }
+            }
+
+            let target_eye = [position[0], position[1] + 2.0, position[2]];
+            // Line-of-sight check from eye-to-eye.
+            if !self.physics.has_line_of_sight(observer_eye, target_eye, observer_body) {
                 continue;
             }
 
@@ -1165,7 +1219,9 @@ impl GameInstance {
 
             others.push(OtherPlayerInfo {
                 id: agent_id,
+                name: self.player_names.get(&agent_id).cloned(),
                 position: round_position(position),
+                distance: round_f32(distance),
                 health,
                 attributes,
             });
@@ -1397,7 +1453,10 @@ pub struct PlayerInfo {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OtherPlayerInfo {
     pub id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub position: [f32; 3],
+    pub distance: f32,
     pub health: i32,
     /// Game-specific attributes set by Lua scripts
     pub attributes: std::collections::HashMap<String, serde_json::Value>,

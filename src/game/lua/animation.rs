@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use super::events::{create_signal, RBXScriptSignal};
 
+const DEBUG_ANIMATION_TRACKS: bool = false;
+
 pub fn default_animation_length_seconds(animation_id: &str) -> f32 {
     match animation_id {
         "local://fire_rifle" => 0.16,
@@ -211,7 +213,7 @@ impl UserData for AnimationTrack {
                 data.fade_to = target_weight;
                 data.weight_current = target_weight;
             }
-            if data.animation_id == "local://walk_default" || data.animation_id == "local://idle_default" {
+            if DEBUG_ANIMATION_TRACKS && (data.animation_id == "local://walk_default" || data.animation_id == "local://idle_default") {
                 eprintln!(
                     "[AnimTrack] Play track={} anim={} owner={} len={:.3} prev_playing={} prev_time={:.3} fade={:.3} weight={:.3} speed={:.3}",
                     data.track_id,
@@ -233,7 +235,7 @@ impl UserData for AnimationTrack {
                 let mut data = this.data.lock().unwrap();
                 let should_log = data.animation_id == "local://walk_default"
                     || data.animation_id == "local://idle_default";
-                if should_log {
+                if DEBUG_ANIMATION_TRACKS && should_log {
                     eprintln!(
                         "[AnimTrack] Stop track={} anim={} owner={} time={:.3} fade={:.3} is_playing={} is_stopping={}",
                         data.track_id,

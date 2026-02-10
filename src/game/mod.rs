@@ -4,6 +4,7 @@ pub mod humanoid_movement;
 pub mod instance;
 pub mod lua;
 pub mod physics;
+pub mod panic_reporting;
 pub mod script_bundle;
 pub mod touch_events;
 mod manager_instances;
@@ -99,7 +100,12 @@ impl GameManager {
         loop {
             let start = Instant::now();
 
-            manager_tick::tick_instances(&self.state);
+            let tick_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                manager_tick::tick_instances(&self.state);
+            }));
+            if let Err(payload) = tick_result {
+                panic_reporting::log_panic("manager_loop", "tick_instances", &*payload);
+            }
 
             // Periodic cleanup
             tick_counter += 1;
