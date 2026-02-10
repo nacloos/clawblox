@@ -38,9 +38,13 @@ pub fn build_motion_plan(
         let dist_xz = (tx * tx + tz * tz).sqrt();
 
         if dist_xz > humanoid_consts::MOVE_TO_REACHED_EPSILON_XZ {
-            let speed = walk_speed * dt;
-            dx = (tx / dist_xz) * speed;
-            dz = (tz / dist_xz) * speed;
+            // Grounded locomotion steering only; airborne horizontal movement comes
+            // from momentum/contacts/platform carry rather than direct MoveTo walking.
+            if grounded || carry_by_platform {
+                let speed = walk_speed * dt;
+                dx = (tx / dist_xz) * speed;
+                dz = (tz / dist_xz) * speed;
+            }
         } else {
             reached_move_to = true;
         }
@@ -89,3 +93,50 @@ pub fn resolve_vertical_velocity_after_move(
     v
 }
 use super::constants::humanoid as humanoid_consts;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_airborne_motion_plan_does_not_apply_horizontal_moveto_walk() {
+        let plan = build_motion_plan(
+            [0.0, 10.0, 0.0],
+            Some([10.0, 10.0, 0.0]),
+            16.0,
+            0.0,
+            -30.0,
+            1.0 / 60.0,
+            false,
+            false,
+            None,
+            None,
+            None,
+        );
+
+        assert!(plan.desired[0].abs() < 1e-6, "airborne MoveTo should not steer X");
+        assert!(plan.desired[2].abs() < 1e-6, "airborne MoveTo should not steer Z");
+        assert!(plan.desired[1] < 0.0, "airborne plan should still apply gravity");
+        assert!(!plan.reached_move_to, "target is still far away");
+    }
+
+    #[test]
+    fn test_grounded_motion_plan_applies_horizontal_moveto_walk() {
+        let plan = build_motion_plan(
+            [0.0, 3.0, 0.0],
+            Some([10.0, 3.0, 0.0]),
+            16.0,
+            0.0,
+            -30.0,
+            1.0 / 60.0,
+            true,
+            true,
+            None,
+            None,
+            None,
+        );
+
+        assert!(plan.desired[0] > 0.0, "grounded MoveTo should steer X");
+        assert!(plan.desired[2].abs() < 1e-6, "no Z offset for straight X target");
+    }
+}
