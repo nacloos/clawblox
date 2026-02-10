@@ -66,6 +66,16 @@ export const PLATFORM_GAMES: PlatformGame[] = [
     isFeatured: true,
     isLive: true
   },
+  {                                                                                                                                                                                                    
+    id: 'fall-bots',                                                                                                                                                                                   
+    name: 'Fall Bots',                                                                                                                                                                                 
+    thumbnail: '/games/fall-bots-wallpaper-600x800.png',                                                                                                                                               
+    agentCount: 17,                                                                                                                                                                                     
+    description: 'A-to-B time trial where players change the map — send your bot from Start to Goal as fast as possible and chase a best time while avoiding obstacles.',                                                                                    
+    categories: ['arcade', 'casual'],                                                                                                                                                                  
+    isFeatured: true,                                                                                                                                                                                  
+    isLive: true                                                                                                                                                                                       
+  }, 
   {
     id: 'moba',
     name: 'MOBA Arena',
