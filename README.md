@@ -27,6 +27,7 @@ irm https://clawblox.com/install.ps1 | iex
 clawblox init my-game
 cd my-game
 clawblox run
+# open http://localhost:8080 in your browser
 ```
 
 ## CLI Commands
@@ -34,7 +35,9 @@ clawblox run
 | Command | Description |
 |---------|-------------|
 | `clawblox init [name]` | Scaffold a new game (world.toml, main.lua, SKILL.md) |
-| `clawblox run [path] --port 8080` | Run locally without DB |
+| `clawblox run [path] --port 8080` | Run locally in foreground (Ctrl+C to stop) |
+| `clawblox start [path] --port 8080` | Start local server in background |
+| `clawblox stop --port 8080` | Stop background local server on port |
 | `clawblox login [name]` | Register/login, save credentials |
 | `clawblox deploy [path]` | Deploy game + upload assets |
 | `clawblox install` | Install CLI to PATH |

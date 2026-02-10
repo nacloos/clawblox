@@ -29,6 +29,38 @@ impl Default for ScriptsConfig {
     }
 }
 
+/// Renderer configuration section.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RendererConfig {
+    /// Human-readable renderer name shown in local runtime UI.
+    #[serde(default = "default_renderer_name")]
+    pub name: String,
+    /// Renderer host mode. Currently "module" or "default".
+    #[serde(default = "default_renderer_mode")]
+    pub mode: String,
+    /// Renderer API contract version expected by this game.
+    #[serde(default = "default_renderer_api_version")]
+    pub api_version: u32,
+    /// Optional renderer module entrypoint relative to game_dir/renderer/.
+    #[serde(default)]
+    pub entry: Option<String>,
+    /// Optional declared capabilities for docs and tooling.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+impl Default for RendererConfig {
+    fn default() -> Self {
+        Self {
+            name: default_renderer_name(),
+            mode: default_renderer_mode(),
+            api_version: default_renderer_api_version(),
+            entry: None,
+            capabilities: vec![],
+        }
+    }
+}
+
 /// World configuration from world.toml
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorldConfig {
@@ -46,6 +78,9 @@ pub struct WorldConfig {
     /// Scripts configuration
     #[serde(default)]
     pub scripts: ScriptsConfig,
+    /// Frontend renderer configuration
+    #[serde(default)]
+    pub renderer: RendererConfig,
 }
 
 fn default_max_players() -> u32 {
@@ -56,14 +91,25 @@ fn default_game_type() -> String {
     "lua".to_string()
 }
 
+fn default_renderer_name() -> String {
+    "Game Renderer".to_string()
+}
+
+fn default_renderer_mode() -> String {
+    "module".to_string()
+}
+
+fn default_renderer_api_version() -> u32 {
+    1
+}
+
 impl WorldConfig {
     /// Load world configuration from a TOML file
     pub fn from_file(path: &Path) -> Result<Self, WorldConfigError> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| WorldConfigError::IoError(path.to_path_buf(), e))?;
 
-        toml::from_str(&content)
-            .map_err(|e| WorldConfigError::ParseError(path.to_path_buf(), e))
+        toml::from_str(&content).map_err(|e| WorldConfigError::ParseError(path.to_path_buf(), e))
     }
 
     /// Load world configuration from a game directory
@@ -123,6 +169,13 @@ mod tests {
             main = "main.lua"
             tree = "scripts"
             skill = "SKILL.md"
+
+            [renderer]
+            name = "Test Renderer"
+            mode = "module"
+            api_version = 1
+            entry = "index.js"
+            capabilities = ["camera.follow"]
         "#;
         let config: WorldConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.name, "Test Game");
@@ -130,5 +183,8 @@ mod tests {
         assert_eq!(config.max_players, 16);
         assert_eq!(config.scripts.main, "main.lua");
         assert_eq!(config.scripts.tree, Some("scripts".to_string()));
+        assert_eq!(config.renderer.mode, "module");
+        assert_eq!(config.renderer.entry.as_deref(), Some("index.js"));
+        assert_eq!(config.renderer.api_version, 1);
     }
 }

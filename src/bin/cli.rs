@@ -3,7 +3,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Query, State,
+        Path as AxumPath, Query, State,
     },
     response::IntoResponse,
     routing::{get, post},
@@ -14,7 +14,6 @@ use dashmap::DashMap;
 use flate2::{write::GzEncoder, Compression};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -38,6 +37,7 @@ use clawblox::game::{
 };
 
 static DOCS_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/docs");
+static LOCAL_RUNTIME_UI_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/frontend_runtime/dist");
 
 #[derive(Parser)]
 #[command(name = "clawblox")]
@@ -65,6 +65,21 @@ enum Commands {
         /// Run as daemon (internal use only)
         #[arg(long, hide = true)]
         daemon: bool,
+    },
+    /// Start a game locally in background (daemon mode)
+    Start {
+        /// Path to game directory (default: current directory)
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Port to run the server on
+        #[arg(short, long, default_value = "8080")]
+        port: u16,
+    },
+    /// Stop a background game server started with `clawblox start`
+    Stop {
+        /// Port of the server to stop
+        #[arg(short, long, default_value = "8080")]
+        port: u16,
     },
     /// Log in or register an account on clawblox.com
     Login {
@@ -105,6 +120,8 @@ fn main() {
     match cli.command {
         Commands::Init { name } => init_project(name),
         Commands::Run { path, port, daemon } => run_game(path, port, daemon),
+        Commands::Start { path, port } => start_game(path, port),
+        Commands::Stop { port } => stop_game(port),
         Commands::Login {
             name,
             api_key,
@@ -168,7 +185,11 @@ fn install_cli() {
         let home = home::home_dir().expect("Failed to get home directory");
 
         // Install to ~/.local/share/clawblox/versions/X.X.X
-        let versions_dir = home.join(".local").join("share").join("clawblox").join("versions");
+        let versions_dir = home
+            .join(".local")
+            .join("share")
+            .join("clawblox")
+            .join("versions");
         std::fs::create_dir_all(&versions_dir).expect("Failed to create versions directory");
         let version_path = versions_dir.join(format!("{}.exe", version));
         std::fs::copy(&current_exe, &version_path).expect("Failed to copy binary");
@@ -236,8 +257,7 @@ fn write_embedded_dir(dir: &Dir, target: &Path) {
     }
 }
 
-const GITHUB_DOCS_API_URL: &str =
-    "https://api.github.com/repos/nacloos/clawblox/contents/docs";
+const GITHUB_DOCS_API_URL: &str = "https://api.github.com/repos/nacloos/clawblox/contents/docs";
 
 /// Fetch docs from GitHub and write them to `target_dir`.
 /// Returns Ok(()) on success, Err with description on any failure.
@@ -342,10 +362,18 @@ game_type = "lua"
 [scripts]
 main = "main.lua"
 skill = "SKILL.md"
+
+[renderer]
+name = "Default Game Renderer"
+mode = "module"
+api_version = 1
+entry = "index.js"
+capabilities = []
 "#,
         project_name, project_name
     );
-    std::fs::write(project_dir.join("world.toml"), world_toml).expect("Failed to create world.toml");
+    std::fs::write(project_dir.join("world.toml"), world_toml)
+        .expect("Failed to create world.toml");
 
     // Create main.lua
     let main_lua = r#"-- Game entry point
@@ -487,15 +515,39 @@ Move to a position on the map.
         match rt.block_on(fetch_docs_from_github(&docs_dir)) {
             Ok(()) => {}
             Err(e) => {
-                eprintln!("Warning: Could not fetch docs from GitHub ({}), using bundled copy", e);
+                eprintln!(
+                    "Warning: Could not fetch docs from GitHub ({}), using bundled copy",
+                    e
+                );
                 write_embedded_dir(&DOCS_DIR, &docs_dir);
             }
         }
     }
 
     // Create assets/ directory for game assets (GLB models, images, audio)
-    std::fs::create_dir_all(project_dir.join("assets"))
-        .expect("Failed to create assets directory");
+    std::fs::create_dir_all(project_dir.join("assets")).expect("Failed to create assets directory");
+
+    // Create renderer/ directory for game-specific frontend modules
+    let renderer_dir = project_dir.join("renderer");
+    std::fs::create_dir_all(&renderer_dir).expect("Failed to create renderer directory");
+    let renderer_js = r#"export function createRenderer(ctx) {
+  const canvas = ctx.canvas
+  const g = canvas.getContext('2d')
+
+  return {
+    onState(state) {
+      if (!g) return
+      g.fillStyle = '#111827'
+      g.fillRect(0, 0, canvas.width, canvas.height)
+      g.fillStyle = '#e5e7eb'
+      g.font = '16px sans-serif'
+      g.fillText(`Custom renderer loaded (tick ${state.tick})`, 16, 28)
+    },
+  }
+}
+"#;
+    std::fs::write(renderer_dir.join("index.js"), renderer_js)
+        .expect("Failed to create renderer/index.js");
 
     // Create .gitignore
     let gitignore = ".clawblox/\n.clawblox.log\n";
@@ -605,7 +657,10 @@ fn login(name: Option<String>, api_key: Option<String>, server: String) {
                                     me_body["name"].as_str().unwrap_or_default().to_string();
                                 if stored_name == name {
                                     println!("Already registered as: {}", name);
-                                    println!("Using existing API key from {}", credentials_path().display());
+                                    println!(
+                                        "Using existing API key from {}",
+                                        credentials_path().display()
+                                    );
                                     return;
                                 }
                             }
@@ -614,7 +669,10 @@ fn login(name: Option<String>, api_key: Option<String>, server: String) {
                 }
 
                 eprintln!("Registration failed ({}): {}", status, body);
-                eprintln!("Name '{}' already exists. Re-run with --api-key or use a different name.", name);
+                eprintln!(
+                    "Name '{}' already exists. Re-run with --api-key or use a different name.",
+                    name
+                );
                 std::process::exit(1);
             }
 
@@ -678,20 +736,16 @@ fn deploy_game(path: PathBuf, api_key_override: Option<String>, server_override:
     });
 
     // Read SKILL.md if configured
-    let skill_md = config
-        .scripts
-        .skill
-        .as_ref()
-        .and_then(|skill_file| {
-            let p = path.join(skill_file);
-            match std::fs::read_to_string(&p) {
-                Ok(content) => Some(content),
-                Err(e) => {
-                    eprintln!("Warning: Could not read {}: {}", p.display(), e);
-                    None
-                }
+    let skill_md = config.scripts.skill.as_ref().and_then(|skill_file| {
+        let p = path.join(skill_file);
+        match std::fs::read_to_string(&p) {
+            Ok(content) => Some(content),
+            Err(e) => {
+                eprintln!("Warning: Could not read {}: {}", p.display(), e);
+                None
             }
-        });
+        }
+    });
 
     // Check for existing game_id
     let game_id_path = path.join(".clawblox/game_id");
@@ -790,10 +844,12 @@ fn deploy_game(path: PathBuf, api_key_override: Option<String>, server_override:
 
                 let enc = GzEncoder::new(Vec::new(), Compression::default());
                 let mut tar_builder = tar::Builder::new(enc);
-                tar_builder.append_dir_all(".", &assets_dir).unwrap_or_else(|e| {
-                    eprintln!("Error creating asset archive: {}", e);
-                    std::process::exit(1);
-                });
+                tar_builder
+                    .append_dir_all(".", &assets_dir)
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error creating asset archive: {}", e);
+                        std::process::exit(1);
+                    });
                 let enc = tar_builder.into_inner().unwrap_or_else(|e| {
                     eprintln!("Error finalizing tar: {}", e);
                     std::process::exit(1);
@@ -953,48 +1009,72 @@ fn write_pid_file_for(path: &Path, pid: u32) {
     let _ = std::fs::write(path, pid.to_string());
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct LocalRendererManifest {
+    schema_version: u32,
+    api_version: u32,
+    name: String,
+    mode: String,
+    entry_url: Option<String>,
+    capabilities: Vec<String>,
+}
+
+fn sanitize_renderer_entry(raw: &str) -> Option<String> {
+    let normalized = raw.replace('\\', "/");
+    if normalized.is_empty() || normalized.starts_with('/') {
+        return None;
+    }
+    if normalized
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return None;
+    }
+    Some(normalized)
+}
+
+fn build_local_renderer_manifest(
+    game_dir: &Path,
+    config: &clawblox::config::RendererConfig,
+) -> LocalRendererManifest {
+    let entry_url = config
+        .entry
+        .as_deref()
+        .and_then(sanitize_renderer_entry)
+        .and_then(|entry| {
+            let local_path = game_dir.join("renderer").join(&entry);
+            if local_path.is_file() {
+                Some(format!("/renderer-files/{}", entry))
+            } else {
+                eprintln!(
+                    "Warning: renderer entry '{}' not found at {}. Falling back to embedded default renderer.",
+                    entry,
+                    local_path.display()
+                );
+                None
+            }
+        });
+
+    LocalRendererManifest {
+        schema_version: 1,
+        api_version: config.api_version,
+        name: config.name.clone(),
+        mode: config.mode.clone(),
+        entry_url,
+        capabilities: config.capabilities.clone(),
+    }
+}
+
 fn run_game(path: PathBuf, port: u16, daemon: bool) {
     let path = std::fs::canonicalize(&path).unwrap_or_else(|_| {
         eprintln!("Error: Path '{}' does not exist", path.display());
         std::process::exit(1);
     });
 
-    if !daemon {
-        // Non-daemon mode: kill old instance, spawn child daemon, return immediately
-        kill_previous_instance(port);
-
-        let log_file_path = path.join(".clawblox.log");
-        let log_file = std::fs::File::create(&log_file_path).unwrap_or_else(|e| {
-            eprintln!("Error creating log file {}: {}", log_file_path.display(), e);
-            std::process::exit(1);
-        });
-        let log_file_stderr = log_file.try_clone().unwrap_or_else(|e| {
-            eprintln!("Error cloning log file handle: {}", e);
-            std::process::exit(1);
-        });
-
-        let exe = std::env::current_exe().expect("Failed to get current executable path");
-        let child = std::process::Command::new(exe)
-            .args(["run", &path.to_string_lossy(), "--port", &port.to_string(), "--daemon"])
-            .stdout(log_file)
-            .stderr(log_file_stderr)
-            .stdin(std::process::Stdio::null())
-            .spawn()
-            .unwrap_or_else(|e| {
-                eprintln!("Error spawning daemon: {}", e);
-                std::process::exit(1);
-            });
-
-        // Write the child PID to the PID file
+    if daemon {
         let pid_file = pid_path(port);
-        write_pid_file_for(&pid_file, child.id());
-
-        println!("Server starting on http://localhost:{}", port);
-        println!("Logs: {}", log_file_path.display());
-        return;
+        write_pid_file_for(&pid_file, std::process::id());
     }
-
-    // Daemon mode: run the server (parent already killed old instance and wrote PID file)
 
     // Load world config + bundled runtime script (main.lua + optional scripts/ tree)
     let (config, script) = load_world_and_entry_script(&path).unwrap_or_else(|e| {
@@ -1008,10 +1088,14 @@ fn run_game(path: PathBuf, port: u16, daemon: bool) {
         .skill
         .as_ref()
         .and_then(|skill_file| std::fs::read_to_string(path.join(skill_file)).ok());
+    let renderer_manifest = build_local_renderer_manifest(&path, &config.renderer);
 
     let pid_file = pid_path(port);
 
-    println!("Starting {} (max {} players)", config.name, config.max_players);
+    println!(
+        "Starting {} (max {} players)",
+        config.name, config.max_players
+    );
     println!("Script: {}", config.scripts.main);
     if let Some(tree) = &config.scripts.tree {
         println!("Script tree: {}", tree);
@@ -1043,6 +1127,7 @@ fn run_game(path: PathBuf, port: u16, daemon: bool) {
             instance_id,
             game_handle,
             skill_md,
+            renderer_manifest,
             sessions: Arc::new(DashMap::new()),
             log_file: path.join(".clawblox.log"),
         };
@@ -1053,12 +1138,17 @@ fn run_game(path: PathBuf, port: u16, daemon: bool) {
             .allow_headers(Any);
 
         let app = Router::new()
+            .route("/", get(local_ui_index))
+            .route("/ui", get(local_ui_index))
+            .route("/ui/{*path}", get(local_ui_file))
             .route("/spectate", get(local_spectate))
             .route("/spectate/ws", get(local_spectate_ws))
+            .route("/renderer/manifest", get(local_renderer_manifest))
             .route("/join", post(local_join))
             .route("/input", post(local_input))
             .route("/observe", get(local_observe))
             .route("/skill.md", get(local_skill))
+            .nest_service("/renderer-files", ServeDir::new(path.join("renderer")))
             .nest_service("/assets", ServeDir::new(path.join("assets")))
             .nest_service("/static", ServeDir::new(path.join("static")))
             .with_state(state)
@@ -1067,22 +1157,26 @@ fn run_game(path: PathBuf, port: u16, daemon: bool) {
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
         println!();
         println!("Server running on http://localhost:{}", port);
+        println!("Local frontend: http://localhost:{}/", port);
+        if !daemon {
+            println!("Mode: foreground (press Ctrl+C to stop)");
+        }
         println!();
         println!("Endpoints:");
+        println!("  GET  /              - Embedded local frontend");
         println!("  POST /join?name=X  - Join game, returns session token");
         println!("  POST /input        - Send input (requires X-Session header)");
         println!("  GET  /observe      - Player observation (requires X-Session header)");
         println!("  GET  /skill.md     - Game skill definition");
 
-        let listener = tokio::net::TcpListener::bind(addr).await.unwrap_or_else(|e| {
-            delete_pid_file(&pid_file);
-            eprintln!(
-                "Error: Port {} is already in use. Try --port <PORT>",
-                port
-            );
-            eprintln!("Details: {}", e);
-            std::process::exit(1);
-        });
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .unwrap_or_else(|e| {
+                delete_pid_file(&pid_file);
+                eprintln!("Error: Port {} is already in use. Try --port <PORT>", port);
+                eprintln!("Details: {}", e);
+                std::process::exit(1);
+            });
 
         let pid_file_clone = pid_file.clone();
         axum::serve(listener, app)
@@ -1101,6 +1195,84 @@ fn run_game(path: PathBuf, port: u16, daemon: bool) {
     });
 }
 
+fn start_game(path: PathBuf, port: u16) {
+    let path = std::fs::canonicalize(&path).unwrap_or_else(|_| {
+        eprintln!("Error: Path '{}' does not exist", path.display());
+        std::process::exit(1);
+    });
+
+    kill_previous_instance(port);
+
+    let log_file_path = path.join(".clawblox.log");
+    let log_file = std::fs::File::create(&log_file_path).unwrap_or_else(|e| {
+        eprintln!("Error creating log file {}: {}", log_file_path.display(), e);
+        std::process::exit(1);
+    });
+    let log_file_stderr = log_file.try_clone().unwrap_or_else(|e| {
+        eprintln!("Error cloning log file handle: {}", e);
+        std::process::exit(1);
+    });
+
+    let exe = std::env::current_exe().expect("Failed to get current executable path");
+    let child = std::process::Command::new(exe)
+        .args([
+            "run",
+            &path.to_string_lossy(),
+            "--port",
+            &port.to_string(),
+            "--daemon",
+        ])
+        .stdout(log_file)
+        .stderr(log_file_stderr)
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .unwrap_or_else(|e| {
+            eprintln!("Error spawning daemon: {}", e);
+            std::process::exit(1);
+        });
+
+    // Write the child PID to the PID file
+    let pid_file = pid_path(port);
+    write_pid_file_for(&pid_file, child.id());
+
+    println!("Server starting in background on http://localhost:{}", port);
+    println!("Logs: {}", log_file_path.display());
+}
+
+fn stop_game(port: u16) {
+    let path = pid_path(port);
+
+    let Some(pid) = read_pid_file(&path) else {
+        println!("No running clawblox instance found on port {}", port);
+        return;
+    };
+
+    if !is_process_alive(pid) {
+        delete_pid_file(&path);
+        println!("No running clawblox instance found on port {} (cleaned stale PID file)", port);
+        return;
+    }
+
+    println!("Stopping clawblox instance (PID {}) on port {}...", pid, port);
+    kill_process(pid);
+
+    for _ in 0..20 {
+        if !is_process_alive(pid) {
+            delete_pid_file(&path);
+            println!("Stopped.");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    if is_process_alive(pid) {
+        eprintln!("Warning: process {} did not exit in time", pid);
+    } else {
+        delete_pid_file(&path);
+        println!("Stopped.");
+    }
+}
+
 // =============================================================================
 // Local Server State & Handlers
 // =============================================================================
@@ -1111,6 +1283,7 @@ struct LocalState {
     instance_id: Uuid,
     game_handle: GameManagerHandle,
     skill_md: Option<String>,
+    renderer_manifest: LocalRendererManifest,
     sessions: Arc<DashMap<String, (Uuid, String)>>, // token -> (agent_id, name)
     log_file: PathBuf,
 }
@@ -1127,6 +1300,56 @@ fn check_halted(state: &LocalState) -> Option<String> {
             state.log_file.display()
         )
     })
+}
+
+fn content_type_for_path(path: &str) -> &'static str {
+    if path.ends_with(".html") {
+        "text/html; charset=utf-8"
+    } else if path.ends_with(".js") {
+        "application/javascript; charset=utf-8"
+    } else if path.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if path.ends_with(".json") {
+        "application/json; charset=utf-8"
+    } else if path.ends_with(".svg") {
+        "image/svg+xml"
+    } else if path.ends_with(".png") {
+        "image/png"
+    } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        "image/jpeg"
+    } else {
+        "application/octet-stream"
+    }
+}
+
+fn embedded_ui_file_response(path: &str) -> impl IntoResponse {
+    if let Some(file) = LOCAL_RUNTIME_UI_DIR.get_file(path) {
+        let content_type = content_type_for_path(path);
+        return (
+            axum::http::StatusCode::OK,
+            [("content-type", content_type)],
+            file.contents().to_vec(),
+        )
+            .into_response();
+    }
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        [("content-type", "text/plain; charset=utf-8")],
+        b"Not found".to_vec(),
+    )
+        .into_response()
+}
+
+async fn local_ui_index() -> impl IntoResponse {
+    embedded_ui_file_response("index.html")
+}
+
+async fn local_ui_file(AxumPath(path): AxumPath<String>) -> impl IntoResponse {
+    let req_path = path.trim_start_matches('/');
+    if req_path.is_empty() {
+        return embedded_ui_file_response("index.html");
+    }
+    embedded_ui_file_response(req_path)
 }
 
 #[derive(Deserialize)]
@@ -1162,7 +1385,9 @@ async fn local_join(
     .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
 
     // Store session
-    state.sessions.insert(session_token.clone(), (agent_id, query.name));
+    state
+        .sessions
+        .insert(session_token.clone(), (agent_id, query.name));
 
     Ok(Json(JoinResponse {
         session: session_token,
@@ -1182,14 +1407,10 @@ fn get_session(
             "Missing X-Session header".to_string(),
         ))?;
 
-    state
-        .sessions
-        .get(token)
-        .map(|r| r.clone())
-        .ok_or((
-            axum::http::StatusCode::UNAUTHORIZED,
-            "Invalid session".to_string(),
-        ))
+    state.sessions.get(token).map(|r| r.clone()).ok_or((
+        axum::http::StatusCode::UNAUTHORIZED,
+        "Invalid session".to_string(),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1285,21 +1506,15 @@ async fn local_skill(State(state): State<LocalState>) -> impl IntoResponse {
     }
 }
 
+async fn local_renderer_manifest(State(state): State<LocalState>) -> Json<LocalRendererManifest> {
+    Json(state.renderer_manifest)
+}
+
 async fn local_spectate_ws(
     State(state): State<LocalState>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_spectate_ws(socket, state))
-}
-
-fn gzip_compress(data: &[u8]) -> Option<Vec<u8>> {
-    const MIN_SIZE_FOR_COMPRESSION: usize = 1024;
-    if data.len() < MIN_SIZE_FOR_COMPRESSION {
-        return None;
-    }
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
-    encoder.write_all(data).ok()?;
-    encoder.finish().ok()
 }
 
 async fn handle_spectate_ws(socket: WebSocket, state: LocalState) {
@@ -1336,11 +1551,8 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState) {
                             last_tick = obs.tick;
                             same_tick_count = 0;
                             if let Ok(json) = serde_json::to_vec(&obs) {
-                                let msg = if let Some(compressed) = gzip_compress(&json) {
-                                    Message::Binary(compressed.into())
-                                } else {
-                                    Message::Text(String::from_utf8_lossy(&json).into_owned().into())
-                                };
+                                let msg =
+                                    Message::Text(String::from_utf8_lossy(&json).into_owned().into());
                                 if sender.send(msg).await.is_err() {
                                     break;
                                 }
@@ -1350,11 +1562,9 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState) {
                             if same_tick_count >= 5 {
                                 same_tick_count = 0;
                                 if let Ok(json) = serde_json::to_vec(&obs) {
-                                    let msg = if let Some(compressed) = gzip_compress(&json) {
-                                        Message::Binary(compressed.into())
-                                    } else {
-                                        Message::Text(String::from_utf8_lossy(&json).into_owned().into())
-                                    };
+                                    let msg = Message::Text(
+                                        String::from_utf8_lossy(&json).into_owned().into(),
+                                    );
                                     if sender.send(msg).await.is_err() {
                                         break;
                                     }
