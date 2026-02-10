@@ -634,7 +634,16 @@ function updateHud(obs: SpectatorObservation): void {
   }
 
   // Status text
-  spectateTextEl.textContent = `Following ${target.name} | tick ${obs.tick} | ${obs.game_status}`
+  if (currentMode === 'play') {
+    const playingSelf = playPlayerId !== null && target.id === playPlayerId
+    if (playingSelf) {
+      spectateTextEl.textContent = `[${modeLabel()}] You (${target.name}) | tick ${obs.tick} | ${obs.game_status} | WASD move, Space jump, Shift dive, Esc spectate`
+    } else {
+      spectateTextEl.textContent = `[${modeLabel()}] Following ${target.name} | tick ${obs.tick} | ${obs.game_status} | Esc spectate`
+    }
+  } else {
+    spectateTextEl.textContent = `[${modeLabel()}] Following ${target.name} | tick ${obs.tick} | ${obs.game_status} | Enter play, Tab cycle`
+  }
 }
 
 // ── Camera ──────────────────────────────────────────────────
@@ -670,6 +679,8 @@ function updateCamera(): void {
 
 // ── WebSocket ───────────────────────────────────────────────
 let latestObservation: SpectatorObservation | null = null
+type ClientMode = 'spectator' | 'play'
+let currentMode: ClientMode = 'spectator'
 
 function getGameId(): string {
   const fromPath = window.location.pathname.match(/\/spectate\/([0-9a-fA-F-]{36})/)
@@ -739,15 +750,31 @@ function connectWs(): void {
   }
 }
 
-// Tab to switch follow target, Enter to join as player
+function modeLabel(): string {
+  return currentMode === 'play' ? 'Play' : 'Spectator'
+}
+
+function setMode(mode: ClientMode): void {
+  currentMode = mode
+}
+
+// Tab to switch follow target, Enter to join as player, Esc to return to spectator mode
 window.addEventListener('keydown', (event) => {
-  if (event.code === 'Enter' && !playJoined) {
+  if (event.code === 'Escape' && playJoined) {
+    event.preventDefault()
+    leavePlayMode()
+    return
+  }
+
+  if (event.code === 'Enter' && !playJoined && !playConnecting) {
     event.preventDefault()
     void joinAsPlayer()
     return
   }
+
   if (!latestObservation) return
   if (event.code !== 'Tab') return
+  if (currentMode === 'play') return
   event.preventDefault()
   const players = latestObservation.players
   if (!players.length) return
@@ -761,92 +788,170 @@ connectWs()
 
 // ── Keyboard play mode ──────────────────────────────────────
 const keysDown = new Set<string>()
-let playerHeaders: Record<string, string> | null = null
 let playJoined = false
-const MOVE_SPEED = 20 * 4  // units/sec (scaled)
+let playConnecting = false
+let playSocket: WebSocket | null = null
+let playSeq = 0
+let playPlayerId: string | null = null
+let jumpQueued = false
+let diveQueued = false
 let lastInputTime = 0
+let playSocketClosingByUser = false
+const INPUT_INTERVAL_MS = 50
 
-window.addEventListener('keydown', (e) => { keysDown.add(e.code) })
+window.addEventListener('keydown', (e) => {
+  if (!e.repeat && e.code === 'Space') jumpQueued = true
+  if (!e.repeat && (e.code === 'ShiftLeft' || e.code === 'ShiftRight')) diveQueued = true
+  keysDown.add(e.code)
+})
 window.addEventListener('keyup', (e) => { keysDown.delete(e.code) })
+window.addEventListener('blur', () => {
+  keysDown.clear()
+  jumpQueued = false
+  diveQueued = false
+})
+
+interface PlayServerMessage {
+  type: 'joined' | 'ack' | 'error'
+  player_id?: string
+  instance_id?: string
+  seq?: number
+  message?: string
+}
+
+function leavePlayMode(): void {
+  playSocketClosingByUser = true
+  playJoined = false
+  playConnecting = false
+  playPlayerId = null
+  jumpQueued = false
+  diveQueued = false
+  keysDown.clear()
+  setMode('spectator')
+  if (playSocket && playSocket.readyState === WebSocket.OPEN) {
+    playSocket.close(1000, 'switch to spectator')
+  } else {
+    playSocket = null
+  }
+  setConnectionState('Spectator mode (Enter to play)')
+}
 
 async function joinAsPlayer(): Promise<void> {
-  if (playJoined) return
+  if (playJoined || playConnecting) return
+  playConnecting = true
   try {
-    // Register agent
-    const regRes = await fetch(`/api/v1/agents/register`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: 'keyboard-player', description: 'Keyboard player' }),
-    })
-    const regBody = await regRes.json()
-    const apiKey = regBody.api_key ?? regBody.agent?.api_key
-    if (!apiKey) { console.error('No api_key in register response', regBody); return }
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const wsUrl = `${protocol}//${window.location.host}/api/v1/games/${gameId}/play/ws?name=keyboard-player`
+    const ws = new WebSocket(wsUrl)
+    playSocket = ws
+    setConnectionState('Connecting play socket...')
 
-    playerHeaders = { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
+    ws.onmessage = (event) => {
+      try {
+        const raw = event.data instanceof ArrayBuffer
+          ? new TextDecoder().decode(new Uint8Array(event.data))
+          : String(event.data)
+        const parsed = JSON.parse(raw) as PlayServerMessage
 
-    // Join game
-    const joinRes = await fetch(`/api/v1/games/${gameId}/join`, {
-      method: 'POST',
-      headers: playerHeaders,
-    })
-    if (!joinRes.ok) { console.error('Join failed', await joinRes.text()); return }
+        if (parsed.type === 'joined' && parsed.player_id) {
+          playJoined = true
+          playConnecting = false
+          playPlayerId = parsed.player_id
+          setMode('play')
+          selectedPlayerId = parsed.player_id
+          finishTriggered = false
+          finishScreen.style.display = 'none'
+          console.log('[play] Joined as keyboard player')
+          return
+        }
 
-    playJoined = true
-    spectateTextEl.textContent = 'Playing! WASD=move, Space=jump, Shift=dive'
-    console.log('[play] Joined as keyboard player')
+        if (parsed.type === 'error') {
+          playJoined = false
+          playConnecting = false
+          playPlayerId = null
+          setMode('spectator')
+          setConnectionState(parsed.message ? `Play error: ${parsed.message}` : 'Play error')
+        }
+      } catch {
+        // Keep socket alive and ignore malformed server messages.
+      }
+    }
+
+    ws.onerror = () => {
+      playConnecting = false
+      playJoined = false
+      playPlayerId = null
+      setMode('spectator')
+      setConnectionState('Play socket error')
+    }
+
+    ws.onclose = () => {
+      const wasJoined = playJoined
+      const closedByUser = playSocketClosingByUser
+      playSocketClosingByUser = false
+      playConnecting = false
+      playJoined = false
+      playPlayerId = null
+      playSocket = null
+      if (closedByUser) {
+        setConnectionState('Spectator mode (Enter to play)')
+      } else if (wasJoined) {
+        setMode('spectator')
+        setConnectionState('Play disconnected (Enter to rejoin)')
+      }
+    }
   } catch (err) {
+    playConnecting = false
+    playJoined = false
+    playPlayerId = null
     console.error('[play] Failed to join:', err)
   }
 }
 
-async function sendPlayerInput(type: string, data?: Record<string, unknown>): Promise<void> {
-  if (!playerHeaders) return
+function sendPlayIntent(moveX: number, moveZ: number, jump: boolean, dive: boolean): void {
+  const ws = playSocket
+  if (!ws || ws.readyState !== WebSocket.OPEN || !playJoined) return
+
+  // Three.js yaw=0 faces -Z; backend intent transform expects yaw=0 to face +Z.
+  const yaw = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ').y + Math.PI
+  const payload = {
+    type: 'intent',
+    seq: ++playSeq,
+    move: [moveX, moveZ] as [number, number],
+    buttons: { jump, dive },
+    camera_yaw: yaw,
+  }
+
   try {
-    await fetch(`/api/v1/games/${gameId}/input`, {
-      method: 'POST',
-      headers: playerHeaders,
-      body: JSON.stringify({ type, data: data ?? {} }),
-    })
+    ws.send(JSON.stringify(payload))
   } catch { /* ignore */ }
 }
 
 function processKeyboardInput(): void {
-  if (!playJoined || !playerHeaders || !latestObservation) return
+  if (currentMode !== 'play' || !playJoined || !playSocket) return
 
   const now = performance.now()
-  if (now - lastInputTime < 50) return  // throttle to 20 inputs/sec
+  if (now - lastInputTime < INPUT_INTERVAL_MS) return
   lastInputTime = now
 
-  // Find our player position
-  const player = latestObservation.players.find((p) => p.id === selectedPlayerId) ?? latestObservation.players[0]
-  if (!player) return
+  // Camera-relative movement intent (Roblox parity style).
+  let moveX = 0
+  let moveZ = 0
+  if (keysDown.has('KeyW') || keysDown.has('ArrowUp')) moveZ += 1
+  if (keysDown.has('KeyS') || keysDown.has('ArrowDown')) moveZ -= 1
+  if (keysDown.has('KeyA') || keysDown.has('ArrowLeft')) moveX -= 1
+  if (keysDown.has('KeyD') || keysDown.has('ArrowRight')) moveX += 1
 
-  const [px, py, pz] = player.position
-
-  // Compute movement direction from WASD
-  let dx = 0, dz = 0
-  if (keysDown.has('KeyW') || keysDown.has('ArrowUp')) dz += 1
-  if (keysDown.has('KeyS') || keysDown.has('ArrowDown')) dz -= 1
-  if (keysDown.has('KeyA') || keysDown.has('ArrowLeft')) dx -= 1
-  if (keysDown.has('KeyD') || keysDown.has('ArrowRight')) dx += 1
-
-  if (dx !== 0 || dz !== 0) {
-    const len = Math.sqrt(dx * dx + dz * dz)
-    dx /= len; dz /= len
-    const step = MOVE_SPEED * 0.15  // position ahead by ~150ms
-    void sendPlayerInput('MoveTo', { position: [px + dx * step, py, pz + dz * step] })
+  const len = Math.hypot(moveX, moveZ)
+  if (len > 1) {
+    moveX /= len
+    moveZ /= len
   }
 
-  if (keysDown.has('Space')) {
-    void sendPlayerInput('Jump')
-    keysDown.delete('Space')  // one-shot
-  }
-
-  if (keysDown.has('ShiftLeft') || keysDown.has('ShiftRight')) {
-    void sendPlayerInput('Dive')
-    keysDown.delete('ShiftLeft')
-    keysDown.delete('ShiftRight')
-  }
+  // Backend/world transform uses opposite strafe sign from our camera-space axis.
+  sendPlayIntent(-moveX, moveZ, jumpQueued, diveQueued)
+  jumpQueued = false
+  diveQueued = false
 }
 
 // ── Main loop ───────────────────────────────────────────────
