@@ -226,7 +226,9 @@ local function buildCourse()
             Vector3.new(2.6 * S, 2.6 * S, 2.6 * S),
             Vector3.new(0, 14 * S - armLen, z),
             Color3.fromRGB(231, 76, 60))
-        ball.CanCollide = false
+        -- Main pendulum hazard should physically collide with players.
+        -- (Arms/bars stay non-collidable to keep hitboxes fair.)
+        ball.CanCollide = true
 
         local speed = 1.5 + (i - 1) * 0.15
         local phase = (i - 1) * 1.3
