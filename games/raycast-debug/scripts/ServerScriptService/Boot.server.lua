@@ -221,8 +221,7 @@ AgentInputService.InputReceived:Connect(function(player, inputType, data)
                     victimUserId = victimPlayer.UserId
                     local victimHumanoid = hitCharacter:FindFirstChild("Humanoid")
                     if victimHumanoid and victimHumanoid.Health > 0 then
-                        local newHealth = math.max(0, victimHumanoid.Health - FIRE_DAMAGE)
-                        victimHumanoid.Health = newHealth
+                        victimHumanoid:TakeDamage(FIRE_DAMAGE)
                     end
                 end
             end
