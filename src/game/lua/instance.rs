@@ -7,7 +7,7 @@ use crate::game::constants::humanoid as humanoid_consts;
 use super::events::{create_signal, RBXScriptSignal};
 use super::runtime::Game;
 use super::services::WorkspaceService;
-use super::types::{CFrame, Color3, Material, PartType, UDim, UDim2, Vector3};
+use super::types::{CFrame, Color3, HumanoidStateType, Material, PartType, UDim, UDim2, Vector3};
 
 static INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -315,6 +315,7 @@ pub struct HumanoidData {
     pub hip_height: f32,
     pub move_direction: Vector3,
     pub running_speed: f32,
+    pub state: HumanoidStateType,
     /// One-shot jump request consumed by game movement update
     pub jump_requested: bool,
     /// Movement target set by MoveTo()
@@ -325,6 +326,7 @@ pub struct HumanoidData {
     pub died: RBXScriptSignal,
     pub health_changed: RBXScriptSignal,
     pub running: RBXScriptSignal,
+    pub state_changed: RBXScriptSignal,
     pub move_to_finished: RBXScriptSignal,
 }
 
@@ -340,12 +342,14 @@ impl Default for HumanoidData {
             hip_height: humanoid_consts::DEFAULT_HIP_HEIGHT,
             move_direction: Vector3::zero(),
             running_speed: 0.0,
+            state: HumanoidStateType::None,
             jump_requested: false,
             move_to_target: None,
             cancel_move_to: false,
             died: create_signal("Died"),
             health_changed: create_signal("HealthChanged"),
             running: create_signal("Running"),
+            state_changed: create_signal("StateChanged"),
             move_to_finished: create_signal("MoveToFinished"),
         }
     }
@@ -1604,6 +1608,11 @@ impl UserData for Instance {
                 .map(|h| h.move_to_finished.clone()))
         });
 
+        fields.add_field_method_get("StateChanged", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.humanoid_data.as_ref().map(|h| h.state_changed.clone()))
+        });
+
         fields.add_field_method_get("UserId", |_, this| {
             let data = this.data.lock().unwrap();
             // Return as f64 to ensure it's a Lua number type (not Integer) for table key compatibility
@@ -2464,6 +2473,19 @@ impl UserData for Instance {
             let mut data = this.data.lock().unwrap();
             if let Some(humanoid) = &mut data.humanoid_data {
                 humanoid.jump_requested = true;
+            }
+            Ok(())
+        });
+
+        methods.add_method("GetState", |_, this, ()| {
+            let data = this.data.lock().unwrap();
+            Ok(data.humanoid_data.as_ref().map(|h| h.state))
+        });
+
+        methods.add_method("ChangeState", |_, this, state: HumanoidStateType| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(humanoid) = &mut data.humanoid_data {
+                humanoid.state = state;
             }
             Ok(())
         });

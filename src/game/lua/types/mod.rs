@@ -7,7 +7,7 @@ pub mod vector3;
 
 pub use cframe::CFrame;
 pub use color3::Color3;
-pub use enums::{Material, PartType, RaycastFilterType};
+pub use enums::{HumanoidStateType, Material, PartType, RaycastFilterType};
 pub use udim::UDim;
 pub use udim2::UDim2;
 pub use vector3::Vector3;

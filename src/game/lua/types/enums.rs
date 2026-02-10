@@ -153,6 +153,7 @@ impl UserData for Material {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HumanoidStateType {
     Running,
+    Landed,
     Jumping,
     Freefall,
     Dead,
@@ -164,6 +165,7 @@ impl HumanoidStateType {
     pub fn name(&self) -> &'static str {
         match self {
             HumanoidStateType::Running => "Running",
+            HumanoidStateType::Landed => "Landed",
             HumanoidStateType::Jumping => "Jumping",
             HumanoidStateType::Freefall => "Freefall",
             HumanoidStateType::Dead => "Dead",
@@ -366,6 +368,7 @@ pub fn register_enums(lua: &Lua) -> Result<()> {
 
     let state_type_table = lua.create_table()?;
     state_type_table.set("Running", HumanoidStateType::Running)?;
+    state_type_table.set("Landed", HumanoidStateType::Landed)?;
     state_type_table.set("Jumping", HumanoidStateType::Jumping)?;
     state_type_table.set("Freefall", HumanoidStateType::Freefall)?;
     state_type_table.set("Dead", HumanoidStateType::Dead)?;

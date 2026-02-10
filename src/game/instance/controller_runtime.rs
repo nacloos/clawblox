@@ -4,6 +4,7 @@ use super::super::constants::humanoid as humanoid_consts;
 use super::super::constants::physics as consts;
 use super::super::humanoid_movement::{build_motion_plan, resolve_vertical_velocity_after_move};
 use super::super::lua::types::Vector3;
+use super::super::lua::types::HumanoidStateType;
 use super::character_controller::{
     evaluate_ground_controller, sample_ground_sensor, ControllerManagerConfig,
 };
@@ -162,6 +163,7 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             }
         }
 
+        let mut post_move_grounded = grounded;
         if let Some(movement) = instance.physics.move_character(hrp_id, motion_plan.desired, dt) {
             new_vertical_velocity = resolve_vertical_velocity_after_move(
                 new_vertical_velocity,
@@ -169,6 +171,7 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
                 movement.translation.y,
                 movement.grounded,
             );
+            post_move_grounded = movement.grounded;
         }
 
         if let Some(state) = instance.physics.get_character_state_mut(hrp_id) {
@@ -182,7 +185,13 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
         }
 
         let locomotion_vec = [motion_plan.desired[0], 0.0, motion_plan.desired[2]];
-        update_humanoid_locomotion_state(instance, agent_id, locomotion_vec);
+        update_humanoid_locomotion_state(
+            instance,
+            agent_id,
+            locomotion_vec,
+            post_move_grounded,
+            new_vertical_velocity,
+        );
         if humanoid_auto_rotate_enabled(instance, agent_id) {
             let speed =
                 (locomotion_vec[0] * locomotion_vec[0] + locomotion_vec[2] * locomotion_vec[2])
@@ -311,6 +320,8 @@ fn update_humanoid_locomotion_state(
     instance: &mut GameInstance,
     agent_id: Uuid,
     velocity: [f32; 3],
+    grounded: bool,
+    vertical_velocity: f32,
 ) {
     let result: Result<(), mlua::Error> = (|| {
         let Some(user_id) = instance.players.get(&agent_id).copied() else {
@@ -329,8 +340,15 @@ fn update_humanoid_locomotion_state(
         } else {
             Vector3::zero()
         };
+        let next_state = if grounded {
+            HumanoidStateType::Running
+        } else if vertical_velocity > 0.05 {
+            HumanoidStateType::Jumping
+        } else {
+            HumanoidStateType::Freefall
+        };
 
-        let (running_signal, should_fire_running) = {
+        let (running_signal, should_fire_running, state_changed_signal, state_transition) = {
             let player_data = player.data.lock().unwrap();
             let Some(character) = player_data
                 .player_data
@@ -345,6 +363,8 @@ fn update_humanoid_locomotion_state(
             let char_data = character.lock().unwrap();
             let mut signal = None;
             let mut fire_running = false;
+            let mut state_signal = None;
+            let mut state_transition = None;
             for child_ref in &char_data.children {
                 let mut child_data = child_ref.lock().unwrap();
                 if let Some(humanoid) = &mut child_data.humanoid_data {
@@ -359,10 +379,17 @@ fn update_humanoid_locomotion_state(
                         signal = Some(humanoid.running.clone());
                         fire_running = true;
                     }
+
+                    let prev_state = humanoid.state;
+                    if prev_state != next_state {
+                        humanoid.state = next_state;
+                        state_signal = Some(humanoid.state_changed.clone());
+                        state_transition = Some((prev_state, next_state));
+                    }
                     break;
                 }
             }
-            (signal, fire_running)
+            (signal, fire_running, state_signal, state_transition)
         };
 
         if should_fire_running {
@@ -374,6 +401,19 @@ fn update_humanoid_locomotion_state(
                 )?;
                 super::super::lua::events::track_yielded_threads(lua, threads)?;
             }
+        }
+
+        if let (Some(signal), Some((old_state, new_state))) = (state_changed_signal, state_transition)
+        {
+            let lua = runtime.lua();
+            let threads = signal.fire_as_coroutines(
+                lua,
+                mlua::MultiValue::from_iter([
+                    mlua::Value::UserData(lua.create_userdata(old_state)?),
+                    mlua::Value::UserData(lua.create_userdata(new_state)?),
+                ]),
+            )?;
+            super::super::lua::events::track_yielded_threads(lua, threads)?;
         }
 
         Ok(())

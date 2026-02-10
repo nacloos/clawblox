@@ -1820,6 +1820,96 @@ mod tests {
     }
 
     #[test]
+    fn test_humanoid_state_changed_transitions_jump_freefall_running() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(r#"
+            local AgentInputService = game:GetService("AgentInputService")
+            local Players = game:GetService("Players")
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(100, 1, 100)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            local state = Instance.new("Part")
+            state.Name = "StateMarker"
+            state.Size = Vector3.new(2, 2, 2)
+            state.Position = Vector3.new(0, 2, 15)
+            state.Anchored = true
+            state.Parent = Workspace
+            state:SetAttribute("JumpingCount", 0)
+            state:SetAttribute("FreefallCount", 0)
+            state:SetAttribute("RunningCount", 0)
+            state:SetAttribute("LastState", "")
+
+            local function bindHumanoid(player)
+                local character = player.Character
+                if not character then return end
+                local humanoid = character:FindFirstChild("Humanoid")
+                if not humanoid then return end
+
+                humanoid.StateChanged:Connect(function(_oldState, newState)
+                    if newState == Enum.HumanoidStateType.Jumping then
+                        state:SetAttribute("JumpingCount", (state:GetAttribute("JumpingCount") or 0) + 1)
+                    elseif newState == Enum.HumanoidStateType.Freefall then
+                        state:SetAttribute("FreefallCount", (state:GetAttribute("FreefallCount") or 0) + 1)
+                    elseif newState == Enum.HumanoidStateType.Running then
+                        state:SetAttribute("RunningCount", (state:GetAttribute("RunningCount") or 0) + 1)
+                    end
+                    state:SetAttribute("LastState", newState.Name)
+                end)
+            end
+
+            Players.PlayerAdded:Connect(function(player)
+                player.CharacterAdded:Connect(function()
+                    bindHumanoid(player)
+                end)
+                bindHumanoid(player)
+            end)
+
+            if AgentInputService then
+                AgentInputService.InputReceived:Connect(function(player, inputType, _data)
+                    if inputType == "Jump" then
+                        local humanoid = player.Character and player.Character:FindFirstChild("Humanoid")
+                        if humanoid then
+                            humanoid.Jump = true
+                        end
+                    end
+                end)
+            end
+        "#);
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "TestPlayer"));
+        let user_id = *instance.players.get(&agent_id).unwrap();
+
+        // Settle character onto ground first.
+        for _ in 0..45 {
+            instance.tick();
+        }
+
+        instance.queue_agent_input(user_id, "Jump".to_string(), serde_json::json!({}));
+
+        // Run enough frames to observe jump up, freefall down, and landing.
+        for _ in 0..120 {
+            instance.tick();
+        }
+
+        let jumping_count = get_trigger_attr(&instance, "StateMarker", "JumpingCount");
+        let freefall_count = get_trigger_attr(&instance, "StateMarker", "FreefallCount");
+        let running_count = get_trigger_attr(&instance, "StateMarker", "RunningCount");
+        let last_state = get_trigger_str_attr(&instance, "StateMarker", "LastState");
+
+        assert!(jumping_count >= 1.0, "Expected at least one Jumping state transition");
+        assert!(freefall_count >= 1.0, "Expected at least one Freefall state transition");
+        assert!(running_count >= 1.0, "Expected a Running state transition after landing");
+        assert_eq!(last_state, "Running", "Expected final state to return to Running");
+    }
+
+    #[test]
     fn test_moveto_finished_fires_for_reach_and_cancel() {
         let mut instance = GameInstance::new(Uuid::new_v4(), None);
 
