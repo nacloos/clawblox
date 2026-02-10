@@ -2,25 +2,29 @@
 
 Embedded local frontend for `clawblox run`.
 
-- Served directly from the CLI binary at `/`
+- Served from the CLI binary at `/`
 - Loads renderer metadata from `GET /renderer/manifest`
 - Loads custom renderer modules from `renderer/` via `/renderer-files/*`
 
-Renderer contract (`api_version = 1`):
+## Renderer API
 
 ```js
 export function createRenderer(ctx) {
   return {
     mount() {},
     unmount() {},
-    onResize({ width, height }) {},
+    onResize({ width, height, dpr }) {},
     onState(state) {},
   }
 }
 ```
 
-`ctx` includes:
+## SDK namespaces
 
-- `apiVersion`
-- `canvas`
-- `log(level, message, data?)`
+- `ctx.runtime.state` - snapshot interpolation + indexing
+- `ctx.runtime.animation` - animation-track inspection
+- `ctx.runtime.presets` - lightweight preset registry
+- `ctx.runtime.three` - Three.js lifecycle/camera/material/entity helpers
+- `ctx.runtime.input` - local `join/input/observe` bridge + keyboard mapping
+
+These helpers are designed to support renderer complexity similar to FPS/FallGuys frontends.

@@ -111,7 +111,11 @@ enum Commands {
         target: String,
     },
     /// Fetch latest engine docs from GitHub into ./docs/
-    Docs,
+    Docs {
+        /// Use only bundled local docs (skip GitHub fetch)
+        #[arg(long)]
+        local: bool,
+    },
 }
 
 fn main() {
@@ -133,7 +137,7 @@ fn main() {
             server,
         } => deploy_game(path, api_key, server),
         Commands::Install { target: _ } => install_cli(),
-        Commands::Docs => fetch_docs(),
+        Commands::Docs { local } => fetch_docs(local),
     }
 }
 
@@ -226,10 +230,16 @@ fn install_cli() {
 // Docs Command
 // =============================================================================
 
-fn fetch_docs() {
+fn fetch_docs(local: bool) {
     let docs_dir = std::env::current_dir()
         .expect("Failed to get current directory")
         .join("docs");
+
+    if local {
+        write_embedded_dir(&DOCS_DIR, &docs_dir);
+        println!("Docs written from bundled local copy to {}", docs_dir.display());
+        return;
+    }
 
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
     match rt.block_on(fetch_docs_from_github(&docs_dir)) {
@@ -530,18 +540,101 @@ Move to a position on the map.
     // Create renderer/ directory for game-specific frontend modules
     let renderer_dir = project_dir.join("renderer");
     std::fs::create_dir_all(&renderer_dir).expect("Failed to create renderer directory");
-    let renderer_js = r#"export function createRenderer(ctx) {
-  const canvas = ctx.canvas
-  const g = canvas.getContext('2d')
+    let renderer_js = r#"import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js'
+
+export function createRenderer(ctx) {
+  const scene = new THREE.Scene()
+  scene.background = new THREE.Color(0x0b1020)
+
+  const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 500)
+  const webgl = new THREE.WebGLRenderer({ canvas: ctx.canvas, antialias: true })
+  webgl.shadowMap.enabled = true
+  webgl.shadowMap.type = THREE.PCFSoftShadowMap
+
+  const ambient = new THREE.AmbientLight(0xffffff, 0.7)
+  const dir = new THREE.DirectionalLight(0xffffff, 0.9)
+  dir.position.set(20, 30, 10)
+  dir.castShadow = true
+  scene.add(ambient, dir)
+
+  const stateBuffer = ctx.runtime.state.createSnapshotBuffer({
+    maxSnapshots: 12,
+    interpolationDelayMs: 90,
+  })
+  const cameraModes = ctx.runtime.three.createCameraModeController(THREE, camera, {
+    follow: { followDistance: 9, followHeight: 2, shoulderOffset: 1.0 },
+    firstPersonHeight: 1.7,
+  })
+
+  const presetLib = ctx.runtime.three.createPresetMaterialLibrary({
+    'example/floor': { roughness: 0.85, metalness: 0.1 },
+    'example/wall': { roughness: 0.7, metalness: 0.2 },
+    'example/spawn': { roughness: 0.2, metalness: 0.25, emissiveIntensity: 0.5 },
+  })
+
+  const entities = ctx.runtime.three.createEntityStore(scene)
+  const tmpForward = new THREE.Vector3(0, 0, 1)
+  let inputBinding = null
+  let inputClient = null
+  let localControlPlayer = null
 
   return {
+    mount() {
+      // Optional local control bridge for quick prototyping:
+      // W -> MoveTo ahead, Space -> Jump
+      inputClient = ctx.runtime.input.createLocalInputClient({ playerName: 'renderer-local' })
+      inputBinding = ctx.runtime.input.bindKeyboardActions(inputClient, {
+        Space: { mode: 'tap', type: 'Jump', data: {} },
+      })
+    },
+
+    onResize({ width, height }) {
+      camera.aspect = width / Math.max(1, height)
+      camera.updateProjectionMatrix()
+      webgl.setSize(width, height, false)
+    },
+
     onState(state) {
-      if (!g) return
-      g.fillStyle = '#111827'
-      g.fillRect(0, 0, canvas.width, canvas.height)
-      g.fillStyle = '#e5e7eb'
-      g.font = '16px sans-serif'
-      g.fillText(`Custom renderer loaded (tick ${state.tick})`, 16, 28)
+      stateBuffer.push(state)
+      const obs = stateBuffer.interpolated() || state
+      const activeIds = new Set()
+
+      for (const entity of obs.entities || []) {
+        activeIds.add(entity.id)
+        entities.upsert(
+          entity,
+          (next) => ctx.runtime.three.buildEntityMesh(THREE, next, presetLib),
+          (mesh, next) => ctx.runtime.three.applyEntityTransform(THREE, mesh, next),
+        )
+      }
+      entities.prune(activeIds)
+
+      // Follow first available player for now.
+      const target = (obs.players || [])[0]
+      if (target && Array.isArray(target.position)) {
+        const trackState = ctx.runtime.three.classifyAnimationTracks(target)
+        const mode = trackState.reload ? 'spectator' : 'follow'
+        cameraModes.update({
+          mode,
+          targetPosition: new THREE.Vector3(...target.position),
+          targetForward: tmpForward,
+          dt: 1 / 60,
+        })
+
+        // Move local bound player a bit ahead when holding W.
+        // This is intentionally simplistic as a scaffold example.
+        if (inputClient && localControlPlayer !== target.id && inputClient.session()) {
+          localControlPlayer = target.id
+        }
+      }
+
+      webgl.render(scene, camera)
+    },
+
+    unmount() {
+      if (inputBinding) inputBinding.dispose()
+      entities.clear()
+      webgl.dispose()
     },
   }
 }
