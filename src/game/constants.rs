@@ -69,4 +69,8 @@ pub mod humanoid {
 
     /// Jump input buffer window in seconds.
     pub const JUMP_BUFFER_SECS: f32 = 0.20;
+
+    /// Airborne horizontal steering acceleration in studs/s².
+    /// Lower than ground response to avoid full walk-control in freefall.
+    pub const AIR_CONTROL_ACCEL: f32 = 24.0;
 }

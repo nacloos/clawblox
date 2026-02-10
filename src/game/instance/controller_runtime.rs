@@ -93,7 +93,7 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
         .collect();
 
     for (agent_id, hrp_id) in agent_hrp_pairs {
-        let (current_pos, target, vertical_velocity, grounded, move_to_elapsed) = {
+        let (current_pos, target, vertical_velocity, horizontal_velocity, grounded, move_to_elapsed) = {
             let Some(state) = instance.physics.get_character_state(hrp_id) else {
                 continue;
             };
@@ -104,6 +104,7 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
                 pos,
                 state.target_position,
                 state.vertical_velocity,
+                state.horizontal_velocity,
                 state.grounded,
                 state.move_to_elapsed,
             )
@@ -139,6 +140,7 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             vertical_velocity,
             gravity,
             dt,
+            horizontal_velocity,
             grounded,
             ground_decision.carry_by_platform,
             jump_power,
@@ -179,6 +181,11 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
         if let Some(state) = instance.physics.get_character_state_mut(hrp_id) {
             state.vertical_velocity = new_vertical_velocity;
             state.move_to_elapsed = new_move_to_elapsed;
+            if dt > 0.0 {
+                state.horizontal_velocity = [applied_horizontal[0] / dt, applied_horizontal[1] / dt];
+            } else {
+                state.horizontal_velocity = motion_plan.new_horizontal_velocity;
+            }
         }
         if motion_plan.reached_move_to {
             fire_move_to_finished(instance, agent_id, true);

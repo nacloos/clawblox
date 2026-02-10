@@ -3,6 +3,7 @@
 pub struct MotionPlan {
     pub desired: [f32; 3],
     pub new_vertical_velocity: f32,
+    pub new_horizontal_velocity: [f32; 2],
     pub reached_move_to: bool,
 }
 
@@ -14,6 +15,7 @@ pub fn build_motion_plan(
     vertical_velocity: f32,
     gravity: f32,
     dt: f32,
+    horizontal_velocity: [f32; 2],
     grounded: bool,
     carry_by_platform: bool,
     jump_power: Option<f32>,
@@ -30,6 +32,7 @@ pub fn build_motion_plan(
 
     let mut dx = 0.0f32;
     let mut dz = 0.0f32;
+    let mut new_horizontal_velocity = horizontal_velocity;
     let mut reached_move_to = false;
 
     if let Some(target) = target {
@@ -38,15 +41,32 @@ pub fn build_motion_plan(
         let dist_xz = (tx * tx + tz * tz).sqrt();
 
         if dist_xz > humanoid_consts::MOVE_TO_REACHED_EPSILON_XZ {
-            // Grounded locomotion steering only; airborne horizontal movement comes
-            // from momentum/contacts/platform carry rather than direct MoveTo walking.
             if grounded || carry_by_platform {
                 let speed = walk_speed * dt;
                 dx = (tx / dist_xz) * speed;
                 dz = (tz / dist_xz) * speed;
+                new_horizontal_velocity = [dx / dt, dz / dt];
+            } else {
+                // Preserve airborne momentum and apply limited steering toward target.
+                let wish_vx = (tx / dist_xz) * walk_speed;
+                let wish_vz = (tz / dist_xz) * walk_speed;
+                let delta_vx = wish_vx - new_horizontal_velocity[0];
+                let delta_vz = wish_vz - new_horizontal_velocity[1];
+                let delta_mag = (delta_vx * delta_vx + delta_vz * delta_vz).sqrt();
+                let max_delta = humanoid_consts::AIR_CONTROL_ACCEL * dt;
+                if delta_mag > 1.0e-6 {
+                    let scale = (max_delta / delta_mag).min(1.0);
+                    new_horizontal_velocity[0] += delta_vx * scale;
+                    new_horizontal_velocity[1] += delta_vz * scale;
+                }
+                dx = new_horizontal_velocity[0] * dt;
+                dz = new_horizontal_velocity[1] * dt;
             }
         } else {
             reached_move_to = true;
+            if grounded || carry_by_platform {
+                new_horizontal_velocity = [0.0, 0.0];
+            }
         }
     }
 
@@ -72,6 +92,7 @@ pub fn build_motion_plan(
     MotionPlan {
         desired: [dx, desired_y, dz],
         new_vertical_velocity,
+        new_horizontal_velocity,
         reached_move_to,
     }
 }
@@ -107,6 +128,7 @@ mod tests {
             0.0,
             -30.0,
             1.0 / 60.0,
+            [8.0, 0.0],
             false,
             false,
             None,
@@ -114,8 +136,8 @@ mod tests {
             None,
         );
 
-        assert!(plan.desired[0].abs() < 1e-6, "airborne MoveTo should not steer X");
-        assert!(plan.desired[2].abs() < 1e-6, "airborne MoveTo should not steer Z");
+        assert!(plan.desired[0] > 0.0, "airborne should preserve forward momentum");
+        assert!(plan.desired[2].abs() < 1e-6, "no Z drift for straight X target");
         assert!(plan.desired[1] < 0.0, "airborne plan should still apply gravity");
         assert!(!plan.reached_move_to, "target is still far away");
     }
@@ -129,6 +151,7 @@ mod tests {
             0.0,
             -30.0,
             1.0 / 60.0,
+            [0.0, 0.0],
             true,
             true,
             None,
@@ -138,5 +161,30 @@ mod tests {
 
         assert!(plan.desired[0] > 0.0, "grounded MoveTo should steer X");
         assert!(plan.desired[2].abs() < 1e-6, "no Z offset for straight X target");
+    }
+
+    #[test]
+    fn test_airborne_motion_plan_limited_steering_rate() {
+        let plan = build_motion_plan(
+            [0.0, 10.0, 0.0],
+            Some([0.0, 10.0, 10.0]),
+            16.0,
+            0.0,
+            -30.0,
+            1.0 / 60.0,
+            [16.0, 0.0],
+            false,
+            false,
+            None,
+            None,
+            None,
+        );
+
+        assert!(plan.new_horizontal_velocity[0] > 0.0, "should not instantly zero X momentum");
+        assert!(plan.new_horizontal_velocity[1] > 0.0, "should start steering toward +Z");
+        assert!(
+            plan.new_horizontal_velocity[1] < 16.0,
+            "air control should not instantly reach full target speed"
+        );
     }
 }

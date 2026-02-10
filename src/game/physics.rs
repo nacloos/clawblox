@@ -52,6 +52,7 @@ pub struct CharacterControllerState {
     /// Seconds elapsed since current MoveTo target was set.
     pub move_to_elapsed: f32,
     pub grounded: bool,
+    pub horizontal_velocity: [f32; 2],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -472,6 +473,7 @@ impl PhysicsWorld {
             jump_cooldown_remaining: 0.0,
             move_to_elapsed: 0.0,
             grounded: false,
+            horizontal_velocity: [0.0, 0.0],
         };
 
         self.character_controllers.insert(lua_id, state);
@@ -564,6 +566,7 @@ impl PhysicsWorld {
             state.jump_buffer_remaining = 0.0;
             state.jump_cooldown_remaining = 0.0;
             state.move_to_elapsed = 0.0;
+            state.horizontal_velocity = [0.0, 0.0];
         }
     }
 
