@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import pathlib
 import time
 from dataclasses import dataclass
@@ -22,6 +23,29 @@ class Session:
     game_id: str
     api_base: str
     headers: dict[str, str]
+
+
+ARENA_MIN = -36.0
+ARENA_MAX = 36.0
+
+
+def clamp_target(pos: list[float], x: float, z: float) -> list[float]:
+    return [
+        max(ARENA_MIN, min(ARENA_MAX, x)),
+        float(pos[1] if len(pos) > 1 else 2.0),
+        max(ARENA_MIN, min(ARENA_MAX, z)),
+    ]
+
+
+def near_boundary(pos: list[float], margin: float = 3.0) -> bool:
+    x = float(pos[0])
+    z = float(pos[2])
+    return (
+        x <= ARENA_MIN + margin
+        or x >= ARENA_MAX - margin
+        or z <= ARENA_MIN + margin
+        or z >= ARENA_MAX - margin
+    )
 
 
 def read_local_game_id() -> str | None:
@@ -137,6 +161,9 @@ def main() -> int:
         ]
         wp_idx = [i % len(waypoints) for i in range(num_players)]
         last_move = [0.0 for _ in range(num_players)]
+        last_fire = [0.0 for _ in range(num_players)]
+        last_pos_by_idx: list[list[float] | None] = [None for _ in range(num_players)]
+        escape_side_by_idx = [1.0 for _ in range(num_players)]
 
         start = time.monotonic()
         while time.monotonic() - start < float(args.duration):
@@ -147,12 +174,15 @@ def main() -> int:
 
                 player = obs.get("player") or {}
                 pos = player.get("position") or [0, 0, 0]
+                if isinstance(pos, list) and len(pos) >= 3:
+                    last_pos_by_idx[i] = [float(pos[0]), float(pos[1]), float(pos[2])]
                 tick = obs.get("tick")
                 other_players = obs.get("other_players")
-                visible_count = len(other_players) if isinstance(other_players, list) else 0
+                visible = other_players if isinstance(other_players, list) else []
+                visible_count = len(visible)
                 first_dist = None
-                if visible_count > 0 and isinstance(other_players[0], dict):
-                    first_dist = other_players[0].get("distance")
+                if visible_count > 0 and isinstance(visible[0], dict):
+                    first_dist = visible[0].get("distance")
 
                 if first_dist is None:
                     print(f"[obs][{sess.name}] tick={tick} pos=({pos[0]:.1f},{pos[1]:.1f},{pos[2]:.1f}) visible={visible_count}")
@@ -163,10 +193,59 @@ def main() -> int:
                     )
 
                 now = time.monotonic()
-                if now - last_move[i] >= 1.0:
+                if now - last_move[i] >= 0.55:
                     target = waypoints[wp_idx[i]]
+                    # Bot 0 = hunter: chase nearest visible enemy and fire.
+                    if i == 0 and visible_count > 0:
+                        enemy = visible[0]
+                        enemy_pos = enemy.get("position")
+                        if isinstance(enemy_pos, list) and len(enemy_pos) >= 3:
+                            target = [float(enemy_pos[0]), 2.0, float(enemy_pos[2])]
+                            if now - last_fire[i] >= 0.28 and send_input(sess, "Fire", {}):
+                                last_fire[i] = now
+                                print(f"[fire][{sess.name}] target={enemy.get('name') or enemy.get('id')}")
+                    # Bot 1 = runner: move away from nearest visible enemy.
+                    elif i == 1 and visible_count > 0:
+                        enemy = visible[0]
+                        enemy_pos = enemy.get("position")
+                        if isinstance(enemy_pos, list) and len(enemy_pos) >= 3:
+                            dx = float(pos[0]) - float(enemy_pos[0])
+                            dz = float(pos[2]) - float(enemy_pos[2])
+                            mag = math.hypot(dx, dz)
+                            if mag < 1.0e-4:
+                                dx, dz, mag = 1.0, 0.0, 1.0
+                            nx, nz = dx / mag, dz / mag
+                            flee_dist = 24.0 if mag < 16.0 else 18.0
+                            direct = clamp_target(pos, float(pos[0]) + nx * flee_dist, float(pos[2]) + nz * flee_dist)
+                            # If we're near arena boundary or direct flee gets clamped too much,
+                            # sidestep tangentially to avoid getting pinned.
+                            direct_step = math.hypot(direct[0] - float(pos[0]), direct[2] - float(pos[2]))
+                            if near_boundary(pos) or direct_step < flee_dist * 0.7:
+                                side = escape_side_by_idx[i]
+                                tx = -nz * side
+                                tz = nx * side
+                                tangent = clamp_target(
+                                    pos,
+                                    float(pos[0]) + nx * 8.0 + tx * 20.0,
+                                    float(pos[2]) + nz * 8.0 + tz * 20.0,
+                                )
+                                target = tangent
+                                escape_side_by_idx[i] *= -1.0
+                            else:
+                                target = direct
+                    # Runner fallback: flee hunter from shared observation cache even if not visible.
+                    elif i == 1 and len(last_pos_by_idx) > 0 and last_pos_by_idx[0] is not None:
+                        hunter_pos = last_pos_by_idx[0]
+                        dx = float(pos[0]) - float(hunter_pos[0])
+                        dz = float(pos[2]) - float(hunter_pos[2])
+                        mag = math.hypot(dx, dz)
+                        if mag < 1.0e-4:
+                            dx, dz, mag = 1.0, 0.0, 1.0
+                        nx, nz = dx / mag, dz / mag
+                        target = clamp_target(pos, float(pos[0]) + nx * 16.0, float(pos[2]) + nz * 16.0)
                     if send_input(sess, "MoveTo", {"position": target}):
-                        wp_idx[i] = (wp_idx[i] + 1) % len(waypoints)
+                        if (i == 0 and visible_count == 0) or (i == 1 and visible_count == 0) or i >= 2:
+                            wp_idx[i] = (wp_idx[i] + 1) % len(waypoints)
                         last_move[i] = now
                         print(
                             f"[move][{sess.name}] target=({target[0]:.1f},{target[1]:.1f},{target[2]:.1f})"

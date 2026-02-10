@@ -4,4 +4,5 @@ max_players = 4
 game_type = "lua"
 
 [scripts]
-main = "game.lua"
+main = "main.lua"
+tree = "scripts"

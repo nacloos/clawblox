@@ -638,6 +638,7 @@ impl PhysicsWorld {
         from: [f32; 3],
         to: [f32; 3],
         exclude_body: Option<RigidBodyHandle>,
+        target_body: Option<RigidBodyHandle>,
     ) -> bool {
         let direction = vector![to[0] - from[0], to[1] - from[1], to[2] - from[2]];
         let max_dist = direction.magnitude();
@@ -658,8 +659,10 @@ impl PhysicsWorld {
             QueryFilter::default()
         };
 
-        // Cast ray and check if we hit something before reaching the target
-        if let Some((_, hit_dist)) = self.query_pipeline.cast_ray(
+        // Cast ray and check if we hit something before reaching the target.
+        // For Roblox-style LOS we consider the target visible when the first hit
+        // belongs to the target character body.
+        if let Some((hit_collider, _hit_dist)) = self.query_pipeline.cast_ray(
             &self.rigid_body_set,
             &self.collider_set,
             &ray,
@@ -667,8 +670,14 @@ impl PhysicsWorld {
             true, // solid
             filter,
         ) {
-            // Hit something before reaching target
-            hit_dist >= max_dist - 0.1 // Small tolerance
+            if let Some(expected_body) = target_body {
+                if let Some(collider) = self.collider_set.get(hit_collider) {
+                    if collider.parent() == Some(expected_body) {
+                        return true;
+                    }
+                }
+            }
+            false
         } else {
             true // No obstacle hit
         }

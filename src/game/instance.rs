@@ -1156,12 +1156,6 @@ impl GameInstance {
         let observer_eye = self
             .get_player_view_origin(exclude_agent_id)
             .unwrap_or([observer_pos[0], observer_pos[1] + 2.0, observer_pos[2]]);
-        let observer_forward = self
-            .get_player_view_forward(exclude_agent_id)
-            .unwrap_or([0.0, 0.0, -1.0]);
-        let half_fov_rad = (self.player_view_fov_deg().to_radians()) * 0.5;
-        let min_dot = half_fov_rad.cos();
-
         // Get observer's body handle for LOS exclusion
         let observer_body = self.player_hrp_ids.get(&exclude_agent_id)
             .and_then(|&hrp_id| self.physics.get_character_state(hrp_id))
@@ -1184,22 +1178,12 @@ impl GameInstance {
                 continue;
             }
 
-            // View-cone check in horizontal plane.
-            let to_target_x = position[0] - observer_eye[0];
-            let to_target_z = position[2] - observer_eye[2];
-            let horiz_dist = (to_target_x * to_target_x + to_target_z * to_target_z).sqrt();
-            if horiz_dist > 1e-4 {
-                let nx = to_target_x / horiz_dist;
-                let nz = to_target_z / horiz_dist;
-                let dot = nx * observer_forward[0] + nz * observer_forward[2];
-                if dot < min_dot {
-                    continue;
-                }
-            }
-
             let target_eye = [position[0], position[1] + 2.0, position[2]];
+            let target_body = self.player_hrp_ids.get(&agent_id)
+                .and_then(|&hrp_id| self.physics.get_character_state(hrp_id))
+                .map(|state| state.body_handle);
             // Line-of-sight check from eye-to-eye.
-            if !self.physics.has_line_of_sight(observer_eye, target_eye, observer_body) {
+            if !self.physics.has_line_of_sight(observer_eye, target_eye, observer_body, target_body) {
                 continue;
             }
 

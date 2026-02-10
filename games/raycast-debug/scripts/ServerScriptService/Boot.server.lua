@@ -1,14 +1,20 @@
 local Players = game:GetService("Players")
 local AgentInputService = game:GetService("AgentInputService")
 local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+
+local AnimationService = require(script.Parent.AnimationService)
 
 local MAP_SIZE = 240
+local DEFAULT_WEAPON_ID = 2
+local FIRE_RATE = 0.09
 local SPAWNS = {
     Vector3.new(-40, 3, 0),
     Vector3.new(40, 3, 0),
     Vector3.new(0, 3, -40),
     Vector3.new(0, 3, 40),
 }
+local playerCombatState = {}
 
 local function makePart(name, size, position, color, transparency)
     local p = Instance.new("Part")
@@ -30,7 +36,6 @@ local function buildWorld()
         Color3.fromRGB(70, 90, 70)
     )
 
-    -- Invisible bounds to keep bots in range.
     local half = MAP_SIZE * 0.5
     makePart("BoundN", Vector3.new(MAP_SIZE, 30, 2), Vector3.new(0, 15, -half), Color3.fromRGB(0, 0, 0), 1)
     makePart("BoundS", Vector3.new(MAP_SIZE, 30, 2), Vector3.new(0, 15, half), Color3.fromRGB(0, 0, 0), 1)
@@ -52,11 +57,45 @@ local function spawnPlayer(player)
     if hrp then
         spawnIndex = (spawnIndex % #SPAWNS) + 1
         local base = SPAWNS[spawnIndex]
-        -- Match fps-arena convention: identity orientation with -Z forward.
         hrp.CFrame = CFrame.new(base)
-        -- Debug map: don't let player bodies block each other between runs.
         hrp.CanCollide = false
         hrp:SetAttribute("ModelYawOffsetDeg", 180)
+    end
+end
+
+local function attachCharacter(player, character)
+    spawnPlayer(player)
+    AnimationService.BindCharacter(player, character)
+
+    local humanoid = character:FindFirstChild("Humanoid")
+    if humanoid then
+        humanoid.Died:Connect(function()
+            AnimationService.StopAll(player)
+        end)
+    end
+end
+
+Players.PlayerAdded:Connect(function(player)
+    player:SetAttribute("DebugMode", "raycast")
+    player:SetAttribute("ShotsFired", 0)
+    player:SetAttribute("WeaponSlot", DEFAULT_WEAPON_ID)
+    playerCombatState[player.UserId] = { lastShotAt = 0 }
+
+    player.CharacterAdded:Connect(function(character)
+        attachCharacter(player, character)
+    end)
+    if player.Character then
+        attachCharacter(player, player.Character)
+    end
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+    playerCombatState[player.UserId] = nil
+end)
+
+for _, player in ipairs(Players:GetPlayers()) do
+    if player.Character then
+        attachCharacter(player, player.Character)
     end
 end
 
@@ -76,20 +115,38 @@ AgentInputService.InputReceived:Connect(function(player, inputType, data)
     elseif inputType == "Stop" then
         humanoid:CancelMoveTo()
     elseif inputType == "Fire" then
+        local moveDir = humanoid.MoveDirection
+        local moveMag = math.sqrt(moveDir.X * moveDir.X + moveDir.Z * moveDir.Z)
+        if moveMag <= 0.01 then
+            return
+        end
+
+        local now = tick()
+        local cstate = playerCombatState[player.UserId]
+        if not cstate then
+            cstate = { lastShotAt = 0 }
+            playerCombatState[player.UserId] = cstate
+        end
+        if now - cstate.lastShotAt < FIRE_RATE then
+            return
+        end
+        cstate.lastShotAt = now
+
         local shots = (player:GetAttribute("ShotsFired") or 0) + 1
         player:SetAttribute("ShotsFired", shots)
+        local weaponId = player:GetAttribute("WeaponSlot")
+        if type(weaponId) ~= "number" then
+            weaponId = DEFAULT_WEAPON_ID
+        end
+        AnimationService.PlayFire(player, weaponId)
     end
 end)
 
-Players.PlayerAdded:Connect(function(player)
-    player:SetAttribute("DebugMode", "raycast")
-    player:SetAttribute("ShotsFired", 0)
-    spawnPlayer(player)
+AnimationService.Init()
+buildWorld()
+
+RunService.Heartbeat:Connect(function(_dt)
+    AnimationService.Tick()
 end)
 
-for _, player in ipairs(Players:GetPlayers()) do
-    spawnPlayer(player)
-end
-
-buildWorld()
 print("[raycast-debug] booted")

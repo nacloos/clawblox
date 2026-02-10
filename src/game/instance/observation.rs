@@ -338,22 +338,6 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
                     "ViewFovDeg".to_string(),
                     serde_json::Value::from(round_f32(instance.player_view_fov_deg())),
                 );
-                let visible_targets = instance.get_other_players(agent_id);
-                if !visible_targets.is_empty() {
-                    let los_targets = visible_targets
-                        .iter()
-                        .map(|p| serde_json::json!({
-                            "id": p.id,
-                            "name": p.name,
-                            "position": [p.position[0], p.position[1] + 2.0, p.position[2]],
-                            "distance": p.distance,
-                        }))
-                        .collect::<Vec<_>>();
-                    attrs.insert(
-                        "DebugVisibleTargets".to_string(),
-                        serde_json::Value::Array(los_targets),
-                    );
-                }
                 let attributes = if attrs.is_empty() {
                     None
                 } else {

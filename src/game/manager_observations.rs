@@ -15,12 +15,10 @@ pub fn get_observation(
         .instances
         .get(&instance_id)
         .ok_or_else(|| "Instance not found".to_string())?;
-    let halted_error = {
-        let instance = instance_handle.read();
-        instance.halted_error.clone()
-    };
-    if let Some(err) = halted_error {
-        return Err(format!("Game halted: {}", err));
+    if let Some(instance) = instance_handle.try_read() {
+        if let Some(err) = instance.halted_error.clone() {
+            return Err(format!("Game halted: {}", err));
+        }
     }
 
     state
@@ -76,12 +74,10 @@ pub fn get_spectator_observation_for_instance(
         .instances
         .get(&instance_id)
         .ok_or_else(|| "Instance not found".to_string())?;
-    let halted_error = {
-        let instance = instance_handle.read();
-        instance.halted_error.clone()
-    };
-    if let Some(err) = halted_error {
-        return Err(format!("Game halted: {}", err));
+    if let Some(instance) = instance_handle.try_read() {
+        if let Some(err) = instance.halted_error.clone() {
+            return Err(format!("Game halted: {}", err));
+        }
     }
 
     state
