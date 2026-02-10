@@ -1,0 +1,8 @@
+name = "Fall Guys"
+description = "Race through spinning platforms, dodge swinging pendulums, and survive disappearing hex tiles!"
+max_players = 8
+game_type = "lua"
+
+[scripts]
+main = "main.lua"
+skill = "SKILL.md"

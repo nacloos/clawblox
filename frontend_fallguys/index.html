@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Fall Guys Spectator</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+
+    <div id="hud">
+      <div id="hud-row">
+        <div id="position">1st / 7</div>
+        <div id="timer">00:00.000</div>
+      </div>
+      <div id="progress-bar"><div id="progress-fill"></div></div>
+    </div>
+
+    <div id="fps-counter"></div>
+
+    <div id="spectate-bar">
+      <span id="spectate-text">Connecting...</span>
+    </div>
+
+    <div id="finish-screen">
+      <div id="finish-title">FINISH!</div>
+      <div id="finish-place"></div>
+      <div id="finish-time"></div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -218,6 +218,7 @@ pub enum AttributeValue {
     Bool(bool),
     Vector3(Vector3),
     Color3(Color3),
+    Table(Vec<AttributeValue>),
     Nil,
 }
 
@@ -230,6 +231,9 @@ impl AttributeValue {
             AttributeValue::Bool(b) => serde_json::Value::Bool(*b),
             AttributeValue::Vector3(v) => serde_json::json!([v.x, v.y, v.z]),
             AttributeValue::Color3(c) => serde_json::json!([c.r, c.g, c.b]),
+            AttributeValue::Table(items) => {
+                serde_json::Value::Array(items.iter().map(|v| v.to_json()).collect())
+            }
             AttributeValue::Nil => serde_json::Value::Null,
         }
     }
@@ -2252,23 +2256,33 @@ impl UserData for Instance {
         });
 
         methods.add_method("SetAttribute", |lua, this, (name, value): (String, Value)| {
-            let attr_value = match value {
-                Value::Nil => AttributeValue::Nil,
-                Value::Boolean(b) => AttributeValue::Bool(b),
-                Value::Integer(n) => AttributeValue::Number(n as f64),
-                Value::Number(n) => AttributeValue::Number(n),
-                Value::String(s) => AttributeValue::String(s.to_str()?.to_string()),
-                Value::UserData(ud) => {
-                    if let Ok(v) = ud.borrow::<Vector3>() {
-                        AttributeValue::Vector3(*v)
-                    } else if let Ok(c) = ud.borrow::<Color3>() {
-                        AttributeValue::Color3(*c)
-                    } else {
-                        return Err(mlua::Error::runtime("Unsupported attribute type"));
+            fn lua_value_to_attr(value: &Value) -> mlua::Result<AttributeValue> {
+                match value {
+                    Value::Nil => Ok(AttributeValue::Nil),
+                    Value::Boolean(b) => Ok(AttributeValue::Bool(*b)),
+                    Value::Integer(n) => Ok(AttributeValue::Number(*n as f64)),
+                    Value::Number(n) => Ok(AttributeValue::Number(*n)),
+                    Value::String(s) => Ok(AttributeValue::String(s.to_str()?.to_string())),
+                    Value::UserData(ud) => {
+                        if let Ok(v) = ud.borrow::<Vector3>() {
+                            Ok(AttributeValue::Vector3(*v))
+                        } else if let Ok(c) = ud.borrow::<Color3>() {
+                            Ok(AttributeValue::Color3(*c))
+                        } else {
+                            Err(mlua::Error::runtime("Unsupported attribute type"))
+                        }
                     }
+                    Value::Table(t) => {
+                        let mut items = Vec::new();
+                        for pair in t.clone().sequence_values::<Value>() {
+                            items.push(lua_value_to_attr(&pair?)?);
+                        }
+                        Ok(AttributeValue::Table(items))
+                    }
+                    _ => Err(mlua::Error::runtime("Unsupported attribute type")),
                 }
-                _ => return Err(mlua::Error::runtime("Unsupported attribute type")),
-            };
+            }
+            let attr_value = lua_value_to_attr(&value)?;
             this.set_attribute_with_lua(lua, &name, attr_value)?;
             Ok(())
         });
@@ -2314,29 +2328,50 @@ impl UserData for Instance {
         );
 
         methods.add_method("GetAttribute", |lua, this, name: String| {
+            fn attr_to_lua(lua: &mlua::Lua, attr: AttributeValue) -> mlua::Result<Value> {
+                match attr {
+                    AttributeValue::Nil => Ok(Value::Nil),
+                    AttributeValue::Bool(b) => Ok(Value::Boolean(b)),
+                    AttributeValue::Number(n) => Ok(Value::Number(n)),
+                    AttributeValue::String(s) => Ok(Value::String(lua.create_string(&s)?)),
+                    AttributeValue::Vector3(v) => Ok(Value::UserData(lua.create_userdata(v)?)),
+                    AttributeValue::Color3(c) => Ok(Value::UserData(lua.create_userdata(c)?)),
+                    AttributeValue::Table(items) => {
+                        let t = lua.create_table()?;
+                        for (i, item) in items.into_iter().enumerate() {
+                            t.set(i + 1, attr_to_lua(lua, item)?)?;
+                        }
+                        Ok(Value::Table(t))
+                    }
+                }
+            }
             match this.get_attribute(&name) {
-                Some(AttributeValue::Nil) => Ok(Value::Nil),
-                Some(AttributeValue::Bool(b)) => Ok(Value::Boolean(b)),
-                Some(AttributeValue::Number(n)) => Ok(Value::Number(n)),
-                Some(AttributeValue::String(s)) => Ok(Value::String(lua.create_string(&s)?)),
-                Some(AttributeValue::Vector3(v)) => Ok(Value::UserData(lua.create_userdata(v)?)),
-                Some(AttributeValue::Color3(c)) => Ok(Value::UserData(lua.create_userdata(c)?)),
+                Some(attr) => attr_to_lua(lua, attr),
                 None => Ok(Value::Nil),
             }
         });
 
         methods.add_method("GetAttributes", |lua, this, ()| {
+            fn attr_to_lua_val(lua: &mlua::Lua, attr: AttributeValue) -> mlua::Result<Value> {
+                match attr {
+                    AttributeValue::Nil => Ok(Value::Nil),
+                    AttributeValue::Bool(b) => Ok(Value::Boolean(b)),
+                    AttributeValue::Number(n) => Ok(Value::Number(n)),
+                    AttributeValue::String(s) => Ok(Value::String(lua.create_string(&s)?)),
+                    AttributeValue::Vector3(v) => Ok(Value::UserData(lua.create_userdata(v)?)),
+                    AttributeValue::Color3(c) => Ok(Value::UserData(lua.create_userdata(c)?)),
+                    AttributeValue::Table(items) => {
+                        let t = lua.create_table()?;
+                        for (i, item) in items.into_iter().enumerate() {
+                            t.set(i + 1, attr_to_lua_val(lua, item)?)?;
+                        }
+                        Ok(Value::Table(t))
+                    }
+                }
+            }
             let table = lua.create_table()?;
             for (key, value) in this.get_attributes() {
-                let lua_value = match value {
-                    AttributeValue::Nil => Value::Nil,
-                    AttributeValue::Bool(b) => Value::Boolean(b),
-                    AttributeValue::Number(n) => Value::Number(n),
-                    AttributeValue::String(s) => Value::String(lua.create_string(&s)?),
-                    AttributeValue::Vector3(v) => Value::UserData(lua.create_userdata(v)?),
-                    AttributeValue::Color3(c) => Value::UserData(lua.create_userdata(c)?),
-                };
-                table.set(key, lua_value)?;
+                table.set(key, attr_to_lua_val(lua, value)?)?;
             }
             Ok(table)
         });
