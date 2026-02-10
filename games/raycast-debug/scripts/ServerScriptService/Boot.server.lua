@@ -12,6 +12,7 @@ local FIRE_RATE = 0.09
 local FIRE_RANGE = 100
 local FIRE_SPREAD = 0.025
 local FIRE_DAMAGE = 18
+local RESPAWN_DELAY = 2.0
 local SPAWNS = {
     Vector3.new(-40, 3, 0),
     Vector3.new(40, 3, 0),
@@ -113,6 +114,11 @@ local function attachCharacter(player, character)
     if humanoid then
         humanoid.Died:Connect(function()
             AnimationService.StopAll(player)
+            task.delay(RESPAWN_DELAY, function()
+                if player and player.Parent then
+                    player:LoadCharacter()
+                end
+            end)
         end)
     end
 end
