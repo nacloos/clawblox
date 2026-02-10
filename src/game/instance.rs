@@ -1842,6 +1842,7 @@ mod tests {
             state.Parent = Workspace
             state:SetAttribute("JumpingCount", 0)
             state:SetAttribute("FreefallCount", 0)
+            state:SetAttribute("LandedCount", 0)
             state:SetAttribute("RunningCount", 0)
             state:SetAttribute("LastState", "")
 
@@ -1856,6 +1857,8 @@ mod tests {
                         state:SetAttribute("JumpingCount", (state:GetAttribute("JumpingCount") or 0) + 1)
                     elseif newState == Enum.HumanoidStateType.Freefall then
                         state:SetAttribute("FreefallCount", (state:GetAttribute("FreefallCount") or 0) + 1)
+                    elseif newState == Enum.HumanoidStateType.Landed then
+                        state:SetAttribute("LandedCount", (state:GetAttribute("LandedCount") or 0) + 1)
                     elseif newState == Enum.HumanoidStateType.Running then
                         state:SetAttribute("RunningCount", (state:GetAttribute("RunningCount") or 0) + 1)
                     end
@@ -1900,11 +1903,13 @@ mod tests {
 
         let jumping_count = get_trigger_attr(&instance, "StateMarker", "JumpingCount");
         let freefall_count = get_trigger_attr(&instance, "StateMarker", "FreefallCount");
+        let landed_count = get_trigger_attr(&instance, "StateMarker", "LandedCount");
         let running_count = get_trigger_attr(&instance, "StateMarker", "RunningCount");
         let last_state = get_trigger_str_attr(&instance, "StateMarker", "LastState");
 
         assert!(jumping_count >= 1.0, "Expected at least one Jumping state transition");
         assert!(freefall_count >= 1.0, "Expected at least one Freefall state transition");
+        assert!(landed_count >= 1.0, "Expected at least one Landed state transition");
         assert!(running_count >= 1.0, "Expected a Running state transition after landing");
         assert_eq!(last_state, "Running", "Expected final state to return to Running");
     }

@@ -340,14 +340,6 @@ fn update_humanoid_locomotion_state(
         } else {
             Vector3::zero()
         };
-        let next_state = if grounded {
-            HumanoidStateType::Running
-        } else if vertical_velocity > 0.05 {
-            HumanoidStateType::Jumping
-        } else {
-            HumanoidStateType::Freefall
-        };
-
         let (running_signal, should_fire_running, state_changed_signal, state_transition) = {
             let player_data = player.data.lock().unwrap();
             let Some(character) = player_data
@@ -381,6 +373,24 @@ fn update_humanoid_locomotion_state(
                     }
 
                     let prev_state = humanoid.state;
+                    let mut next_state = if grounded {
+                        HumanoidStateType::Running
+                    } else if vertical_velocity > 0.05 {
+                        HumanoidStateType::Jumping
+                    } else {
+                        HumanoidStateType::Freefall
+                    };
+                    if grounded
+                        && matches!(
+                            prev_state,
+                            HumanoidStateType::Jumping | HumanoidStateType::Freefall
+                        )
+                    {
+                        next_state = HumanoidStateType::Landed;
+                    } else if grounded && prev_state == HumanoidStateType::Landed {
+                        next_state = HumanoidStateType::Running;
+                    }
+
                     if prev_state != next_state {
                         humanoid.state = next_state;
                         state_signal = Some(humanoid.state_changed.clone());
