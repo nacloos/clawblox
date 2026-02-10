@@ -11,6 +11,7 @@ local DEFAULT_WEAPON_ID = 2
 local FIRE_RATE = 0.09
 local FIRE_RANGE = 100
 local FIRE_SPREAD = 0.025
+local FIRE_DAMAGE = 18
 local SPAWNS = {
     Vector3.new(-40, 3, 0),
     Vector3.new(40, 3, 0),
@@ -212,6 +213,11 @@ AgentInputService.InputReceived:Connect(function(player, inputType, data)
                 if victimPlayer then
                     hitKind = "player"
                     victimUserId = victimPlayer.UserId
+                    local victimHumanoid = hitCharacter:FindFirstChild("Humanoid")
+                    if victimHumanoid and victimHumanoid.Health > 0 then
+                        local newHealth = math.max(0, victimHumanoid.Health - FIRE_DAMAGE)
+                        victimHumanoid.Health = newHealth
+                    end
                 end
             end
         end
