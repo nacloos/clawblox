@@ -66,6 +66,22 @@ impl Default for RendererConfig {
     }
 }
 
+/// Observation configuration section.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ObservationConfig {
+    /// Maximum distance at which other players are included in observations.
+    #[serde(default = "default_observation_radius")]
+    pub radius: f32,
+}
+
+impl Default for ObservationConfig {
+    fn default() -> Self {
+        Self {
+            radius: default_observation_radius(),
+        }
+    }
+}
+
 /// World configuration from world.toml
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorldConfig {
@@ -86,6 +102,9 @@ pub struct WorldConfig {
     /// Frontend renderer configuration
     #[serde(default)]
     pub renderer: RendererConfig,
+    /// Observation configuration
+    #[serde(default)]
+    pub observation: ObservationConfig,
 }
 
 fn default_max_players() -> u32 {
@@ -108,13 +127,20 @@ fn default_renderer_api_version() -> u32 {
     1
 }
 
+fn default_observation_radius() -> f32 {
+    100.0
+}
+
 impl WorldConfig {
     /// Load world configuration from a TOML file
     pub fn from_file(path: &Path) -> Result<Self, WorldConfigError> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| WorldConfigError::IoError(path.to_path_buf(), e))?;
 
-        toml::from_str(&content).map_err(|e| WorldConfigError::ParseError(path.to_path_buf(), e))
+        let cfg: WorldConfig = toml::from_str(&content)
+            .map_err(|e| WorldConfigError::ParseError(path.to_path_buf(), e))?;
+        cfg.validate(path)?;
+        Ok(cfg)
     }
 
     /// Load world configuration from a game directory
@@ -123,6 +149,16 @@ impl WorldConfig {
         let config_path = game_dir.join("world.toml");
         Self::from_file(&config_path)
     }
+
+    fn validate(&self, path: &Path) -> Result<(), WorldConfigError> {
+        if !self.observation.radius.is_finite() || self.observation.radius <= 0.0 {
+            return Err(WorldConfigError::ValidationError(
+                path.to_path_buf(),
+                "observation.radius must be a finite number > 0".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Errors that can occur when loading world configuration
@@ -130,6 +166,7 @@ impl WorldConfig {
 pub enum WorldConfigError {
     IoError(std::path::PathBuf, std::io::Error),
     ParseError(std::path::PathBuf, toml::de::Error),
+    ValidationError(std::path::PathBuf, String),
 }
 
 impl std::fmt::Display for WorldConfigError {
@@ -140,6 +177,9 @@ impl std::fmt::Display for WorldConfigError {
             }
             WorldConfigError::ParseError(path, e) => {
                 write!(f, "Failed to parse {}: {}", path.display(), e)
+            }
+            WorldConfigError::ValidationError(path, msg) => {
+                write!(f, "Invalid config {}: {}", path.display(), msg)
             }
         }
     }
@@ -160,6 +200,7 @@ mod tests {
         assert_eq!(config.name, "Test Game");
         assert_eq!(config.max_players, 8);
         assert_eq!(config.game_type, "lua");
+        assert_eq!(config.observation.radius, 100.0);
     }
 
     #[test]
@@ -182,6 +223,9 @@ mod tests {
             entry = "index.js"
             source = "src/index.ts"
             capabilities = ["camera.follow"]
+
+            [observation]
+            radius = 64
         "#;
         let config: WorldConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.name, "Test Game");
@@ -193,5 +237,22 @@ mod tests {
         assert_eq!(config.renderer.entry.as_deref(), Some("index.js"));
         assert_eq!(config.renderer.source.as_deref(), Some("src/index.ts"));
         assert_eq!(config.renderer.api_version, 1);
+        assert_eq!(config.observation.radius, 64.0);
+    }
+
+    #[test]
+    fn test_invalid_observation_radius_fails_validation() {
+        let toml = r#"
+            name = "Bad Config"
+
+            [observation]
+            radius = 0
+        "#;
+
+        let config: WorldConfig = toml::from_str(toml).unwrap();
+        let err = config
+            .validate(std::path::Path::new("world.toml"))
+            .unwrap_err();
+        assert!(format!("{}", err).contains("observation.radius"));
     }
 }

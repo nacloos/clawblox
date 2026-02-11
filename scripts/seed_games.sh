@@ -58,6 +58,35 @@ get_toml_value() {
     fi
 }
 
+# Function to extract key from a specific TOML section.
+get_toml_section_value() {
+    local file="$1"
+    local section="$2"
+    local key="$3"
+    local default="$4"
+
+    local value=$(awk -v section="$section" -v key="$key" '
+        BEGIN { in_section = 0 }
+        /^\[.*\]/ {
+            in_section = ($0 == "[" section "]")
+            next
+        }
+        in_section && $0 ~ ("^" key " *= *") {
+            gsub(/.*= */, "", $0)
+            gsub(/"/, "", $0)
+            gsub(/'\''/, "", $0)
+            print $0
+            exit
+        }
+    ' "$file" 2>/dev/null)
+
+    if [ -z "$value" ]; then
+        echo "$default"
+    else
+        echo "$value"
+    fi
+}
+
 # Function to seed a game from its directory
 seed_game() {
     local game_dir="$1"
@@ -75,12 +104,13 @@ seed_game() {
     local description=$(get_toml_value "$world_toml" "description" "")
     local max_players=$(get_toml_value "$world_toml" "max_players" "8")
     local game_type=$(get_toml_value "$world_toml" "game_type" "lua")
+    local observation_radius=$(get_toml_section_value "$world_toml" "observation" "radius" "100")
 
     # Read script files
     local script=$(cat "$game_dir/game.lua")
     local skill=$(cat "$game_dir/SKILL.md" 2>/dev/null || echo "")
 
-    echo "Seeding: $name (max_players=$max_players)"
+    echo "Seeding: $name (max_players=$max_players, observation_radius=$observation_radius)"
 
     # Insert into database
     $PSQL_CMD \
@@ -89,10 +119,11 @@ seed_game() {
         -v description="$description" \
         -v game_type="$game_type" \
         -v max_players="$max_players" \
+        -v observation_radius="$observation_radius" \
         -v script="$script" \
         -v skill="$skill" \
         <<'EOF'
-INSERT INTO games (id, name, description, game_type, status, max_players, script_code, skill_md)
+INSERT INTO games (id, name, description, game_type, status, max_players, observation_radius, script_code, skill_md)
 VALUES (
     :'id',
     :'name',
@@ -100,6 +131,7 @@ VALUES (
     :'game_type',
     'waiting',
     :max_players,
+    :observation_radius,
     :'script',
     :'skill'
 );

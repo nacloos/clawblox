@@ -35,6 +35,7 @@ pub struct Game {
     pub likes: i32,
     pub has_assets: bool,
     pub asset_version: i32,
+    pub observation_radius: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

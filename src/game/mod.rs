@@ -3,16 +3,16 @@ pub mod constants;
 pub mod humanoid_movement;
 pub mod instance;
 pub mod lua;
-pub mod physics;
-pub mod panic_reporting;
-pub mod script_bundle;
-pub mod touch_events;
 mod manager_instances;
 mod manager_lifecycle;
 mod manager_listing;
 mod manager_observations;
 mod manager_players;
 mod manager_tick;
+pub mod panic_reporting;
+pub mod physics;
+pub mod script_bundle;
+pub mod touch_events;
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
@@ -59,7 +59,11 @@ pub struct GameManagerState {
 }
 
 impl GameManagerState {
-    pub fn new(async_bridge: Option<Arc<AsyncBridge>>, error_mode: ErrorMode, disable_gc: bool) -> Self {
+    pub fn new(
+        async_bridge: Option<Arc<AsyncBridge>>,
+        error_mode: ErrorMode,
+        disable_gc: bool,
+    ) -> Self {
         Self {
             instances: DashMap::new(),
             game_instances: DashMap::new(),
@@ -80,7 +84,11 @@ pub struct GameManager {
 }
 
 impl GameManager {
-    pub fn new(tick_rate: u64, pool: Arc<PgPool>, error_mode: ErrorMode) -> (Self, GameManagerHandle) {
+    pub fn new(
+        tick_rate: u64,
+        pool: Arc<PgPool>,
+        error_mode: ErrorMode,
+    ) -> (Self, GameManagerHandle) {
         let async_bridge = Arc::new(AsyncBridge::new(pool));
         let state = Arc::new(GameManagerState::new(Some(async_bridge), error_mode, false));
         let handle = Arc::clone(&state);
@@ -139,9 +147,16 @@ pub fn find_or_create_instance(
     state: &GameManagerHandle,
     game_id: Uuid,
     max_players: u32,
+    observation_radius: f32,
     script: Option<&str>,
 ) -> FindInstanceResult {
-    manager_instances::find_or_create_instance(state, game_id, max_players, script)
+    manager_instances::find_or_create_instance(
+        state,
+        game_id,
+        max_players,
+        observation_radius,
+        script,
+    )
 }
 
 /// Checks if any instance is running for this game
@@ -183,11 +198,7 @@ pub fn leave_instance(
 }
 
 /// Leaves a player from their instance in a game (lookup by game_id)
-pub fn leave_game(
-    state: &GameManagerHandle,
-    game_id: Uuid,
-    agent_id: Uuid,
-) -> Result<(), String> {
+pub fn leave_game(state: &GameManagerHandle, game_id: Uuid, agent_id: Uuid) -> Result<(), String> {
     let instance_id = get_player_instance(state, agent_id, game_id)
         .ok_or_else(|| "Not in any instance of this game".to_string())?;
     leave_instance(state, instance_id, agent_id)
@@ -234,10 +245,7 @@ pub fn get_spectator_observation_for_instance(
 }
 
 /// Get static map geometry for a game (cached per game_id)
-pub fn get_map(
-    state: &GameManagerHandle,
-    game_id: Uuid,
-) -> Result<MapInfo, String> {
+pub fn get_map(state: &GameManagerHandle, game_id: Uuid) -> Result<MapInfo, String> {
     manager_observations::get_map(state, game_id)
 }
 
@@ -287,9 +295,6 @@ pub fn cleanup_empty_instances(state: &GameManagerHandle) -> usize {
     cleanup_empty_instances_with_timeout(state, EMPTY_INSTANCE_TIMEOUT)
 }
 
-pub fn cleanup_empty_instances_with_timeout(
-    state: &GameManagerHandle,
-    timeout: Duration,
-) -> usize {
+pub fn cleanup_empty_instances_with_timeout(state: &GameManagerHandle, timeout: Duration) -> usize {
     manager_lifecycle::cleanup_empty_instances_with_timeout(state, timeout)
 }

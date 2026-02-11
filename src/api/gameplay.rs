@@ -8,11 +8,6 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use tower_governor::{
-    governor::GovernorConfigBuilder,
-    key_extractor::KeyExtractor,
-    GovernorError, GovernorLayer,
-};
 use flate2::{write::GzEncoder, Compression};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -20,6 +15,9 @@ use sqlx::PgPool;
 use std::io::Write;
 use std::time::Duration;
 use tokio::time::interval;
+use tower_governor::{
+    governor::GovernorConfigBuilder, key_extractor::KeyExtractor, GovernorError, GovernorLayer,
+};
 use uuid::Uuid;
 
 use crate::db::models::Game;
@@ -80,12 +78,13 @@ async fn get_agent_id_from_api_key(
     }
 
     // Cache miss - query DB for both id and name
-    let agent = sqlx::query_as::<_, (Uuid, String)>("SELECT id, name FROM agents WHERE api_key = $1")
-        .bind(api_key)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
+    let agent =
+        sqlx::query_as::<_, (Uuid, String)>("SELECT id, name FROM agents WHERE api_key = $1")
+            .bind(api_key)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
 
     // Cache the result
     cache.insert(api_key.to_string(), agent.clone());
@@ -99,7 +98,12 @@ pub fn routes(
     api_key_cache: ApiKeyCache,
     r2_public_url: Option<String>,
 ) -> Router {
-    let state = GameplayState { pool, game_manager, api_key_cache, r2_public_url };
+    let state = GameplayState {
+        pool,
+        game_manager,
+        api_key_cache,
+        r2_public_url,
+    };
 
     // Rate limit: 10 requests/second per agent, burst of 20
     // per_millisecond(100) = 1 token every 100ms = 10 tokens/second
@@ -140,8 +144,10 @@ async fn observe(
     Path(game_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<PlayerObservation>, (StatusCode, String)> {
-    let api_key = extract_api_key(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
+    let api_key = extract_api_key(&headers).ok_or((
+        StatusCode::UNAUTHORIZED,
+        "Missing Authorization header".to_string(),
+    ))?;
 
     let agent_id = get_agent_id_from_api_key(&api_key, &state.api_key_cache, &state.pool).await?;
 
@@ -238,12 +244,13 @@ async fn get_asset_info(
     state: &GameplayState,
     game_id: Uuid,
 ) -> Result<Option<AssetInfo>, (StatusCode, String)> {
-    let game: GameAssetInfoRow = sqlx::query_as("SELECT has_assets, asset_version FROM games WHERE id = $1")
-        .bind(game_id)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Game not found".to_string()))?;
+    let game: GameAssetInfoRow =
+        sqlx::query_as("SELECT has_assets, asset_version FROM games WHERE id = $1")
+            .bind(game_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or((StatusCode::NOT_FOUND, "Game not found".to_string()))?;
 
     if !game.has_assets {
         return Ok(None);
@@ -277,6 +284,7 @@ async fn spectate(
             &state.game_manager,
             game_id,
             db_game.max_players as u32,
+            db_game.observation_radius,
             db_game.script_code.as_deref(),
         );
     }
@@ -312,12 +320,13 @@ async fn get_map(
             &state.game_manager,
             game_id,
             db_game.max_players as u32,
+            db_game.observation_radius,
             db_game.script_code.as_deref(),
         );
     }
 
-    let map_info = game::get_map(&state.game_manager, game_id)
-        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
+    let map_info =
+        game::get_map(&state.game_manager, game_id).map_err(|e| (StatusCode::NOT_FOUND, e))?;
 
     Ok(Json(map_info))
 }
@@ -334,9 +343,10 @@ async fn get_skill(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Game not found".to_string()))?;
 
-    let skill_md = game
-        .skill_md
-        .ok_or((StatusCode::NOT_FOUND, "Game has no skill definition".to_string()))?;
+    let skill_md = game.skill_md.ok_or((
+        StatusCode::NOT_FOUND,
+        "Game has no skill definition".to_string(),
+    ))?;
 
     Ok((
         StatusCode::OK,
@@ -362,13 +372,21 @@ async fn send_input(
     headers: HeaderMap,
     Json(input): Json<AgentInputRequest>,
 ) -> Result<Json<PlayerObservation>, (StatusCode, String)> {
-    let api_key = extract_api_key(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
+    let api_key = extract_api_key(&headers).ok_or((
+        StatusCode::UNAUTHORIZED,
+        "Missing Authorization header".to_string(),
+    ))?;
 
     let agent_id = get_agent_id_from_api_key(&api_key, &state.api_key_cache, &state.pool).await?;
 
-    game::queue_input(&state.game_manager, game_id, agent_id, input.input_type, input.data)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    game::queue_input(
+        &state.game_manager,
+        game_id,
+        agent_id,
+        input.input_type,
+        input.data,
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     // Return observation instead of simple success message (reduces round-trips)
     let mut observation = game::get_observation(&state.game_manager, game_id, agent_id)
@@ -515,7 +533,10 @@ fn normalize_clamped_axis(v: [f32; 2]) -> (f32, f32) {
     (x, z)
 }
 
-async fn send_play_error(sender: &mut futures_util::stream::SplitSink<WebSocket, Message>, message: &str) {
+async fn send_play_error(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    message: &str,
+) {
     let payload = PlayErrorMessage {
         message_type: "error",
         message: message.to_string(),
@@ -534,7 +555,8 @@ async fn play_ws(
     if !anon_play_ws_enabled() {
         return Err((
             StatusCode::FORBIDDEN,
-            "Anonymous play WebSocket is disabled. Set CLAWBLOX_ENABLE_ANON_PLAY_WS=1 to enable.".to_string(),
+            "Anonymous play WebSocket is disabled. Set CLAWBLOX_ENABLE_ANON_PLAY_WS=1 to enable."
+                .to_string(),
         ));
     }
 
@@ -607,10 +629,7 @@ async fn get_leaderboard(
         .into_iter()
         .enumerate()
         .map(|(i, (key, value))| {
-            let score = value
-                .get("score")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
+            let score = value.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let name = value
                 .get("name")
                 .and_then(|v| v.as_str())
@@ -633,13 +652,12 @@ async fn handle_spectate_ws(socket: WebSocket, state: GameplayState, game_id: Uu
     let (mut sender, mut receiver) = socket.split();
 
     // First verify game exists in database and get script + max_players
-    let db_game: Option<Game> =
-        sqlx::query_as("SELECT * FROM games WHERE id = $1")
-            .bind(game_id)
-            .fetch_optional(&state.pool)
-            .await
-            .ok()
-            .flatten();
+    let db_game: Option<Game> = sqlx::query_as("SELECT * FROM games WHERE id = $1")
+        .bind(game_id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten();
 
     let Some(db_game) = db_game else {
         let _ = sender
@@ -656,6 +674,7 @@ async fn handle_spectate_ws(socket: WebSocket, state: GameplayState, game_id: Uu
             &state.game_manager,
             game_id,
             db_game.max_players as u32,
+            db_game.observation_radius,
             db_game.script_code.as_deref(),
         );
     }
@@ -761,13 +780,12 @@ async fn handle_play_ws(
     let (mut sender, mut receiver) = socket.split();
 
     // First verify game exists in database and get script + max_players
-    let db_game: Option<Game> =
-        sqlx::query_as("SELECT * FROM games WHERE id = $1")
-            .bind(game_id)
-            .fetch_optional(&state.pool)
-            .await
-            .ok()
-            .flatten();
+    let db_game: Option<Game> = sqlx::query_as("SELECT * FROM games WHERE id = $1")
+        .bind(game_id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten();
 
     let Some(db_game) = db_game else {
         send_play_error(&mut sender, "Game not found").await;
@@ -780,6 +798,7 @@ async fn handle_play_ws(
             &state.game_manager,
             game_id,
             db_game.max_players as u32,
+            db_game.observation_radius,
             db_game.script_code.as_deref(),
         );
     }
@@ -788,6 +807,7 @@ async fn handle_play_ws(
         &state.game_manager,
         game_id,
         db_game.max_players as u32,
+        db_game.observation_radius,
         db_game.script_code.as_deref(),
     );
 

@@ -238,7 +238,10 @@ fn fetch_docs(local: bool) {
 
     if local {
         write_embedded_dir(&DOCS_DIR, &docs_dir);
-        println!("Docs written from bundled local copy to {}", docs_dir.display());
+        println!(
+            "Docs written from bundled local copy to {}",
+            docs_dir.display()
+        );
         return;
     }
 
@@ -380,6 +383,9 @@ mode = "module"
 api_version = 1
 entry = "index.js"
 capabilities = []
+
+[observation]
+radius = 100
 "#,
         project_name, project_name
     );
@@ -865,6 +871,7 @@ fn deploy_game(path: PathBuf, api_key_override: Option<String>, server_override:
                     "script_code": script_code,
                     "skill_md": skill_md,
                     "max_players": config.max_players as i32,
+                    "observation_radius": config.observation.radius,
                 }))
                 .send()
                 .await
@@ -895,6 +902,7 @@ fn deploy_game(path: PathBuf, api_key_override: Option<String>, server_override:
                     "script_code": script_code,
                     "skill_md": skill_md,
                     "max_players": config.max_players as i32,
+                    "observation_radius": config.observation.radius,
                 }))
                 .send()
                 .await
@@ -1193,7 +1201,11 @@ fn command_exists(bin: &str) -> bool {
     Command::new(bin).arg("--version").output().is_ok()
 }
 
-fn bundle_renderer_with_esbuild(game_dir: &Path, source_rel: &str, out_rel: &str) -> Result<(), String> {
+fn bundle_renderer_with_esbuild(
+    game_dir: &Path,
+    source_rel: &str,
+    out_rel: &str,
+) -> Result<(), String> {
     let renderer_dir = game_dir.join("renderer");
     let source = renderer_dir.join(source_rel);
     let out = renderer_dir.join(out_rel);
@@ -1201,8 +1213,13 @@ fn bundle_renderer_with_esbuild(game_dir: &Path, source_rel: &str, out_rel: &str
     let out_parent = out
         .parent()
         .ok_or_else(|| format!("Invalid renderer bundle output path: {}", out.display()))?;
-    std::fs::create_dir_all(out_parent)
-        .map_err(|e| format!("Failed to create renderer build dir {}: {}", out_parent.display(), e))?;
+    std::fs::create_dir_all(out_parent).map_err(|e| {
+        format!(
+            "Failed to create renderer build dir {}: {}",
+            out_parent.display(),
+            e
+        )
+    })?;
 
     let mut cmd = if command_exists("esbuild") {
         let mut c = Command::new("esbuild");
@@ -1342,7 +1359,13 @@ fn run_game(path: PathBuf, port: u16, daemon: bool) {
     let game_id = Uuid::new_v4();
 
     // Create the instance
-    let result = find_or_create_instance(&game_handle, game_id, config.max_players, Some(&script));
+    let result = find_or_create_instance(
+        &game_handle,
+        game_id,
+        config.max_players,
+        config.observation.radius,
+        Some(&script),
+    );
     let instance_id = result.instance_id;
     println!("Instance: {}", instance_id);
 
@@ -1481,11 +1504,17 @@ fn stop_game(port: u16) {
 
     if !is_process_alive(pid) {
         delete_pid_file(&path);
-        println!("No running clawblox instance found on port {} (cleaned stale PID file)", port);
+        println!(
+            "No running clawblox instance found on port {} (cleaned stale PID file)",
+            port
+        );
         return;
     }
 
-    println!("Stopping clawblox instance (PID {}) on port {}...", pid, port);
+    println!(
+        "Stopping clawblox instance (PID {}) on port {}...",
+        pid, port
+    );
     kill_process(pid);
 
     for _ in 0..20 {
@@ -1704,9 +1733,7 @@ fn resolve_local_asset_url(url: &mut String) {
     }
 }
 
-fn resolve_local_model_url_attr(
-    attrs: &mut std::collections::HashMap<String, serde_json::Value>,
-) {
+fn resolve_local_model_url_attr(attrs: &mut std::collections::HashMap<String, serde_json::Value>) {
     for key in ["ModelUrl", "model_url"] {
         if let Some(value) = attrs.get_mut(key) {
             if let Some(path) = value.as_str().and_then(|url| url.strip_prefix("asset://")) {

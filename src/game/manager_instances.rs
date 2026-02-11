@@ -3,14 +3,15 @@ use uuid::Uuid;
 
 use parking_lot::RwLock;
 
-use crate::game::{FindInstanceResult, GameManagerHandle};
 use crate::game::instance::GameInstance;
+use crate::game::{FindInstanceResult, GameManagerHandle};
 
 /// Creates a new instance for a game.
 fn create_instance(
     state: &GameManagerHandle,
     game_id: Uuid,
     max_players: u32,
+    observation_radius: f32,
     script: Option<&str>,
 ) -> Uuid {
     let instance = match script {
@@ -18,10 +19,17 @@ fn create_instance(
             game_id,
             code,
             max_players,
+            observation_radius,
             state.async_bridge.clone(),
             state.error_mode,
         ),
-        None => GameInstance::new_with_config(game_id, max_players, state.async_bridge.clone(), state.error_mode),
+        None => GameInstance::new_with_config(
+            game_id,
+            max_players,
+            observation_radius,
+            state.async_bridge.clone(),
+            state.error_mode,
+        ),
     };
 
     let instance_id = instance.instance_id;
@@ -41,8 +49,8 @@ fn create_instance(
         .push(instance_id);
 
     eprintln!(
-        "[Instance] Created {} for game {} (max_players={})",
-        instance_id, game_id, max_players
+        "[Instance] Created {} for game {} (max_players={}, observation_radius={})",
+        instance_id, game_id, max_players, observation_radius
     );
 
     instance_id
@@ -52,6 +60,7 @@ pub fn find_or_create_instance(
     state: &GameManagerHandle,
     game_id: Uuid,
     max_players: u32,
+    observation_radius: f32,
     script: Option<&str>,
 ) -> FindInstanceResult {
     // Check existing instances for capacity.
@@ -70,7 +79,7 @@ pub fn find_or_create_instance(
     }
 
     // Create new instance.
-    let instance_id = create_instance(state, game_id, max_players, script);
+    let instance_id = create_instance(state, game_id, max_players, observation_radius, script);
     FindInstanceResult {
         instance_id,
         created: true,
