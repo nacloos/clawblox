@@ -1933,6 +1933,104 @@ fn test_is_descendant_of_non_instance_returns_false() {
 }
 
 #[test]
+fn test_physical_properties_and_custom_physical_properties() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local p = Instance.new("Part")
+            p.CustomPhysicalProperties = PhysicalProperties.new(1, 0.3, 0.5, 1, 1)
+            _G.ok = p.CustomPhysicalProperties ~= nil and typeof(p.CustomPhysicalProperties) == "PhysicalProperties"
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let ok: bool = globals.get("ok").unwrap();
+    assert!(ok);
+}
+
+#[test]
+fn test_ancestry_changed_signal_exists_and_fires() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local p = Instance.new("Part")
+            _G.count = 0
+            p.AncestryChanged:Connect(function(inst, parent)
+                _G.count = _G.count + 1
+            end)
+            p.Parent = Workspace
+            p.Parent = nil
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let count: i64 = globals.get("count").unwrap();
+    assert!(count >= 2, "expected ancestry callbacks, got {}", count);
+}
+
+#[test]
+fn test_legacy_ray_api_find_part_on_ray_with_ignore_list() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local p = Instance.new("Part")
+            p.Name = "RayTarget"
+            p.Size = Vector3.new(4, 4, 4)
+            p.CFrame = CFrame.new(0, 2, 0)
+            p.Anchored = true
+            p.Parent = Workspace
+
+            local ray = Ray.new(Vector3.new(0, 2, -10), Vector3.new(0, 0, 20))
+            local hit1, pos1 = Workspace:FindPartOnRayWithIgnoreList(ray, {})
+            local hit2, pos2 = Workspace:FindPartOnRayWithIgnoreList(ray, {p})
+
+            _G.hitName = hit1 and hit1.Name or ""
+            _G.hitIgnored = (hit2 == nil)
+            _G.posOk = (pos1 ~= nil)
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let hit_name: String = globals.get("hitName").unwrap();
+    let hit_ignored: bool = globals.get("hitIgnored").unwrap();
+    let pos_ok: bool = globals.get("posOk").unwrap();
+    assert_eq!(hit_name, "RayTarget");
+    assert!(hit_ignored);
+    assert!(pos_ok);
+}
+
+#[test]
+fn test_player_ancestry_changed_exists() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            _G.ok = false
+            Players.PlayerAdded:Connect(function(player)
+                player.AncestryChanged:Connect(function() end)
+                _G.ok = true
+            end)
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let (player, _hrp_id) = runtime.add_player(123, "ParityPlayer");
+    runtime
+        .fire_player_added(&player)
+        .expect("Failed to fire player added");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let ok: bool = globals.get("ok").unwrap();
+    assert!(ok);
+}
+
+#[test]
 fn test_debris_add_item_destroys_after_lifetime() {
     let mut runtime = test_runtime();
     runtime

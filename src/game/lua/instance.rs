@@ -6,7 +6,10 @@ use std::sync::{Arc, Mutex, Weak};
 use super::events::{create_signal, track_yielded_threads, RBXScriptSignal};
 use super::runtime::Game;
 use super::services::{PlayersService, WorkspaceService};
-use super::types::{CFrame, Color3, HumanoidStateType, Material, PartType, UDim, UDim2, Vector3};
+use super::types::{
+    CFrame, Color3, HumanoidStateType, Material, PartType, PhysicalProperties, UDim, UDim2,
+    Vector3,
+};
 use crate::game::constants::humanoid as humanoid_consts;
 
 mod class_name;
@@ -43,6 +46,7 @@ pub struct InstanceData {
 
     pub child_added: RBXScriptSignal,
     pub child_removed: RBXScriptSignal,
+    pub ancestry_changed: RBXScriptSignal,
     pub destroying: RBXScriptSignal,
     pub attribute_changed: RBXScriptSignal,
 
@@ -131,6 +135,7 @@ pub struct PartData {
     pub top_surface: String,
     pub bottom_surface: String,
     pub velocity: Vector3,
+    pub custom_physical_properties: Option<PhysicalProperties>,
     pub shape: PartType,
     pub position_dirty: bool,
     pub size_dirty: bool,
@@ -160,6 +165,7 @@ impl Default for PartData {
             top_surface: "Smooth".to_string(),
             bottom_surface: "Smooth".to_string(),
             velocity: Vector3::zero(),
+            custom_physical_properties: None,
             shape: PartType::Block,
             position_dirty: false,
             size_dirty: false,
@@ -687,6 +693,7 @@ impl InstanceData {
             tags: HashSet::new(),
             child_added: create_signal("ChildAdded"),
             child_removed: create_signal("ChildRemoved"),
+            ancestry_changed: create_signal("AncestryChanged"),
             destroying: create_signal("Destroying"),
             attribute_changed: create_signal("AttributeChanged"),
             part_data: None,
@@ -1105,7 +1112,28 @@ impl Instance {
             )?;
         }
 
+        self.fire_ancestry_changed_recursive(lua)?;
         self.fire_property_changed_if_listening(lua, "Parent")?;
+        Ok(())
+    }
+
+    fn fire_ancestry_changed_recursive(&self, lua: &Lua) -> Result<()> {
+        let ancestry_signal = self.data.lock().unwrap().ancestry_changed.clone();
+        let this_ud = lua.create_userdata(self.clone())?;
+        let parent_value = match self.parent() {
+            Some(parent) => Value::UserData(lua.create_userdata(parent)?),
+            None => Value::Nil,
+        };
+        Self::fire_signal(
+            lua,
+            &ancestry_signal,
+            MultiValue::from_iter([Value::UserData(this_ud), parent_value]),
+        )?;
+
+        for child in self.get_children() {
+            child.fire_ancestry_changed_recursive(lua)?;
+        }
+
         Ok(())
     }
 
@@ -1388,6 +1416,9 @@ impl UserData for Instance {
         fields.add_field_method_get("ChildRemoved", |_, this| {
             Ok(this.data.lock().unwrap().child_removed.clone())
         });
+        fields.add_field_method_get("AncestryChanged", |_, this| {
+            Ok(this.data.lock().unwrap().ancestry_changed.clone())
+        });
         fields.add_field_method_get("Destroying", |_, this| {
             Ok(this.data.lock().unwrap().destroying.clone())
         });
@@ -1665,6 +1696,24 @@ impl UserData for Instance {
             }
             Ok(())
         });
+
+        fields.add_field_method_get("CustomPhysicalProperties", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data
+                .part_data
+                .as_ref()
+                .and_then(|p| p.custom_physical_properties))
+        });
+        fields.add_field_method_set(
+            "CustomPhysicalProperties",
+            |_, this, value: Option<PhysicalProperties>| {
+                let mut data = this.data.lock().unwrap();
+                if let Some(part) = &mut data.part_data {
+                    part.custom_physical_properties = value;
+                }
+                Ok(())
+            },
+        );
 
         fields.add_field_method_get("MaxForce", |_, this| {
             let data = this.data.lock().unwrap();

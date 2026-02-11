@@ -464,6 +464,10 @@ impl LuaRuntime {
                         "Vector2"
                     } else if ud.borrow::<super::types::Vector3>().is_ok() {
                         "Vector3"
+                    } else if ud.borrow::<super::types::Ray>().is_ok() {
+                        "Ray"
+                    } else if ud.borrow::<super::types::PhysicalProperties>().is_ok() {
+                        "PhysicalProperties"
                     } else if ud.borrow::<super::types::CFrame>().is_ok() {
                         "CFrame"
                     } else if ud.borrow::<super::types::Color3>().is_ok() {

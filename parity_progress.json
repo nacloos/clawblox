@@ -13,11 +13,11 @@
     "missing": "Not implemented or known to be incomplete"
   },
   "summary": {
-    "full": 15,
-    "approximate": 5,
+    "full": 20,
+    "approximate": 6,
     "api_only": 5,
     "missing": 4,
-    "overall_progress_percent": 82
+    "overall_progress_percent": 87
   },
   "features": [
     {
@@ -199,6 +199,27 @@
       "notes": "Non-Instance userdata now returns false instead of hard-failing, improving compatibility with generated scripts."
     },
     {
+      "id": "physical_properties_type",
+      "area": "Types/Physics",
+      "status": "full",
+      "api": ["PhysicalProperties.new", "Part.CustomPhysicalProperties"],
+      "notes": "PhysicalProperties userdata and Part.CustomPhysicalProperties get/set are implemented for script compatibility."
+    },
+    {
+      "id": "instance_ancestry_changed",
+      "area": "Instance Events",
+      "status": "full",
+      "api": ["Instance.AncestryChanged"],
+      "notes": "AncestryChanged signal is exposed and fired on parent transitions, including descendant propagation."
+    },
+    {
+      "id": "legacy_ray_api",
+      "area": "Workspace/Raycast",
+      "status": "approximate",
+      "api": ["Ray.new", "Workspace:FindPartOnRay", "Workspace:FindPartOnRayWithIgnoreList"],
+      "notes": "Legacy ray API is supported via Workspace.Raycast-backed compatibility implementation."
+    },
+    {
       "id": "unknown_constraint_families",
       "area": "Constraints",
       "status": "missing",
@@ -298,6 +319,7 @@
     }
   ],
   "next_priority": [
+    "Re-run run_002/run_007/run_009/run_013 against latest CLI and classify remaining failures as parity gaps vs script defects",
     "Re-run failing run-set against latest CLI and capture delta",
     "Add remaining Humanoid property parity used by generated scripts",
     "Wire PhysicsService collision groups into solver-level collision filtering paths",

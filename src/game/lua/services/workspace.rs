@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::game::constants::physics as consts;
 use crate::game::lua::instance::{ClassName, Instance};
-use crate::game::lua::types::{CFrame, PartType, RaycastFilterType, Vector3};
+use crate::game::lua::types::{CFrame, PartType, Ray, RaycastFilterType, Vector3};
 
 #[inline]
 fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -959,6 +959,42 @@ impl UserData for WorkspaceService {
                 Ok(this.raycast(origin, direction, params))
             },
         );
+
+        methods.add_method(
+            "FindPartOnRayWithIgnoreList",
+            |lua, this, (ray, ignore): (Ray, Value)| {
+                let mut params = RaycastParams::default();
+                if let Value::Table(tbl) = ignore {
+                    let mut filter_instances = Vec::new();
+                    for value in tbl.sequence_values::<Value>() {
+                        if let Value::UserData(ud) = value? {
+                            if let Ok(inst) = ud.borrow::<Instance>() {
+                                filter_instances.push(inst.clone());
+                            }
+                        }
+                    }
+                    params.filter_instances = filter_instances;
+                }
+
+                match this.raycast(ray.origin, ray.direction, Some(params)) {
+                    Some(hit) => Ok((
+                        Some(hit.instance),
+                        Some(Value::UserData(lua.create_userdata(hit.position)?)),
+                    )),
+                    None => Ok((None::<Instance>, None::<Value>)),
+                }
+            },
+        );
+
+        methods.add_method("FindPartOnRay", |lua, this, ray: Ray| {
+            match this.raycast(ray.origin, ray.direction, None) {
+                Some(hit) => Ok((
+                    Some(hit.instance),
+                    Some(Value::UserData(lua.create_userdata(hit.position)?)),
+                )),
+                None => Ok((None::<Instance>, None::<Value>)),
+            }
+        });
 
         methods.add_method(
             "GetPartBoundsInBox",
