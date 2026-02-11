@@ -181,6 +181,8 @@ pub struct HumanoidData {
     pub jump_power: f32,
     pub jump_height: f32,
     pub auto_rotate: bool,
+    pub health_display_distance: f32,
+    pub name_display_distance: f32,
     pub hip_height: f32,
     pub move_direction: Vector3,
     /// Input movement direction set by Humanoid:Move().
@@ -210,6 +212,8 @@ impl Default for HumanoidData {
             jump_power: humanoid_consts::DEFAULT_JUMP_POWER,
             jump_height: humanoid_consts::DEFAULT_JUMP_HEIGHT,
             auto_rotate: true,
+            health_display_distance: 100.0,
+            name_display_distance: 100.0,
             hip_height: humanoid_consts::DEFAULT_HIP_HEIGHT,
             move_direction: Vector3::zero(),
             move_input_direction: Vector3::zero(),
@@ -1994,6 +1998,30 @@ impl UserData for Instance {
             Ok(())
         });
 
+        fields.add_field_method_get("HealthDisplayDistance", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.humanoid_data.as_ref().map(|h| h.health_display_distance))
+        });
+        fields.add_field_method_set("HealthDisplayDistance", |_, this, value: f32| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(humanoid) = &mut data.humanoid_data {
+                humanoid.health_display_distance = value.max(0.0);
+            }
+            Ok(())
+        });
+
+        fields.add_field_method_get("NameDisplayDistance", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.humanoid_data.as_ref().map(|h| h.name_display_distance))
+        });
+        fields.add_field_method_set("NameDisplayDistance", |_, this, value: f32| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(humanoid) = &mut data.humanoid_data {
+                humanoid.name_display_distance = value.max(0.0);
+            }
+            Ok(())
+        });
+
         fields.add_field_method_get("HipHeight", |_, this| {
             let data = this.data.lock().unwrap();
             Ok(data.humanoid_data.as_ref().map(|h| h.hip_height))
@@ -2809,7 +2837,14 @@ impl UserData for Instance {
             Ok(this.is_a(&class_name))
         });
 
-        methods.add_method("IsDescendantOf", |_, this, ancestor: Instance| {
+        methods.add_method("IsDescendantOf", |_, this, ancestor: Value| {
+            let ancestor = match ancestor {
+                Value::UserData(ud) => match ud.borrow::<Instance>() {
+                    Ok(inst) => inst.clone(),
+                    Err(_) => return Ok(false),
+                },
+                _ => return Ok(false),
+            };
             Ok(this.is_descendant_of(&ancestor))
         });
 

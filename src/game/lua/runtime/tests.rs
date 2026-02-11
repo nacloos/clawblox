@@ -1867,6 +1867,72 @@ fn test_physics_service_api_exists() {
 }
 
 #[test]
+fn test_vector2_global_and_operations() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local v = Vector2.new(3, 4)
+            _G.mag = v.Magnitude
+            _G.unitX = v.Unit.X
+            _G.unitY = v.Unit.Y
+            _G.t = typeof(v)
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let mag: f64 = globals.get("mag").unwrap();
+    let unit_x: f64 = globals.get("unitX").unwrap();
+    let unit_y: f64 = globals.get("unitY").unwrap();
+    let t: String = globals.get("t").unwrap();
+    assert!((mag - 5.0).abs() < 1e-6);
+    assert!((unit_x - 0.6).abs() < 1e-5);
+    assert!((unit_y - 0.8).abs() < 1e-5);
+    assert_eq!(t, "Vector2");
+}
+
+#[test]
+fn test_humanoid_display_distance_fields() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local h = Instance.new("Humanoid")
+            h.HealthDisplayDistance = 0
+            h.NameDisplayDistance = 12
+            _G.hdd = h.HealthDisplayDistance
+            _G.ndd = h.NameDisplayDistance
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let hdd: f64 = globals.get("hdd").unwrap();
+    let ndd: f64 = globals.get("ndd").unwrap();
+    assert_eq!(hdd, 0.0);
+    assert_eq!(ndd, 12.0);
+}
+
+#[test]
+fn test_is_descendant_of_non_instance_returns_false() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local p = Instance.new("Part")
+            p.Parent = Workspace
+            _G.ok = (p:IsDescendantOf(Vector3.new(0,0,0)) == false)
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let ok: bool = globals.get("ok").unwrap();
+    assert!(ok);
+}
+
+#[test]
 fn test_debris_add_item_destroys_after_lifetime() {
     let mut runtime = test_runtime();
     runtime

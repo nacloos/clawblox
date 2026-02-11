@@ -13,11 +13,11 @@
     "missing": "Not implemented or known to be incomplete"
   },
   "summary": {
-    "full": 13,
-    "approximate": 4,
+    "full": 15,
+    "approximate": 5,
     "api_only": 5,
     "missing": 4,
-    "overall_progress_percent": 78
+    "overall_progress_percent": 82
   },
   "features": [
     {
@@ -178,6 +178,27 @@
       "notes": "Collision-group state is tracked and used for touch-event gating. Solver-level collision filtering parity is still pending."
     },
     {
+      "id": "vector2_type",
+      "area": "Types",
+      "status": "full",
+      "api": ["Vector2.new", "Vector2.X", "Vector2.Y", "Vector2.Magnitude", "Vector2.Unit", "typeof(Vector2)"],
+      "notes": "Vector2 global and core operations are implemented for movement/input scripts."
+    },
+    {
+      "id": "humanoid_display_distance_fields",
+      "area": "Humanoid",
+      "status": "full",
+      "api": ["Humanoid.HealthDisplayDistance", "Humanoid.NameDisplayDistance"],
+      "notes": "Display distance fields are writable/readable and no longer error on assignment."
+    },
+    {
+      "id": "is_descendant_of_type_tolerance",
+      "area": "Instance",
+      "status": "approximate",
+      "api": ["Instance:IsDescendantOf"],
+      "notes": "Non-Instance userdata now returns false instead of hard-failing, improving compatibility with generated scripts."
+    },
+    {
       "id": "unknown_constraint_families",
       "area": "Constraints",
       "status": "missing",
@@ -278,6 +299,7 @@
   ],
   "next_priority": [
     "Re-run failing run-set against latest CLI and capture delta",
+    "Add remaining Humanoid property parity used by generated scripts",
     "Wire PhysicsService collision groups into solver-level collision filtering paths",
     "Promote constraint shims (AlignOrientation/BodyAngularVelocity) from api_only toward approximate behavior",
     "Expand BrickColor table coverage to full Roblox named palette",

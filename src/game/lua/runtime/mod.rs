@@ -460,6 +460,8 @@ impl LuaRuntime {
                 Value::UserData(ud) => {
                     if ud.borrow::<super::instance::Instance>().is_ok() {
                         "Instance"
+                    } else if ud.borrow::<super::types::Vector2>().is_ok() {
+                        "Vector2"
                     } else if ud.borrow::<super::types::Vector3>().is_ok() {
                         "Vector3"
                     } else if ud.borrow::<super::types::CFrame>().is_ok() {
