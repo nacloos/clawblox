@@ -93,7 +93,11 @@ impl LuaRuntime {
                 .as_ref()
                 .map(|s| s.source.clone())
                 .unwrap_or_default();
-            let disabled = data.script_data.as_ref().map(|s| s.disabled).unwrap_or(false);
+            let disabled = data
+                .script_data
+                .as_ref()
+                .map(|s| s.disabled)
+                .unwrap_or(false);
             (data.id.0, source, disabled)
         };
 
