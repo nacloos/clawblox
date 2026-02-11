@@ -1,10 +1,10 @@
 use mlua::{
-    Lua, MultiValue, ObjectLike, RegistryKey, Result, Thread, ThreadStatus, UserData,
+    Function, Lua, MultiValue, ObjectLike, RegistryKey, Result, Thread, ThreadStatus, UserData,
     UserDataMethods, Value,
 };
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 use crate::game::instance::ErrorMode;
@@ -13,8 +13,8 @@ use super::animation::AnimationScheduler;
 use super::instance::{AttributeValue, Instance, InstanceData};
 use super::services::{
     register_overlap_params, register_raycast_params, AgentInput, AgentInputService,
-    DataStoreService, HttpService, PlayersService, RemoteEventService, RunService,
-    WorkspaceService,
+    DataStoreService, DebrisService, HttpService, PhysicsService, PlayersService,
+    RemoteEventService, RunService, WorkspaceService,
 };
 use super::types::register_all_types;
 use crate::game::async_bridge::AsyncBridge;
@@ -30,12 +30,49 @@ pub struct KickRequest {
     pub message: Option<String>,
 }
 
+#[derive(Default)]
+struct BindToCloseCallbacks {
+    callbacks: Vec<RegistryKey>,
+}
+
+#[derive(Clone)]
+struct RuntimeClock {
+    start_time: Instant,
+    now_secs: Arc<Mutex<f64>>,
+}
+
+impl RuntimeClock {
+    fn new() -> Self {
+        Self {
+            start_time: Instant::now(),
+            now_secs: Arc::new(Mutex::new(0.0)),
+        }
+    }
+
+    fn wall_secs(&self) -> f64 {
+        self.start_time.elapsed().as_secs_f64()
+    }
+
+    fn now(&self) -> f64 {
+        let sim = *self.now_secs.lock().unwrap();
+        sim.max(self.wall_secs())
+    }
+
+    fn advance(&self, dt_secs: f64) -> f64 {
+        let mut now = self.now_secs.lock().unwrap();
+        *now += dt_secs.max(0.0);
+        (*now).max(self.wall_secs())
+    }
+}
+
 pub struct GameDataModel {
     pub workspace: WorkspaceService,
     pub players: PlayersService,
     pub run_service: RunService,
     pub agent_input_service: AgentInputService,
     pub data_store_service: DataStoreService,
+    pub debris_service: DebrisService,
+    pub physics_service: PhysicsService,
     pub remote_event_service: RemoteEventService,
     pub server_script_service: Instance,
     pub replicated_storage: Instance,
@@ -61,6 +98,8 @@ impl GameDataModel {
             run_service: RunService::new(true),
             agent_input_service: AgentInputService::new(),
             data_store_service: DataStoreService::new(game_id, async_bridge),
+            debris_service: DebrisService::new(),
+            physics_service: PhysicsService::new(),
             remote_event_service: RemoteEventService::new(),
             server_script_service: Instance::from_data(InstanceData::new_server_script_service()),
             replicated_storage: Instance::from_data(InstanceData::new_replicated_storage()),
@@ -117,6 +156,14 @@ impl Game {
         self.data_model.lock().unwrap().remote_event_service.clone()
     }
 
+    pub fn debris_service(&self) -> DebrisService {
+        self.data_model.lock().unwrap().debris_service.clone()
+    }
+
+    pub fn physics_service(&self) -> PhysicsService {
+        self.data_model.lock().unwrap().physics_service.clone()
+    }
+
     pub fn server_script_service(&self) -> Instance {
         self.data_model
             .lock()
@@ -160,6 +207,12 @@ impl UserData for Game {
                 "DataStoreService" => Ok(Value::UserData(
                     lua.create_userdata(dm.data_store_service.clone())?,
                 )),
+                "Debris" | "DebrisService" => {
+                    Ok(Value::UserData(lua.create_userdata(dm.debris_service.clone())?))
+                }
+                "PhysicsService" => Ok(Value::UserData(
+                    lua.create_userdata(dm.physics_service.clone())?,
+                )),
                 "RemoteEventService" => Ok(Value::UserData(
                     lua.create_userdata(dm.remote_event_service.clone())?,
                 )),
@@ -185,9 +238,15 @@ impl UserData for Game {
                 "RunService" => Ok(Value::UserData(
                     lua.create_userdata(dm.run_service.clone())?,
                 )),
+                "PhysicsService" => Ok(Value::UserData(
+                    lua.create_userdata(dm.physics_service.clone())?,
+                )),
                 "RemoteEventService" => Ok(Value::UserData(
                     lua.create_userdata(dm.remote_event_service.clone())?,
                 )),
+                "Debris" | "DebrisService" => {
+                    Ok(Value::UserData(lua.create_userdata(dm.debris_service.clone())?))
+                }
                 "ServerScriptService" => Ok(Value::UserData(
                     lua.create_userdata(dm.server_script_service.clone())?,
                 )),
@@ -196,6 +255,18 @@ impl UserData for Game {
                 )),
                 _ => Ok(Value::Nil),
             }
+        });
+
+        methods.add_method("BindToClose", |lua, _this, callback: Function| {
+            let key = lua.create_registry_value(callback)?;
+            if let Some(mut existing) = lua.app_data_mut::<BindToCloseCallbacks>() {
+                existing.callbacks.push(key);
+            } else {
+                lua.set_app_data(BindToCloseCallbacks {
+                    callbacks: vec![key],
+                });
+            }
+            Ok(())
         });
     }
 }
@@ -209,8 +280,8 @@ pub struct LuaRuntime {
     pending_coroutines: Arc<Mutex<Vec<RegistryKey>>>,
     /// Tracks scripts that already executed once
     executed_scripts: Arc<Mutex<HashSet<u64>>>,
-    /// Time when the runtime was created, used for task scheduling
-    start_time: Instant,
+    /// Simulation clock used for task scheduling and time APIs (tick/task.wait).
+    runtime_clock: RuntimeClock,
 }
 
 impl LuaRuntime {
@@ -242,6 +313,47 @@ impl LuaRuntime {
                 }
                 Ok(Value::Table(table))
             }
+        }
+    }
+
+    fn json_number_to_f32(v: Option<&serde_json::Value>) -> Option<f32> {
+        v.and_then(|n| n.as_f64()).map(|n| n as f32)
+    }
+
+    fn json_to_remote_event_lua_value(lua: &Lua, value: &serde_json::Value) -> Result<Value> {
+        match value {
+            serde_json::Value::Object(obj) => {
+                let ty = obj
+                    .get("$type")
+                    .or_else(|| obj.get("__type"))
+                    .and_then(|v| v.as_str());
+
+                if let Some(ty) = ty {
+                    if ty.eq_ignore_ascii_case("Vector3") {
+                        let x = Self::json_number_to_f32(obj.get("x").or_else(|| obj.get("X")));
+                        let y = Self::json_number_to_f32(obj.get("y").or_else(|| obj.get("Y")));
+                        let z = Self::json_number_to_f32(obj.get("z").or_else(|| obj.get("Z")));
+                        if let (Some(x), Some(y), Some(z)) = (x, y, z) {
+                            let v3 = super::types::Vector3::new(x, y, z);
+                            return Ok(Value::UserData(lua.create_userdata(v3)?));
+                        }
+                    }
+                }
+
+                let table = lua.create_table()?;
+                for (k, v) in obj {
+                    table.set(k.as_str(), Self::json_to_remote_event_lua_value(lua, v)?)?;
+                }
+                Ok(Value::Table(table))
+            }
+            serde_json::Value::Array(arr) => {
+                let table = lua.create_table()?;
+                for (i, v) in arr.iter().enumerate() {
+                    table.set(i + 1, Self::json_to_remote_event_lua_value(lua, v)?)?;
+                }
+                Ok(Value::Table(table))
+            }
+            _ => Self::json_to_lua_value(lua, value),
         }
     }
 
@@ -292,6 +404,7 @@ impl LuaRuntime {
         lua.globals().set("workspace", game.workspace())?;
         lua.globals().set("Players", game.players())?;
         lua.globals().set("RunService", game.run_service())?;
+        lua.globals().set("PhysicsService", game.physics_service())?;
         lua.globals()
             .set("ReplicatedStorage", game.replicated_storage())?;
         lua.globals()
@@ -387,11 +500,12 @@ impl LuaRuntime {
         })?;
         math_table.set("random", random_fn)?;
 
-        // Time origin for tick() and task scheduling
-        let start_time = Instant::now();
+        // Simulation time origin for tick() and task scheduling
+        let runtime_clock = RuntimeClock::new();
 
         // Internal tick implementation used by legacy tick() wrapper in Lua.
-        let tick_fn = lua.create_function(move |_, ()| Ok(start_time.elapsed().as_secs_f64()))?;
+        let tick_clock = runtime_clock.clone();
+        let tick_fn = lua.create_function(move |_, ()| Ok(tick_clock.now()))?;
         lua.globals().set("__clawblox_tick_impl", tick_fn)?;
 
         // Internal tables for task scheduling (not accessible to game scripts)
@@ -409,10 +523,10 @@ impl LuaRuntime {
 
         // --- task library ---
         // Rust helper: __clawblox_schedule_wait(seconds) — schedules current thread to resume after delay
-        let schedule_wait_start = start_time;
+        let schedule_wait_clock = runtime_clock.clone();
         let schedule_wait_fn = lua.create_function(move |lua, seconds: Option<f64>| {
             let seconds = seconds.unwrap_or(0.0).max(0.0);
-            let now = schedule_wait_start.elapsed().as_secs_f64();
+            let now = schedule_wait_clock.now();
             let resume_at = now + seconds;
             let thread = lua.current_thread();
             let schedule: mlua::Table = lua.globals().get("__clawblox_thread_schedule")?;
@@ -423,8 +537,8 @@ impl LuaRuntime {
             .set("__clawblox_schedule_wait", schedule_wait_fn)?;
 
         // Rust helper: __clawblox_now() — returns elapsed seconds since start
-        let now_start = start_time;
-        let now_fn = lua.create_function(move |_, ()| Ok(now_start.elapsed().as_secs_f64()))?;
+        let now_clock = runtime_clock.clone();
+        let now_fn = lua.create_function(move |_, ()| Ok(now_clock.now()))?;
         lua.globals().set("__clawblox_now", now_fn)?;
 
         // Register the task table via Lua code that calls Rust helpers
@@ -568,6 +682,7 @@ impl LuaRuntime {
         let module_cache = Arc::new(Mutex::new(HashMap::new()));
         let loading_modules = Arc::new(Mutex::new(HashSet::new()));
         lua.set_app_data(AnimationScheduler::default());
+        lua.set_app_data(BindToCloseCallbacks::default());
 
         Self::register_require(
             &lua,
@@ -582,7 +697,7 @@ impl LuaRuntime {
             script_loaded: false,
             pending_coroutines,
             executed_scripts,
-            start_time,
+            runtime_clock,
         })
     }
 
@@ -742,7 +857,7 @@ impl LuaRuntime {
                                 .map(|items| {
                                     items
                                         .iter()
-                                        .map(|v| Self::json_to_lua_value(&self.lua, v))
+                                        .map(|v| Self::json_to_remote_event_lua_value(&self.lua, v))
                                         .collect::<Result<Vec<Value>>>()
                                 })
                                 .transpose()?
@@ -802,6 +917,19 @@ impl LuaRuntime {
         )?;
         self.track_yielded_threads(yielded_threads)?;
         Ok(())
+    }
+}
+
+impl Drop for LuaRuntime {
+    fn drop(&mut self) {
+        if let Some(callbacks) = self.lua.remove_app_data::<BindToCloseCallbacks>() {
+            for key in callbacks.callbacks {
+                if let Ok(callback) = self.lua.registry_value::<Function>(&key) {
+                    let _ = callback.call::<()>(());
+                }
+                let _ = self.lua.remove_registry_value(key);
+            }
+        }
     }
 }
 

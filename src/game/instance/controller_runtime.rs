@@ -69,6 +69,21 @@ pub(super) fn sync_move_targets(instance: &mut GameInstance) {
                     instance
                         .physics
                         .set_character_target(hrp_id, Some([target.x, target.y, target.z]));
+                } else if humanoid.move_input_direction.magnitude() > consts::EPSILON {
+                    if let Some(current) = instance.physics.get_character_position(hrp_id) {
+                        let dir = humanoid.move_input_direction.unit();
+                        // Keep a short lookahead target so Move() acts like
+                        // continuous directional locomotion.
+                        let lookahead = (humanoid.walk_speed * 0.25).max(0.5);
+                        instance.physics.set_character_target(
+                            hrp_id,
+                            Some([
+                                current[0] + dir.x * lookahead,
+                                current[1],
+                                current[2] + dir.z * lookahead,
+                            ]),
+                        );
+                    }
                 }
             }
         }

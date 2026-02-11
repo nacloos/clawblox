@@ -3,9 +3,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-use super::events::{create_signal, RBXScriptSignal};
+use super::events::{create_signal, track_yielded_threads, RBXScriptSignal};
 use super::runtime::Game;
-use super::services::WorkspaceService;
+use super::services::{PlayersService, WorkspaceService};
 use super::types::{CFrame, Color3, HumanoidStateType, Material, PartType, UDim, UDim2, Vector3};
 use crate::game::constants::humanoid as humanoid_consts;
 
@@ -63,6 +63,10 @@ pub struct InstanceData {
     pub string_value_data: Option<StringValueData>,
     pub remote_event_data: Option<RemoteEventData>,
     pub body_velocity_data: Option<BodyVelocityData>,
+    pub body_force_data: Option<BodyForceData>,
+    pub body_angular_velocity_data: Option<BodyAngularVelocityData>,
+    pub attachment_data: Option<AttachmentData>,
+    pub align_orientation_data: Option<AlignOrientationData>,
     pub property_changed_signals: HashMap<String, RBXScriptSignal>,
     pub attribute_changed_signals: HashMap<String, RBXScriptSignal>,
 
@@ -124,6 +128,8 @@ pub struct PartData {
     pub transparency: f32,
     pub color: Color3,
     pub material: Material,
+    pub top_surface: String,
+    pub bottom_surface: String,
     pub velocity: Vector3,
     pub shape: PartType,
     pub position_dirty: bool,
@@ -151,6 +157,8 @@ impl Default for PartData {
             transparency: 0.0,
             color: Color3::new(0.6, 0.6, 0.6),
             material: Material::Plastic,
+            top_surface: "Smooth".to_string(),
+            bottom_surface: "Smooth".to_string(),
             velocity: Vector3::zero(),
             shape: PartType::Block,
             position_dirty: false,
@@ -175,6 +183,8 @@ pub struct HumanoidData {
     pub auto_rotate: bool,
     pub hip_height: f32,
     pub move_direction: Vector3,
+    /// Input movement direction set by Humanoid:Move().
+    pub move_input_direction: Vector3,
     pub running_speed: f32,
     pub state: HumanoidStateType,
     /// One-shot jump request consumed by game movement update
@@ -202,6 +212,7 @@ impl Default for HumanoidData {
             auto_rotate: true,
             hip_height: humanoid_consts::DEFAULT_HIP_HEIGHT,
             move_direction: Vector3::zero(),
+            move_input_direction: Vector3::zero(),
             running_speed: 0.0,
             state: HumanoidStateType::None,
             jump_requested: false,
@@ -360,6 +371,56 @@ impl Default for BodyVelocityData {
         Self {
             velocity: Vector3::zero(),
             max_force: Vector3::zero(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BodyForceData {
+    pub force: Vector3,
+}
+
+impl Default for BodyForceData {
+    fn default() -> Self {
+        Self {
+            force: Vector3::zero(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BodyAngularVelocityData {
+    pub angular_velocity: Vector3,
+    pub max_torque: Vector3,
+}
+
+impl Default for BodyAngularVelocityData {
+    fn default() -> Self {
+        Self {
+            angular_velocity: Vector3::zero(),
+            max_torque: Vector3::zero(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AttachmentData {}
+
+#[derive(Debug, Clone)]
+pub struct AlignOrientationData {
+    pub attachment0: Option<WeakInstanceRef>,
+    pub attachment1: Option<WeakInstanceRef>,
+    pub responsiveness: f32,
+    pub rigidity_enabled: bool,
+}
+
+impl Default for AlignOrientationData {
+    fn default() -> Self {
+        Self {
+            attachment0: None,
+            attachment1: None,
+            responsiveness: 10.0,
+            rigidity_enabled: false,
         }
     }
 }
@@ -641,6 +702,10 @@ impl InstanceData {
             string_value_data: None,
             remote_event_data: None,
             body_velocity_data: None,
+            body_force_data: None,
+            body_angular_velocity_data: None,
+            attachment_data: None,
+            align_orientation_data: None,
             property_changed_signals: HashMap::new(),
             attribute_changed_signals: HashMap::new(),
             destroyed: false,
@@ -748,6 +813,30 @@ impl InstanceData {
     pub fn new_body_velocity(name: &str) -> Self {
         let mut inst = Self::new(ClassName::BodyVelocity, name);
         inst.body_velocity_data = Some(BodyVelocityData::default());
+        inst
+    }
+
+    pub fn new_body_force(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::BodyForce, name);
+        inst.body_force_data = Some(BodyForceData::default());
+        inst
+    }
+
+    pub fn new_body_angular_velocity(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::BodyAngularVelocity, name);
+        inst.body_angular_velocity_data = Some(BodyAngularVelocityData::default());
+        inst
+    }
+
+    pub fn new_attachment(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::Attachment, name);
+        inst.attachment_data = Some(AttachmentData::default());
+        inst
+    }
+
+    pub fn new_align_orientation(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::AlignOrientation, name);
+        inst.align_orientation_data = Some(AlignOrientationData::default());
         inst
     }
 
@@ -1126,6 +1215,10 @@ impl Instance {
             new_data.remote_event_data = Some(RemoteEventData::default());
         }
         new_data.body_velocity_data = data.body_velocity_data.clone();
+        new_data.body_force_data = data.body_force_data;
+        new_data.body_angular_velocity_data = data.body_angular_velocity_data;
+        new_data.attachment_data = data.attachment_data.clone();
+        new_data.align_orientation_data = data.align_orientation_data.clone();
 
         // Clone GUI data but create fresh signals to avoid sharing handlers
         if let Some(gui) = &data.gui_data {
@@ -1243,6 +1336,28 @@ impl FromLua for Instance {
     }
 }
 
+fn parent_instance_from_lua_value(parent: Value) -> Result<Option<Instance>> {
+    match parent {
+        Value::Nil => Ok(None),
+        Value::UserData(ud) => {
+            if let Ok(inst) = ud.borrow::<Instance>() {
+                Ok(Some(inst.clone()))
+            } else if let Ok(ws) = ud.borrow::<WorkspaceService>() {
+                Ok(Some(ws.instance.clone()))
+            } else if let Ok(players) = ud.borrow::<PlayersService>() {
+                Ok(Some(players.instance.clone()))
+            } else {
+                Err(mlua::Error::runtime(
+                    "Parent must be an Instance, supported Service, or nil",
+                ))
+            }
+        }
+        _ => Err(mlua::Error::runtime(
+            "Parent must be an Instance, supported Service, or nil",
+        )),
+    }
+}
+
 impl UserData for Instance {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_field_method_get("Name", |_, this| Ok(this.name()));
@@ -1258,21 +1373,8 @@ impl UserData for Instance {
 
         fields.add_field_method_get("Parent", |_, this| Ok(this.parent()));
         fields.add_field_method_set("Parent", |lua, this, parent: Value| {
-            match parent {
-                Value::Nil => {
-                    this.set_parent_with_lua(None, lua)?;
-                }
-                Value::UserData(ud) => {
-                    if let Ok(inst) = ud.borrow::<Instance>() {
-                        this.set_parent_with_lua(Some(&inst), lua)?;
-                    } else if let Ok(ws) = ud.borrow::<WorkspaceService>() {
-                        this.set_parent_with_lua(Some(&ws.instance), lua)?;
-                    } else {
-                        return Err(mlua::Error::runtime("Parent must be an Instance or nil"));
-                    }
-                }
-                _ => return Err(mlua::Error::runtime("Parent must be an Instance or nil")),
-            }
+            let parent = parent_instance_from_lua_value(parent)?;
+            this.set_parent_with_lua(parent.as_ref(), lua)?;
             Ok(())
         });
 
@@ -1492,6 +1594,42 @@ impl UserData for Instance {
             Ok(())
         });
 
+        fields.add_field_method_get("TopSurface", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.part_data.as_ref().map(|p| p.top_surface.clone()))
+        });
+        fields.add_field_method_set("TopSurface", |_, this, surface: String| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(part) = &mut data.part_data {
+                part.top_surface = surface;
+            }
+            Ok(())
+        });
+
+        fields.add_field_method_get("BottomSurface", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.part_data.as_ref().map(|p| p.bottom_surface.clone()))
+        });
+        fields.add_field_method_set("BottomSurface", |_, this, surface: String| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(part) = &mut data.part_data {
+                part.bottom_surface = surface;
+            }
+            Ok(())
+        });
+
+        fields.add_field_method_get("BrickColor", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.part_data.as_ref().map(|p| p.color))
+        });
+        fields.add_field_method_set("BrickColor", |_, this, color: Color3| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(part) = &mut data.part_data {
+                part.color = color;
+            }
+            Ok(())
+        });
+
         fields.add_field_method_get("Velocity", |_, this| {
             let data = this.data.lock().unwrap();
             if let Some(bv) = &data.body_velocity_data {
@@ -1532,6 +1670,112 @@ impl UserData for Instance {
             let mut data = this.data.lock().unwrap();
             if let Some(bv) = &mut data.body_velocity_data {
                 bv.max_force = max_force;
+            }
+            Ok(())
+        });
+
+        fields.add_field_method_get("Force", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.body_force_data.as_ref().map(|bf| bf.force))
+        });
+        fields.add_field_method_set("Force", |_, this, force: Vector3| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(bf) = &mut data.body_force_data {
+                bf.force = force;
+            }
+            Ok(())
+        });
+
+        fields.add_field_method_get("AngularVelocity", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data
+                .body_angular_velocity_data
+                .as_ref()
+                .map(|bav| bav.angular_velocity))
+        });
+        fields.add_field_method_set("AngularVelocity", |_, this, angular_velocity: Vector3| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(bav) = &mut data.body_angular_velocity_data {
+                bav.angular_velocity = angular_velocity;
+            }
+            Ok(())
+        });
+
+        fields.add_field_method_get("MaxTorque", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data
+                .body_angular_velocity_data
+                .as_ref()
+                .map(|bav| bav.max_torque))
+        });
+        fields.add_field_method_set("MaxTorque", |_, this, max_torque: Vector3| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(bav) = &mut data.body_angular_velocity_data {
+                bav.max_torque = max_torque;
+            }
+            Ok(())
+        });
+
+        fields.add_field_method_get("Attachment0", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data
+                .align_orientation_data
+                .as_ref()
+                .and_then(|a| a.attachment0.as_ref())
+                .and_then(|w| w.upgrade())
+                .map(Instance::from_ref))
+        });
+        fields.add_field_method_set("Attachment0", |_, this, attachment: Option<Instance>| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(align) = &mut data.align_orientation_data {
+                align.attachment0 = attachment.as_ref().map(|a| Arc::downgrade(&a.data));
+            }
+            Ok(())
+        });
+
+        fields.add_field_method_get("Attachment1", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data
+                .align_orientation_data
+                .as_ref()
+                .and_then(|a| a.attachment1.as_ref())
+                .and_then(|w| w.upgrade())
+                .map(Instance::from_ref))
+        });
+        fields.add_field_method_set("Attachment1", |_, this, attachment: Option<Instance>| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(align) = &mut data.align_orientation_data {
+                align.attachment1 = attachment.as_ref().map(|a| Arc::downgrade(&a.data));
+            }
+            Ok(())
+        });
+
+        fields.add_field_method_get("Responsiveness", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data
+                .align_orientation_data
+                .as_ref()
+                .map(|a| a.responsiveness))
+        });
+        fields.add_field_method_set("Responsiveness", |_, this, responsiveness: f32| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(align) = &mut data.align_orientation_data {
+                align.responsiveness = responsiveness;
+            }
+            Ok(())
+        });
+
+        fields.add_field_method_get("RigidityEnabled", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data
+                .align_orientation_data
+                .as_ref()
+                .map(|a| a.rigidity_enabled))
+        });
+        fields.add_field_method_set("RigidityEnabled", |_, this, enabled: bool| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(align) = &mut data.align_orientation_data {
+                align.rigidity_enabled = enabled;
             }
             Ok(())
         });
@@ -1817,6 +2061,62 @@ impl UserData for Instance {
                 .and_then(|p| p.character.as_ref())
                 .and_then(|w| w.upgrade())
                 .map(Instance::from_ref))
+        });
+        fields.add_field_method_set("Character", |lua, this, character: Option<Instance>| {
+            // Roblox parity: Player.Character is writable from Lua and emits
+            // CharacterRemoving(old) followed by CharacterAdded(new) on transitions.
+            let (old_character, new_character, character_added, character_removing) = {
+                let mut data = this.data.lock().unwrap();
+                let Some(player_data) = &mut data.player_data else {
+                    return Ok(());
+                };
+
+                let old_character = player_data
+                    .character
+                    .as_ref()
+                    .and_then(|w| w.upgrade())
+                    .map(Instance::from_ref);
+                let new_character = character.clone();
+
+                player_data.character = character.as_ref().map(|c| Arc::downgrade(&c.data));
+
+                (
+                    old_character,
+                    new_character,
+                    player_data.character_added.clone(),
+                    player_data.character_removing.clone(),
+                )
+            };
+
+            let same_character = match (&old_character, &new_character) {
+                (Some(old_char), Some(new_char)) => {
+                    old_char.data.lock().unwrap().id == new_char.data.lock().unwrap().id
+                }
+                (None, None) => true,
+                _ => false,
+            };
+
+            if same_character {
+                return Ok(());
+            }
+
+            if let Some(old_char) = old_character {
+                let threads = character_removing.fire_as_coroutines(
+                    lua,
+                    mlua::MultiValue::from_iter([Value::UserData(lua.create_userdata(old_char)?)]),
+                )?;
+                track_yielded_threads(lua, threads)?;
+            }
+
+            if let Some(new_char) = new_character {
+                let threads = character_added.fire_as_coroutines(
+                    lua,
+                    mlua::MultiValue::from_iter([Value::UserData(lua.create_userdata(new_char)?)]),
+                )?;
+                track_yielded_threads(lua, threads)?;
+            }
+
+            Ok(())
         });
 
         fields.add_field_method_get("AnimationId", |_, this| {
@@ -2480,9 +2780,30 @@ impl UserData for Instance {
             Ok(this.find_first_child_of_class(&class_name))
         });
 
+        methods.add_method(
+            "FindFirstChildWhichIsA",
+            |_, this, (class_name, recursive): (String, Option<bool>)| {
+                if recursive.unwrap_or(false) {
+                    Ok(this
+                        .get_descendants()
+                        .into_iter()
+                        .find(|child| child.is_a(&class_name)))
+                } else {
+                    Ok(this
+                        .get_children()
+                        .into_iter()
+                        .find(|child| child.is_a(&class_name)))
+                }
+            },
+        );
+
         methods.add_method("GetChildren", |_, this, ()| Ok(this.get_children()));
 
         methods.add_method("GetDescendants", |_, this, ()| Ok(this.get_descendants()));
+
+        methods.add_method("GetDebugId", |_, this, _scope_length: Option<u32>| {
+            Ok(format!("RBX{:016x}", this.id().0))
+        });
 
         methods.add_method("IsA", |_, this, class_name: String| {
             Ok(this.is_a(&class_name))
@@ -2669,10 +2990,13 @@ impl UserData for Instance {
             Ok(())
         });
 
-        methods.add_method(
-            "Move",
-            |_, _this, (_direction, _relative): (Vector3, Option<bool>)| Ok(()),
-        );
+        methods.add_method("Move", |_, this, (direction, _relative): (Vector3, Option<bool>)| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(humanoid) = &mut data.humanoid_data {
+                humanoid.move_input_direction = direction;
+            }
+            Ok(())
+        });
 
         methods.add_method(
             "MoveTo",
@@ -2792,6 +3116,72 @@ impl UserData for Instance {
                     }
                 }
             }
+            Ok(())
+        });
+
+        methods.add_method("GetMass", |_, this, ()| {
+            let data = this.data.lock().unwrap();
+            let Some(part) = &data.part_data else {
+                return Err(mlua::Error::runtime(
+                    "GetMass is only supported on BasePart",
+                ));
+            };
+
+            let density = match part.material {
+                Material::Wood => 0.35,
+                Material::Metal => 0.7,
+                Material::Glass => 0.6,
+                Material::Neon => 0.7,
+                Material::Concrete => 0.7,
+                Material::Brick => 0.7,
+                Material::Granite => 0.7,
+                Material::Grass => 0.7,
+                Material::Ice => 0.65,
+                Material::Sand => 0.65,
+                Material::Fabric => 0.3,
+                Material::Marble => 0.7,
+                Material::Slate => 0.7,
+                Material::SmoothPlastic => 0.7,
+                Material::ForceField => 0.0,
+                Material::Plastic => 0.7,
+            };
+
+            let sx = part.size.x.max(0.0);
+            let sy = part.size.y.max(0.0);
+            let sz = part.size.z.max(0.0);
+            let volume = match part.shape {
+                PartType::Block => sx * sy * sz,
+                PartType::Wedge => 0.5 * sx * sy * sz,
+                PartType::Ball => {
+                    let r = sx * 0.5;
+                    (4.0 / 3.0) * std::f32::consts::PI * r * r * r
+                }
+                PartType::Cylinder => {
+                    let r = sx * 0.5;
+                    std::f32::consts::PI * r * r * sy
+                }
+            };
+            Ok(volume * density)
+        });
+
+        methods.add_method("SetNetworkOwner", |_, this, _owner: Value| {
+            if this.data.lock().unwrap().part_data.is_none() {
+                return Err(mlua::Error::runtime(
+                    "SetNetworkOwner is only supported on BasePart",
+                ));
+            }
+            // Roblox parity: server scripts often force server ownership with nil.
+            // Clawblox runs authoritative server simulation, so ownership is a no-op.
+            Ok(())
+        });
+
+        methods.add_method("SetNetworkOwnershipAuto", |_, this, _enabled: Option<bool>| {
+            if this.data.lock().unwrap().part_data.is_none() {
+                return Err(mlua::Error::runtime(
+                    "SetNetworkOwnershipAuto is only supported on BasePart",
+                ));
+            }
+            // Same parity rationale as SetNetworkOwner: network ownership is not modeled yet.
             Ok(())
         });
 
@@ -2919,7 +3309,7 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
     instance_table.set(
         "new",
         lua.create_function(
-            |_, (class_name, parent): (String, Option<Instance>)| -> Result<Instance> {
+            |_, (class_name, parent): (String, Value)| -> Result<Instance> {
                 let instance = match class_name.as_str() {
                     "Part" => Instance::from_data(InstanceData::new_part("Part")),
                     "Model" => Instance::from_data(InstanceData::new_model("Model")),
@@ -2948,6 +3338,18 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
                     "BodyVelocity" => {
                         Instance::from_data(InstanceData::new_body_velocity("BodyVelocity"))
                     }
+                    "BodyForce" => {
+                        Instance::from_data(InstanceData::new_body_force("BodyForce"))
+                    }
+                    "BodyAngularVelocity" => Instance::from_data(
+                        InstanceData::new_body_angular_velocity("BodyAngularVelocity"),
+                    ),
+                    "Attachment" => {
+                        Instance::from_data(InstanceData::new_attachment("Attachment"))
+                    }
+                    "AlignOrientation" => Instance::from_data(
+                        InstanceData::new_align_orientation("AlignOrientation"),
+                    ),
                     // Constraints
                     "Weld" => Instance::from_data(InstanceData::new_weld("Weld")),
                     // 3D GUI
@@ -2976,9 +3378,8 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
                     }
                 };
 
-                if let Some(parent) = parent {
-                    instance.set_parent(Some(&parent));
-                }
+                let parent = parent_instance_from_lua_value(parent)?;
+                instance.set_parent(parent.as_ref());
 
                 Ok(instance)
             },

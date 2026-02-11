@@ -347,6 +347,14 @@ pub fn register_enums(lua: &Lua) -> Result<()> {
     part_type_table.set("Wedge", PartType::Wedge)?;
     enum_table.set("PartType", part_type_table)?;
 
+    // Legacy alias used by older Roblox scripts.
+    let part_shape_table = lua.create_table()?;
+    part_shape_table.set("Ball", PartType::Ball)?;
+    part_shape_table.set("Block", PartType::Block)?;
+    part_shape_table.set("Cylinder", PartType::Cylinder)?;
+    part_shape_table.set("Wedge", PartType::Wedge)?;
+    enum_table.set("PartShape", part_shape_table)?;
+
     let material_table = lua.create_table()?;
     material_table.set("Plastic", Material::Plastic)?;
     material_table.set("Wood", Material::Wood)?;
@@ -402,6 +410,19 @@ pub fn register_enums(lua: &Lua) -> Result<()> {
     font_table.set("SourceSans", "SourceSans")?;
     font_table.set("SourceSansBold", "SourceSansBold")?;
     enum_table.set("Font", font_table)?;
+
+    let surface_type_table = lua.create_table()?;
+    surface_type_table.set("Smooth", "Smooth")?;
+    surface_type_table.set("Studs", "Studs")?;
+    surface_type_table.set("Inlet", "Inlet")?;
+    surface_type_table.set("Universal", "Universal")?;
+    surface_type_table.set("Weld", "Weld")?;
+    surface_type_table.set("Glue", "Glue")?;
+    surface_type_table.set("Hinge", "Hinge")?;
+    surface_type_table.set("Motor", "Motor")?;
+    surface_type_table.set("SteppingMotor", "SteppingMotor")?;
+    surface_type_table.set("SmoothNoOutlines", "SmoothNoOutlines")?;
+    enum_table.set("SurfaceType", surface_type_table)?;
 
     lua.globals().set("Enum", enum_table)?;
 

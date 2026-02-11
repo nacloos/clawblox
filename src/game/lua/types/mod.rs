@@ -1,3 +1,4 @@
+pub mod brick_color;
 pub mod cframe;
 pub mod color3;
 pub mod enums;
@@ -18,6 +19,7 @@ pub fn register_all_types(lua: &Lua) -> Result<()> {
     vector3::register_vector3(lua)?;
     cframe::register_cframe(lua)?;
     color3::register_color3(lua)?;
+    brick_color::register_brick_color(lua)?;
     enums::register_enums(lua)?;
     udim::register_udim(lua)?;
     udim2::register_udim2(lua)?;

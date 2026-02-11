@@ -4,7 +4,7 @@ impl LuaRuntime {
     /// Resumes all pending coroutines and removes completed ones.
     /// Checks cancelled threads, scheduled times, and thread args before resuming.
     pub(super) fn resume_pending_coroutines(&self) -> Result<()> {
-        let now = self.start_time.elapsed().as_secs_f64();
+        let now = self.runtime_clock.now();
 
         // Get internal tables
         let schedule: mlua::Table = self.lua.globals().get("__clawblox_thread_schedule")?;

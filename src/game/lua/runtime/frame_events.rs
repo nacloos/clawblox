@@ -11,6 +11,12 @@ impl LuaRuntime {
     pub fn begin_frame(&self, delta_time: f32) -> Result<()> {
         self.discover_and_run_scripts()?;
 
+        let now = self.runtime_clock.advance(delta_time as f64);
+
+        // Process Debris timers before running frame logic.
+        // This gives AddItem lifetimes deterministic frame-bound semantics.
+        self.game.debris_service().process_expired(&self.lua, now)?;
+
         if let Some(scheduler) = self.lua.app_data_ref::<AnimationScheduler>() {
             scheduler.tick(&self.lua, delta_time)?;
         }
@@ -20,7 +26,6 @@ impl LuaRuntime {
 
         // 2. Fire Stepped as coroutines (Roblox pre-physics event)
         let stepped = self.game.run_service().stepped();
-        let now = self.start_time.elapsed().as_secs_f64();
         let yielded_threads = stepped.fire_as_coroutines(
             &self.lua,
             MultiValue::from_iter([Value::Number(now), Value::Number(delta_time as f64)]),

@@ -1890,6 +1890,65 @@ mod tests {
     }
 
     #[test]
+    fn test_player_move_direction_via_lua_input() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(
+            r#"
+            local AgentInputService = game:GetService("AgentInputService")
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(100, 1, 100)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            if AgentInputService then
+                AgentInputService.InputReceived:Connect(function(player, inputType, data)
+                    if inputType == "Move" and data and data.direction then
+                        local humanoid = player.Character and player.Character:FindFirstChild("Humanoid")
+                        if humanoid then
+                            local dir = data.direction
+                            humanoid:Move(Vector3.new(dir[1], dir[2], dir[3]), false)
+                        end
+                    end
+                end)
+            end
+        "#,
+        );
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "MovePlayer"));
+        let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+        let user_id = *instance.players.get(&agent_id).unwrap();
+
+        let initial_pos = instance.physics.get_character_position(hrp_id).unwrap();
+
+        // Feed directional Move() input for ~2 seconds.
+        for _ in 0..120 {
+            instance.queue_agent_input(
+                user_id,
+                "Move".to_string(),
+                serde_json::json!({ "direction": [1.0, 0.0, 0.0] }),
+            );
+            instance.tick();
+        }
+
+        let final_pos = instance.physics.get_character_position(hrp_id).unwrap();
+        let moved_x = final_pos[0] - initial_pos[0];
+        let moved_z = final_pos[2] - initial_pos[2];
+        let horizontal_distance = (moved_x * moved_x + moved_z * moved_z).sqrt();
+
+        assert!(
+            horizontal_distance > 8.0,
+            "Player should move with Humanoid:Move input. Initial={:?} Final={:?}",
+            initial_pos,
+            final_pos
+        );
+    }
+
+    #[test]
     fn test_humanoid_jump_input_moves_character_upward() {
         let mut instance = GameInstance::new(Uuid::new_v4(), None);
 
@@ -2764,6 +2823,79 @@ mod tests {
 
         // Player should be removed
         assert_eq!(instance.players.len(), 0, "Player should have been kicked");
+    }
+
+    #[test]
+    fn test_player_added_can_assign_player_character_roblox_parity() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(
+            r#"
+            local Players = game:GetService("Players")
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(100, 1, 100)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            local function createCharacter(player)
+                local character = Instance.new("Model")
+                character.Name = player.Name
+
+                local hrp = Instance.new("Part")
+                hrp.Name = "HumanoidRootPart"
+                hrp.Size = Vector3.new(2, 2, 1)
+                hrp.Anchored = false
+                hrp.Parent = character
+
+                local humanoid = Instance.new("Humanoid")
+                humanoid.Parent = character
+
+                character.Parent = Workspace
+                -- Roblox parity: Player.Character assignment in PlayerAdded callback.
+                player.Character = character
+            end
+
+            Players.PlayerAdded:Connect(function(player)
+                createCharacter(player)
+            end)
+        "#,
+        );
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "ParityPlayer"));
+        assert!(
+            instance.halted_error.is_none(),
+            "Instance should not halt when Player.Character is assigned in PlayerAdded: {:?}",
+            instance.halted_error
+        );
+
+        for _ in 0..3 {
+            instance.tick();
+        }
+
+        if let Some(runtime) = &instance.lua_runtime {
+            let user_id = *instance.players.get(&agent_id).unwrap();
+            let player = runtime
+                .players()
+                .get_player_by_user_id(user_id)
+                .expect("player should exist");
+            let character = {
+                let data = player.data.lock().unwrap();
+                data.player_data
+                    .as_ref()
+                    .and_then(|p| p.character.as_ref())
+                    .and_then(|w| w.upgrade())
+            };
+            assert!(
+                character.is_some(),
+                "player.Character should be set by PlayerAdded callback"
+            );
+        } else {
+            panic!("Lua runtime should be loaded");
+        }
     }
 
     #[test]

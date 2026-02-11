@@ -904,6 +904,52 @@ fn test_player_has_character() {
 }
 
 #[test]
+fn test_player_character_assignment_fires_character_signals() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local player = Instance.new("Player")
+            local first = Instance.new("Model")
+            first.Name = "FirstCharacter"
+            local second = Instance.new("Model")
+            second.Name = "SecondCharacter"
+
+            _G.addedCount = 0
+            _G.removingCount = 0
+            _G.lastAddedName = ""
+            _G.lastRemovingName = ""
+
+            player.CharacterAdded:Connect(function(character)
+                _G.addedCount = _G.addedCount + 1
+                _G.lastAddedName = character.Name
+            end)
+
+            player.CharacterRemoving:Connect(function(character)
+                _G.removingCount = _G.removingCount + 1
+                _G.lastRemovingName = character.Name
+            end)
+
+            player.Character = first
+            player.Character = second
+            player.Character = nil
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let added_count: i64 = globals.get("addedCount").unwrap();
+    let removing_count: i64 = globals.get("removingCount").unwrap();
+    let last_added_name: String = globals.get("lastAddedName").unwrap();
+    let last_removing_name: String = globals.get("lastRemovingName").unwrap();
+
+    assert_eq!(added_count, 2);
+    assert_eq!(removing_count, 2);
+    assert_eq!(last_added_name, "SecondCharacter");
+    assert_eq!(last_removing_name, "SecondCharacter");
+}
+
+#[test]
 fn test_task_spawn() {
     let mut runtime = test_runtime();
     runtime
@@ -1157,6 +1203,48 @@ fn test_instance_new_unknown_class_errors() {
 }
 
 #[test]
+fn test_instance_new_accepts_workspace_service_parent() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local ws = game:GetService("Workspace")
+            local folder = Instance.new("Folder", ws)
+            folder.Name = "FromInstanceNewParentArg"
+            _G.parentName = folder.Parent and folder.Parent.Name or ""
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let parent_name: String = globals.get("parentName").unwrap();
+    assert_eq!(parent_name, "Workspace");
+}
+
+#[test]
+fn test_workspace_child_access_via_property_index() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local folder = Instance.new("Folder")
+            folder.Name = "TokensFolder"
+            folder.Parent = Workspace
+
+            _G.childExists = Workspace.TokensFolder ~= nil
+            _G.childCount = Workspace.TokensFolder and #Workspace.TokensFolder:GetChildren() or -1
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let child_exists: bool = globals.get("childExists").unwrap();
+    let child_count: i64 = globals.get("childCount").unwrap();
+    assert!(child_exists, "Workspace.TokensFolder should resolve via __index");
+    assert_eq!(child_count, 0);
+}
+
+#[test]
 fn test_attribute_and_property_changed_signals() {
     let mut runtime = test_runtime();
     runtime
@@ -1355,6 +1443,70 @@ fn test_remote_event_on_server_event_from_agent_input() {
 }
 
 #[test]
+fn test_remote_event_typed_vector3_parity_from_agent_input() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local rs = game:GetService("ReplicatedStorage")
+            local remote = Instance.new("RemoteEvent")
+            remote.Name = "PlayerInput"
+            remote.Parent = rs
+
+            _G.remoteHit = false
+            _G.argType = nil
+            _G.argX = nil
+            _G.argY = nil
+            _G.argZ = nil
+
+            remote.OnServerEvent:Connect(function(_player, direction)
+                _G.remoteHit = true
+                _G.argType = typeof(direction)
+                if typeof(direction) == "Vector3" then
+                    _G.argX = direction.X
+                    _G.argY = direction.Y
+                    _G.argZ = direction.Z
+                end
+            end)
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let (_player, _hrp_id) = runtime.add_player(123, "Tester");
+    runtime.queue_agent_input(
+        123,
+        AgentInput::new(
+            "RemoteEvent".to_string(),
+            serde_json::json!({
+                "name": "PlayerInput",
+                "args": [{
+                    "$type": "Vector3",
+                    "x": 1.5,
+                    "y": 0.0,
+                    "z": -2.25
+                }]
+            }),
+        ),
+    );
+    runtime
+        .process_agent_inputs()
+        .expect("Failed to process agent inputs");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let hit: bool = globals.get("remoteHit").unwrap();
+    let arg_type: String = globals.get("argType").unwrap();
+    let arg_x: f64 = globals.get("argX").unwrap();
+    let arg_y: f64 = globals.get("argY").unwrap();
+    let arg_z: f64 = globals.get("argZ").unwrap();
+
+    assert!(hit, "OnServerEvent should fire");
+    assert_eq!(arg_type, "Vector3");
+    assert!((arg_x - 1.5).abs() < 1e-6);
+    assert!(arg_y.abs() < 1e-6);
+    assert!((arg_z + 2.25).abs() < 1e-6);
+}
+
+#[test]
 fn test_int_value_value_and_changed_signal() {
     let mut runtime = test_runtime();
     runtime
@@ -1445,4 +1597,306 @@ fn test_body_velocity_applies_to_parent_part_velocity() {
     let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
     let vz: f32 = globals.get("vz").unwrap();
     assert!((vz + 70.0).abs() < 0.001);
+}
+
+#[test]
+fn test_body_force_class_and_force_property() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local bf = Instance.new("BodyForce")
+            bf.Force = Vector3.new(0, 123.5, 0)
+            _G.isBodyMover = bf:IsA("BodyMover")
+            _G.forceY = bf.Force.Y
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let is_body_mover: bool = globals.get("isBodyMover").unwrap();
+    let force_y: f64 = globals.get("forceY").unwrap();
+    assert!(is_body_mover);
+    assert!((force_y - 123.5).abs() < 1e-6);
+}
+
+#[test]
+fn test_set_network_owner_methods_exist_on_part() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local p = Instance.new("Part")
+            p.Parent = Workspace
+            p:SetNetworkOwner(nil)
+            p:SetNetworkOwnershipAuto(true)
+            _G.ok = true
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let ok: bool = globals.get("ok").unwrap();
+    assert!(ok);
+}
+
+#[test]
+fn test_part_get_mass_exists_and_returns_positive_for_nonzero_part() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local p = Instance.new("Part")
+            p.Size = Vector3.new(4, 2, 6)
+            _G.mass = p:GetMass()
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let mass: f64 = globals.get("mass").unwrap();
+    assert!(mass > 0.0);
+}
+
+#[test]
+fn test_brickcolor_and_surfacetype_parity_basics() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local p = Instance.new("Part")
+            p.BrickColor = BrickColor.new("Bright yellow")
+            p.TopSurface = Enum.SurfaceType.Smooth
+            p.BottomSurface = Enum.SurfaceType.Smooth
+
+            _G.top = p.TopSurface
+            _G.bottom = p.BottomSurface
+            _G.colorR = p.Color.R
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let top: String = globals.get("top").unwrap();
+    let bottom: String = globals.get("bottom").unwrap();
+    let color_r: f64 = globals.get("colorR").unwrap();
+    assert_eq!(top, "Smooth");
+    assert_eq!(bottom, "Smooth");
+    assert!(color_r > 0.7, "BrickColor should map to a visible color");
+}
+
+#[test]
+fn test_enum_partshape_alias_maps_to_part_type() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local p = Instance.new("Part")
+            p.Shape = Enum.PartShape.Ball
+            _G.shapeName = p.Shape.Name
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let shape_name: String = globals.get("shapeName").unwrap();
+    assert_eq!(shape_name, "Ball");
+}
+
+#[test]
+fn test_game_bind_to_close_api_exists() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local ok, err = pcall(function()
+                game:BindToClose(function() end)
+            end)
+            _G.ok = ok
+            _G.err = tostring(err)
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let ok: bool = globals.get("ok").unwrap();
+    let err: String = globals.get("err").unwrap();
+    assert!(ok, "BindToClose should be callable, err={}", err);
+}
+
+#[test]
+fn test_instance_get_debug_id_returns_stable_string() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local p = Instance.new("Part")
+            _G.id1 = p:GetDebugId()
+            _G.id2 = p:GetDebugId(5)
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let id1: String = globals.get("id1").unwrap();
+    let id2: String = globals.get("id2").unwrap();
+    assert!(!id1.is_empty());
+    assert_eq!(id1, id2);
+    assert!(id1.starts_with("RBX"));
+}
+
+#[test]
+fn test_constraint_shim_classes_can_be_created_and_configured() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local p = Instance.new("Part")
+            p.Parent = Workspace
+
+            local a0 = Instance.new("Attachment", p)
+            local a1 = Instance.new("Attachment")
+            a1.Parent = p
+
+            local align = Instance.new("AlignOrientation")
+            align.Attachment0 = a0
+            align.Attachment1 = a1
+            align.Responsiveness = 200
+            align.RigidityEnabled = true
+            align.Parent = p
+
+            local bav = Instance.new("BodyAngularVelocity")
+            bav.AngularVelocity = Vector3.new(0, 1, 0)
+            bav.MaxTorque = Vector3.new(0, 999, 0)
+            bav.Parent = p
+
+            _G.responsive = align.Responsiveness
+            _G.rigid = align.RigidityEnabled
+            _G.maxTorqueY = bav.MaxTorque.Y
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let responsive: f64 = globals.get("responsive").unwrap();
+    let rigid: bool = globals.get("rigid").unwrap();
+    let max_torque_y: f64 = globals.get("maxTorqueY").unwrap();
+    assert!((responsive - 200.0).abs() < 1e-6);
+    assert!(rigid);
+    assert!((max_torque_y - 999.0).abs() < 1e-6);
+}
+
+#[test]
+fn test_find_first_child_which_is_a_finds_humanoid_child() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local model = Instance.new("Model")
+            local hum = Instance.new("Humanoid")
+            hum.Parent = model
+            local found = model:FindFirstChildWhichIsA("Humanoid")
+            _G.foundName = found and found.ClassName or ""
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let found_name: String = globals.get("foundName").unwrap();
+    assert_eq!(found_name, "Humanoid");
+}
+
+#[test]
+fn test_debris_service_add_item_api_exists() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local Debris = game:GetService("Debris")
+            local p = Instance.new("Part")
+            p.Parent = Workspace
+            Debris:AddItem(p, 2)
+            _G.ok = true
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let ok: bool = globals.get("ok").unwrap();
+    assert!(ok);
+}
+
+#[test]
+fn test_debris_service_alias_resolves() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local byClass = game:GetService("Debris")
+            local byAlias = game:GetService("DebrisService")
+            local byIndex = game.DebrisService
+            _G.ok = (byClass ~= nil) and (byAlias ~= nil) and (byIndex ~= nil)
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let ok: bool = globals.get("ok").unwrap();
+    assert!(ok);
+}
+
+#[test]
+fn test_physics_service_api_exists() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local PhysicsService = game:GetService("PhysicsService")
+            local p = Instance.new("Part")
+            PhysicsService:RegisterCollisionGroup("Players")
+            PhysicsService:CollisionGroupSetCollidable("Players", "Players", true)
+            PhysicsService:SetPartCollisionGroup(p, "Players")
+            _G.ok = PhysicsService ~= nil
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let ok: bool = globals.get("ok").unwrap();
+    assert!(ok);
+}
+
+#[test]
+fn test_debris_add_item_destroys_after_lifetime() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local Debris = game:GetService("Debris")
+            local p = Instance.new("Part")
+            p.Name = "DebrisVictim"
+            p.Parent = Workspace
+            Debris:AddItem(p, 0.01)
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let exists_before = runtime
+        .workspace()
+        .get_descendants()
+        .into_iter()
+        .any(|i| i.name() == "DebrisVictim");
+    assert!(exists_before, "Debris victim should exist before frame processing");
+
+    runtime.tick(1.0 / 60.0).expect("Failed to tick");
+
+    let exists_after = runtime
+        .workspace()
+        .get_descendants()
+        .into_iter()
+        .any(|i| i.name() == "DebrisVictim");
+    assert!(
+        !exists_after,
+        "Debris victim should be destroyed after lifetime elapsed"
+    );
 }

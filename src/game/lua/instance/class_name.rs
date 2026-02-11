@@ -25,6 +25,10 @@ pub enum ClassName {
     Weld,
     RemoteEvent,
     BodyVelocity,
+    BodyForce,
+    BodyAngularVelocity,
+    Attachment,
+    AlignOrientation,
     // GUI classes
     BillboardGui,
     PlayerGui,
@@ -64,6 +68,10 @@ impl ClassName {
             ClassName::Weld => "Weld",
             ClassName::RemoteEvent => "RemoteEvent",
             ClassName::BodyVelocity => "BodyVelocity",
+            ClassName::BodyForce => "BodyForce",
+            ClassName::BodyAngularVelocity => "BodyAngularVelocity",
+            ClassName::Attachment => "Attachment",
+            ClassName::AlignOrientation => "AlignOrientation",
             ClassName::BillboardGui => "BillboardGui",
             ClassName::PlayerGui => "PlayerGui",
             ClassName::ScreenGui => "ScreenGui",
@@ -111,7 +119,14 @@ impl ClassName {
             "Weld" => matches!(self, ClassName::Weld),
             "RemoteEvent" => matches!(self, ClassName::RemoteEvent),
             "BodyVelocity" => matches!(self, ClassName::BodyVelocity),
-            "BodyMover" => matches!(self, ClassName::BodyVelocity),
+            "BodyForce" => matches!(self, ClassName::BodyForce),
+            "BodyAngularVelocity" => matches!(self, ClassName::BodyAngularVelocity),
+            "Attachment" => matches!(self, ClassName::Attachment),
+            "AlignOrientation" => matches!(self, ClassName::AlignOrientation),
+            "BodyMover" => matches!(
+                self,
+                ClassName::BodyVelocity | ClassName::BodyForce | ClassName::BodyAngularVelocity
+            ),
             // BillboardGui (3D GUI attached to parts)
             "BillboardGui" => matches!(self, ClassName::BillboardGui),
             // GUI hierarchy: GuiBase2d is base for all 2D GUI elements

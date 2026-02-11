@@ -1029,5 +1029,9 @@ impl UserData for WorkspaceService {
         methods.add_method("FindFirstChildOfClass", |_, this, class_name: String| {
             Ok(this.instance.find_first_child_of_class(&class_name))
         });
+
+        methods.add_meta_method(mlua::MetaMethod::Index, |_, this, key: String| {
+            Ok(this.instance.find_first_child(&key, false))
+        });
     }
 }

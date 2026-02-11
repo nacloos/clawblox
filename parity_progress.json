@@ -1,0 +1,268 @@
+{
+  "report_version": "1.0",
+  "generated_at": "2026-02-11",
+  "scope": {
+    "runtime": "clawblox",
+    "workstream": "Roblox parity",
+    "source_context": "latest run logs + implemented runtime changes"
+  },
+  "status_legend": {
+    "full": "API and core behavior aligned for current use-cases",
+    "approximate": "API present with behavior close to Roblox but not engine-identical",
+    "api_only": "API exists primarily as shim/stub; behavior is limited/no-op",
+    "missing": "Not implemented or known to be incomplete"
+  },
+  "summary": {
+    "full": 13,
+    "approximate": 3,
+    "api_only": 5,
+    "missing": 4,
+    "overall_progress_percent": 76
+  },
+  "features": [
+    {
+      "id": "player.character_setter",
+      "area": "Players",
+      "status": "full",
+      "api": ["Player.Character (set/get)", "Player.CharacterAdded", "Player.CharacterRemoving"],
+      "notes": "Setter works from Lua and emits transitions in expected order."
+    },
+    {
+      "id": "instance_new_parent_service",
+      "area": "Instance",
+      "status": "full",
+      "api": ["Instance.new(className, parent)"] ,
+      "notes": "Accepts Instance and service userdata parents (e.g., Workspace)."
+    },
+    {
+      "id": "workspace_child_property_index",
+      "area": "Workspace",
+      "status": "full",
+      "api": ["Workspace.ChildName via __index"],
+      "notes": "Child lookup by property name supported."
+    },
+    {
+      "id": "remote_event_input_bridge",
+      "area": "Networking",
+      "status": "approximate",
+      "api": ["ReplicatedStorage", "RemoteEvent.OnServerEvent"],
+      "notes": "Server-side flow works for supported payloads; transport is Clawblox-specific."
+    },
+    {
+      "id": "set_network_owner",
+      "area": "Physics/Replication",
+      "status": "api_only",
+      "api": ["BasePart:SetNetworkOwner", "BasePart:SetNetworkOwnershipAuto"],
+      "notes": "Exposed as server-authoritative no-op. Full Roblox network ownership model not implemented.",
+      "behavioral_parity_limit": true
+    },
+    {
+      "id": "body_force",
+      "area": "Physics",
+      "status": "approximate",
+      "api": ["Instance.new('BodyForce')", "BodyForce.Force"],
+      "notes": "Class and properties available. Detailed force integration semantics may differ."
+    },
+    {
+      "id": "body_velocity",
+      "area": "Physics",
+      "status": "approximate",
+      "api": ["Instance.new('BodyVelocity')", "BodyVelocity.Velocity", "BodyVelocity.MaxForce"],
+      "notes": "Compatibility path present; not guaranteed identical to Roblox solver behavior."
+    },
+    {
+      "id": "get_mass",
+      "area": "Physics",
+      "status": "full",
+      "api": ["BasePart:GetMass"],
+      "notes": "Implemented with shape/material-based mass estimate suitable for current scripts."
+    },
+    {
+      "id": "brickcolor_global",
+      "area": "Types",
+      "status": "full",
+      "api": ["BrickColor.new", "BrickColor.Random", "Part.BrickColor"],
+      "notes": "String-name constructor and property interop available for common names."
+    },
+    {
+      "id": "surface_type",
+      "area": "Enums",
+      "status": "full",
+      "api": ["Enum.SurfaceType", "Part.TopSurface", "Part.BottomSurface"],
+      "notes": "Smooth and related enum keys exposed; property assignments supported."
+    },
+    {
+      "id": "part_shape_alias",
+      "area": "Enums",
+      "status": "full",
+      "api": ["Enum.PartShape"],
+      "notes": "Legacy alias mapped to PartType values."
+    },
+    {
+      "id": "bind_to_close",
+      "area": "Lifecycle",
+      "status": "api_only",
+      "api": ["game:BindToClose"],
+      "notes": "Callback registration implemented and invoked on runtime teardown; shutdown timing differs from Roblox server lifecycle.",
+      "behavioral_parity_limit": true
+    },
+    {
+      "id": "get_debug_id",
+      "area": "Instance",
+      "status": "api_only",
+      "api": ["Instance:GetDebugId"],
+      "notes": "Returns synthetic stable ID string. Format/semantics differ from Roblox internals.",
+      "behavioral_parity_limit": true
+    },
+    {
+      "id": "find_first_child_which_is_a",
+      "area": "Hierarchy",
+      "status": "full",
+      "api": ["Instance:FindFirstChildWhichIsA"],
+      "notes": "Supported with optional recursive mode."
+    },
+    {
+      "id": "attachment_class",
+      "area": "Constraints",
+      "status": "api_only",
+      "api": ["Instance.new('Attachment')"],
+      "notes": "Creation/parenting supported as data shim; no full attachment transform model yet."
+    },
+    {
+      "id": "align_orientation_class",
+      "area": "Constraints",
+      "status": "api_only",
+      "api": ["Instance.new('AlignOrientation')", "Attachment0", "Attachment1", "Responsiveness", "RigidityEnabled"],
+      "notes": "Class/properties exist to unblock scripts; full constraint dynamics not yet modeled.",
+      "behavioral_parity_limit": true
+    },
+    {
+      "id": "body_angular_velocity_class",
+      "area": "Constraints/Physics",
+      "status": "api_only",
+      "api": ["Instance.new('BodyAngularVelocity')", "AngularVelocity", "MaxTorque"],
+      "notes": "API shim implemented; full rotational dynamics parity pending.",
+      "behavioral_parity_limit": true
+    },
+    {
+      "id": "enum_part_type",
+      "area": "Enums",
+      "status": "full",
+      "api": ["Enum.PartType.Ball|Block|Cylinder|Wedge"],
+      "notes": "Available and used by current generated games."
+    },
+    {
+      "id": "enum_material",
+      "area": "Enums",
+      "status": "full",
+      "api": ["Enum.Material.* (used subset)"],
+      "notes": "Used materials (Plastic/Neon/Slate/Concrete/SmoothPlastic) supported."
+    },
+    {
+      "id": "workspace_indexing",
+      "area": "Services",
+      "status": "full",
+      "api": ["Workspace:FindFirstChild", "Workspace.__index child access"],
+      "notes": "Both method and property-style child lookup supported."
+    },
+    {
+      "id": "unknown_constraint_families",
+      "area": "Constraints",
+      "status": "missing",
+      "api": ["Constraint family beyond current shims"],
+      "notes": "Many modern Roblox constraints still not implemented in behaviorally accurate form."
+    },
+    {
+      "id": "network_replication_model",
+      "area": "Networking",
+      "status": "missing",
+      "api": ["Roblox replication + ownership semantics"],
+      "notes": "Clawblox uses different replication architecture; full parity requires major subsystem work.",
+      "behavioral_parity_limit": true
+    },
+    {
+      "id": "engine_scheduler_ordering",
+      "area": "Runtime",
+      "status": "missing",
+      "api": ["Roblox-exact event ordering edge cases"],
+      "notes": "Core paths work, but exhaustive ordering parity is not guaranteed."
+    },
+    {
+      "id": "humanoid_full_behavior",
+      "area": "Character",
+      "status": "missing",
+      "api": ["Full Humanoid parity across all states/physics interactions"],
+      "notes": "Common APIs supported; full engine-equivalent behavior still incomplete."
+    }
+  ],
+  "run_mapping": [
+    {
+      "run": "base_model/run_001",
+      "latest_issue": "attempt to index nil with 'Ball' (task.spawn warning)",
+      "likely_root_cause": "Enum.PartShape alias missing before fix",
+      "mapped_feature": "part_shape_alias",
+      "expected_after_fix": "warning removed"
+    },
+    {
+      "run": "base_model/run_003",
+      "latest_issue": "attempt to index nil with 'Ball' (task.spawn warning)",
+      "likely_root_cause": "Enum.PartShape alias missing before fix",
+      "mapped_feature": "part_shape_alias",
+      "expected_after_fix": "warning removed"
+    },
+    {
+      "run": "base_model/run_004",
+      "latest_issue": "missing method game:BindToClose",
+      "likely_root_cause": "API absent before fix",
+      "mapped_feature": "bind_to_close",
+      "expected_after_fix": "load no longer halts"
+    },
+    {
+      "run": "base_model/run_008",
+      "latest_issue": "Unknown class AlignOrientation",
+      "likely_root_cause": "Constraint class/API missing before fix",
+      "mapped_feature": "align_orientation_class",
+      "expected_after_fix": "class construction no longer errors"
+    },
+    {
+      "run": "base_model/run_009",
+      "latest_issue": "missing method Instance:GetDebugId",
+      "likely_root_cause": "API absent before fix",
+      "mapped_feature": "get_debug_id",
+      "expected_after_fix": "warning removed"
+    }
+  ],
+  "explicit_behavioral_limits": [
+    {
+      "feature": "set_network_owner",
+      "reason": "Roblox network ownership/replication is engine-specific and currently not modeled",
+      "current_behavior": "no-op shim"
+    },
+    {
+      "feature": "align_orientation_class",
+      "reason": "Full constraint solver parity requires deeper physics integration",
+      "current_behavior": "API + property shim"
+    },
+    {
+      "feature": "body_angular_velocity_class",
+      "reason": "Rotational body-mover physics not fully integrated into runtime solver",
+      "current_behavior": "API + property shim"
+    },
+    {
+      "feature": "bind_to_close",
+      "reason": "Shutdown/lifecycle semantics differ between Roblox servers and local CLI runtime",
+      "current_behavior": "best-effort callback invocation on runtime teardown"
+    },
+    {
+      "feature": "get_debug_id",
+      "reason": "Roblox internal ID format/semantics are proprietary engine behavior",
+      "current_behavior": "stable synthetic ID"
+    }
+  ],
+  "next_priority": [
+    "Re-run failing run-set against latest CLI and capture delta",
+    "Promote constraint shims (AlignOrientation/BodyAngularVelocity) from api_only toward approximate behavior",
+    "Expand BrickColor table coverage to full Roblox named palette",
+    "Document parity tiers in runtime docs and CI gating"
+  ]
+}
