@@ -10,10 +10,7 @@ fn attr_string(
     }
 }
 
-fn attr_bool(
-    attrs: &std::collections::HashMap<String, AttributeValue>,
-    key: &str,
-) -> Option<bool> {
+fn attr_bool(attrs: &std::collections::HashMap<String, AttributeValue>, key: &str) -> Option<bool> {
     match attrs.get(key) {
         Some(AttributeValue::Bool(v)) => Some(*v),
         _ => None,
@@ -35,23 +32,30 @@ fn build_render(
     data: &crate::game::lua::instance::InstanceData,
     part_data: &crate::game::lua::instance::PartData,
 ) -> SpectatorRender {
-    let role = attr_string(&data.attributes, "RenderRole").unwrap_or_else(|| "unspecified".to_string());
+    let role =
+        attr_string(&data.attributes, "RenderRole").unwrap_or_else(|| "unspecified".to_string());
     let preset_id = attr_string(&data.attributes, "RenderPresetId");
-    let kind = if preset_id.is_some() { "preset" } else { "primitive" }.to_string();
+    let kind = if preset_id.is_some() {
+        "preset"
+    } else {
+        "primitive"
+    }
+    .to_string();
     let primitive = attr_string(&data.attributes, "RenderPrimitive")
         .unwrap_or_else(|| part_data.shape.name().to_string().to_lowercase());
     let material = attr_string(&data.attributes, "RenderMaterial")
         .unwrap_or_else(|| part_data.material.name().to_string());
-    let color = attr_color(&data.attributes, "RenderColor")
-        .unwrap_or([part_data.color.r, part_data.color.g, part_data.color.b]);
+    let color = attr_color(&data.attributes, "RenderColor").unwrap_or([
+        part_data.color.r,
+        part_data.color.g,
+        part_data.color.b,
+    ]);
     let is_static = attr_bool(&data.attributes, "RenderStatic")
         .unwrap_or(data.tags.contains("Static") || part_data.anchored);
-    let visible = attr_bool(&data.attributes, "RenderVisible")
-        .unwrap_or(part_data.transparency < 1.0);
-    let casts_shadow = attr_bool(&data.attributes, "RenderCastsShadow")
-        .unwrap_or(true);
-    let receives_shadow = attr_bool(&data.attributes, "RenderReceivesShadow")
-        .unwrap_or(true);
+    let visible =
+        attr_bool(&data.attributes, "RenderVisible").unwrap_or(part_data.transparency < 1.0);
+    let casts_shadow = attr_bool(&data.attributes, "RenderCastsShadow").unwrap_or(true);
+    let receives_shadow = attr_bool(&data.attributes, "RenderReceivesShadow").unwrap_or(true);
 
     SpectatorRender {
         kind,
@@ -65,7 +69,11 @@ fn build_render(
         receives_shadow,
         visible,
         double_sided: false,
-        transparency: if part_data.transparency != 0.0 { Some(part_data.transparency) } else { None },
+        transparency: if part_data.transparency != 0.0 {
+            Some(part_data.transparency)
+        } else {
+            None
+        },
     }
 }
 
@@ -79,21 +87,24 @@ pub(super) fn build_player_observation(
     let player = runtime.players().get_player_by_user_id(user_id)?;
 
     // Get position from character's HumanoidRootPart (rounded to reduce payload size)
-    let position = round_position(instance.get_player_position(agent_id).unwrap_or([0.0, 3.0, 0.0]));
+    let position = round_position(
+        instance
+            .get_player_position(agent_id)
+            .unwrap_or([0.0, 3.0, 0.0]),
+    );
 
     {
         let mut counts = instance.observation_log_counts.lock().unwrap();
         let count = counts.entry(agent_id).or_insert(0);
         if *count < 5 {
-            let name = instance.player_names.get(&agent_id).cloned().unwrap_or_default();
+            let name = instance
+                .player_names
+                .get(&agent_id)
+                .cloned()
+                .unwrap_or_default();
             eprintln!(
                 "[Obs] tick={} agent={} name={} pos=({:.2},{:.2},{:.2})",
-                instance.tick,
-                agent_id,
-                name,
-                position[0],
-                position[1],
-                position[2]
+                instance.tick, agent_id, name, position[0], position[1], position[2]
             );
             *count += 1;
         }
@@ -106,14 +117,32 @@ pub(super) fn build_player_observation(
     let player_data = player.data.lock().unwrap();
     let mut attributes = attributes_to_json(&player_data.attributes);
     if let Some(origin) = instance.get_player_view_origin(agent_id) {
-        attributes.insert("ViewOriginX".to_string(), serde_json::Value::from(round_f32(origin[0])));
-        attributes.insert("ViewOriginY".to_string(), serde_json::Value::from(round_f32(origin[1])));
-        attributes.insert("ViewOriginZ".to_string(), serde_json::Value::from(round_f32(origin[2])));
+        attributes.insert(
+            "ViewOriginX".to_string(),
+            serde_json::Value::from(round_f32(origin[0])),
+        );
+        attributes.insert(
+            "ViewOriginY".to_string(),
+            serde_json::Value::from(round_f32(origin[1])),
+        );
+        attributes.insert(
+            "ViewOriginZ".to_string(),
+            serde_json::Value::from(round_f32(origin[2])),
+        );
     }
     if let Some(forward) = instance.get_player_view_forward(agent_id) {
-        attributes.insert("ViewForwardX".to_string(), serde_json::Value::from(round_f32(forward[0])));
-        attributes.insert("ViewForwardY".to_string(), serde_json::Value::from(round_f32(forward[1])));
-        attributes.insert("ViewForwardZ".to_string(), serde_json::Value::from(round_f32(forward[2])));
+        attributes.insert(
+            "ViewForwardX".to_string(),
+            serde_json::Value::from(round_f32(forward[0])),
+        );
+        attributes.insert(
+            "ViewForwardY".to_string(),
+            serde_json::Value::from(round_f32(forward[1])),
+        );
+        attributes.insert(
+            "ViewForwardZ".to_string(),
+            serde_json::Value::from(round_f32(forward[2])),
+        );
     }
     attributes.insert(
         "ViewFovDeg".to_string(),
@@ -139,6 +168,7 @@ pub(super) fn build_player_observation(
         other_players,
         world,
         events: Vec::new(),
+        recent_events: instance.recent_replicated_events_for_user(user_id),
     })
 }
 
@@ -160,7 +190,11 @@ pub(super) fn build_map_info(instance: &GameInstance) -> MapInfo {
                     id: data.id.0,
                     name: data.name.clone(),
                     entity_type: Some("part".to_string()),
-                    position: [part_data.position.x, part_data.position.y, part_data.position.z],
+                    position: [
+                        part_data.position.x,
+                        part_data.position.y,
+                        part_data.position.z,
+                    ],
                     size: [part_data.size.x, part_data.size.y, part_data.size.z],
                     rotation: Some(part_data.cframe.rotation),
                     color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
@@ -224,7 +258,9 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
                     health: None,
                     pickup_type: None,
                     model_url: GameInstance::extract_model_url(&data.attributes),
-                    model_yaw_offset_deg: GameInstance::extract_model_yaw_offset_deg(&data.attributes),
+                    model_yaw_offset_deg: GameInstance::extract_model_yaw_offset_deg(
+                        &data.attributes,
+                    ),
                     billboard_gui,
                 });
             }
@@ -327,14 +363,32 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
                 // Get all attributes and convert to JSON Value
                 let mut attrs = attributes_to_json(&player_data.attributes);
                 if let Some(origin) = instance.get_player_view_origin(agent_id) {
-                    attrs.insert("ViewOriginX".to_string(), serde_json::Value::from(round_f32(origin[0])));
-                    attrs.insert("ViewOriginY".to_string(), serde_json::Value::from(round_f32(origin[1])));
-                    attrs.insert("ViewOriginZ".to_string(), serde_json::Value::from(round_f32(origin[2])));
+                    attrs.insert(
+                        "ViewOriginX".to_string(),
+                        serde_json::Value::from(round_f32(origin[0])),
+                    );
+                    attrs.insert(
+                        "ViewOriginY".to_string(),
+                        serde_json::Value::from(round_f32(origin[1])),
+                    );
+                    attrs.insert(
+                        "ViewOriginZ".to_string(),
+                        serde_json::Value::from(round_f32(origin[2])),
+                    );
                 }
                 if let Some(forward) = instance.get_player_view_forward(agent_id) {
-                    attrs.insert("ViewForwardX".to_string(), serde_json::Value::from(round_f32(forward[0])));
-                    attrs.insert("ViewForwardY".to_string(), serde_json::Value::from(round_f32(forward[1])));
-                    attrs.insert("ViewForwardZ".to_string(), serde_json::Value::from(round_f32(forward[2])));
+                    attrs.insert(
+                        "ViewForwardX".to_string(),
+                        serde_json::Value::from(round_f32(forward[0])),
+                    );
+                    attrs.insert(
+                        "ViewForwardY".to_string(),
+                        serde_json::Value::from(round_f32(forward[1])),
+                    );
+                    attrs.insert(
+                        "ViewForwardZ".to_string(),
+                        serde_json::Value::from(round_f32(forward[2])),
+                    );
                 }
                 attrs.insert(
                     "ViewFovDeg".to_string(),

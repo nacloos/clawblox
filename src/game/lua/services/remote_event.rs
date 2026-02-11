@@ -7,6 +7,7 @@ pub struct ReplicatedEvent {
     pub name: String,
     pub payload: serde_json::Value,
     pub reliable: bool,
+    pub target_user_id: Option<u64>,
 }
 
 pub struct RemoteEventServiceData {
@@ -33,18 +34,34 @@ impl RemoteEventService {
         }
     }
 
-    pub fn fire_all_clients(
+    pub fn fire_event(
         &self,
         name: String,
         payload: serde_json::Value,
         reliable: bool,
+        target_user_id: Option<u64>,
     ) {
         let mut data = self.data.lock().unwrap();
         data.queued_events.push(ReplicatedEvent {
             name,
             payload,
             reliable,
+            target_user_id,
         });
+    }
+
+    pub fn fire_all_clients(&self, name: String, payload: serde_json::Value, reliable: bool) {
+        self.fire_event(name, payload, reliable, None);
+    }
+
+    pub fn fire_client(
+        &self,
+        name: String,
+        payload: serde_json::Value,
+        reliable: bool,
+        target_user_id: u64,
+    ) {
+        self.fire_event(name, payload, reliable, Some(target_user_id));
     }
 
     pub fn drain_events(&self) -> Vec<ReplicatedEvent> {
@@ -53,7 +70,7 @@ impl RemoteEventService {
     }
 }
 
-fn lua_value_to_json(lua: &Lua, value: Value) -> Result<serde_json::Value> {
+pub fn lua_value_to_json(lua: &Lua, value: Value) -> Result<serde_json::Value> {
     match value {
         Value::Nil => Ok(serde_json::Value::Null),
         Value::Boolean(v) => Ok(serde_json::Value::Bool(v)),
@@ -103,7 +120,10 @@ fn lua_value_to_json(lua: &Lua, value: Value) -> Result<serde_json::Value> {
                 if contiguous {
                     let mut out = Vec::with_capacity(max_index);
                     for idx in 1..=max_index {
-                        out.push(map.remove(&idx.to_string()).unwrap_or(serde_json::Value::Null));
+                        out.push(
+                            map.remove(&idx.to_string())
+                                .unwrap_or(serde_json::Value::Null),
+                        );
                     }
                     return Ok(serde_json::Value::Array(out));
                 }
@@ -132,6 +152,20 @@ fn lua_value_to_json(lua: &Lua, value: Value) -> Result<serde_json::Value> {
         }
         _ => Ok(serde_json::Value::String(format!("{:?}", value))),
     }
+}
+
+pub fn lua_args_to_payload(lua: &Lua, args: &[Value]) -> Result<serde_json::Value> {
+    if args.is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
+    if args.len() == 1 {
+        return lua_value_to_json(lua, args[0].clone());
+    }
+    let mut arr = Vec::with_capacity(args.len());
+    for arg in args {
+        arr.push(lua_value_to_json(lua, arg.clone())?);
+    }
+    Ok(serde_json::Value::Array(arr))
 }
 
 impl UserData for RemoteEventService {

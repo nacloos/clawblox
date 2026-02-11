@@ -421,6 +421,7 @@ impl GameInstance {
                 name: event.name,
                 reliable: event.reliable,
                 payload: event.payload,
+                target_user_id: event.target_user_id,
             });
         }
 
@@ -430,12 +431,28 @@ impl GameInstance {
     }
 
     fn recent_replicated_events(&self) -> Vec<SpectatorReplicatedEvent> {
+        self.recent_replicated_events_filtered(None)
+    }
+
+    fn recent_replicated_events_for_user(&self, user_id: u64) -> Vec<SpectatorReplicatedEvent> {
+        self.recent_replicated_events_filtered(Some(user_id))
+    }
+
+    fn recent_replicated_events_filtered(
+        &self,
+        user_id: Option<u64>,
+    ) -> Vec<SpectatorReplicatedEvent> {
         let count = self
             .replicated_events
             .len()
             .min(MAX_RECENT_EVENTS_PER_OBSERVATION);
         self.replicated_events
             .iter()
+            .filter(|evt| match (evt.target_user_id, user_id) {
+                (None, _) => true,
+                (Some(_), None) => false,
+                (Some(target), Some(viewer)) => target == viewer,
+            })
             .rev()
             .take(count)
             .cloned()
@@ -1472,6 +1489,8 @@ pub struct PlayerObservation {
     pub other_players: Vec<OtherPlayerInfo>,
     pub world: WorldInfo,
     pub events: Vec<GameEvent>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recent_events: Vec<SpectatorReplicatedEvent>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1576,6 +1595,8 @@ pub struct SpectatorReplicatedEvent {
     pub name: String,
     pub reliable: bool,
     pub payload: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_user_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

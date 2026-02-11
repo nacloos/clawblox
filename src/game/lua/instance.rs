@@ -3,11 +3,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-use crate::game::constants::humanoid as humanoid_consts;
 use super::events::{create_signal, RBXScriptSignal};
 use super::runtime::Game;
 use super::services::WorkspaceService;
 use super::types::{CFrame, Color3, HumanoidStateType, Material, PartType, UDim, UDim2, Vector3};
+use crate::game::constants::humanoid as humanoid_consts;
 
 static INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -47,8 +47,12 @@ pub enum ClassName {
     Script,
     ModuleScript,
     ServerScriptService,
+    ReplicatedStorage,
+    IntValue,
     // Constraints
     Weld,
+    RemoteEvent,
+    BodyVelocity,
     // GUI classes
     BillboardGui,
     PlayerGui,
@@ -80,7 +84,11 @@ impl ClassName {
             ClassName::Script => "Script",
             ClassName::ModuleScript => "ModuleScript",
             ClassName::ServerScriptService => "ServerScriptService",
+            ClassName::ReplicatedStorage => "ReplicatedStorage",
+            ClassName::IntValue => "IntValue",
             ClassName::Weld => "Weld",
+            ClassName::RemoteEvent => "RemoteEvent",
+            ClassName::BodyVelocity => "BodyVelocity",
             ClassName::BillboardGui => "BillboardGui",
             ClassName::PlayerGui => "PlayerGui",
             ClassName::ScreenGui => "ScreenGui",
@@ -111,9 +119,15 @@ impl ClassName {
             "Script" => matches!(self, ClassName::Script),
             "ModuleScript" => matches!(self, ClassName::ModuleScript),
             "ServerScriptService" => matches!(self, ClassName::ServerScriptService),
+            "ReplicatedStorage" => matches!(self, ClassName::ReplicatedStorage),
+            "IntValue" => matches!(self, ClassName::IntValue),
+            "ValueBase" => matches!(self, ClassName::IntValue),
             // Constraints
             "Constraint" => matches!(self, ClassName::Weld),
             "Weld" => matches!(self, ClassName::Weld),
+            "RemoteEvent" => matches!(self, ClassName::RemoteEvent),
+            "BodyVelocity" => matches!(self, ClassName::BodyVelocity),
+            "BodyMover" => matches!(self, ClassName::BodyVelocity),
             // BillboardGui (3D GUI attached to parts)
             "BillboardGui" => matches!(self, ClassName::BillboardGui),
             // GUI hierarchy: GuiBase2d is base for all 2D GUI elements
@@ -205,6 +219,9 @@ pub struct InstanceData {
     pub billboard_gui_data: Option<BillboardGuiData>,
     pub ui_corner_data: Option<UICornerData>,
     pub script_data: Option<ScriptData>,
+    pub int_value_data: Option<IntValueData>,
+    pub remote_event_data: Option<RemoteEventData>,
+    pub body_velocity_data: Option<BodyVelocityData>,
     pub property_changed_signals: HashMap<String, RBXScriptSignal>,
     pub attribute_changed_signals: HashMap<String, RBXScriptSignal>,
 
@@ -243,7 +260,10 @@ impl AttributeValue {
 pub fn attributes_to_json(
     attrs: &std::collections::HashMap<String, AttributeValue>,
 ) -> std::collections::HashMap<String, serde_json::Value> {
-    attrs.iter().map(|(k, v)| (k.clone(), v.to_json())).collect()
+    attrs
+        .iter()
+        .map(|(k, v)| (k.clone(), v.to_json()))
+        .collect()
 }
 
 pub use super::animation::{
@@ -419,6 +439,49 @@ impl Default for ScriptData {
         Self {
             source: String::new(),
             disabled: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct IntValueData {
+    pub value: i64,
+    pub changed: RBXScriptSignal,
+}
+
+impl Default for IntValueData {
+    fn default() -> Self {
+        Self {
+            value: 0,
+            changed: create_signal("Changed"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteEventData {
+    pub on_server_event: RBXScriptSignal,
+}
+
+#[derive(Debug, Clone)]
+pub struct BodyVelocityData {
+    pub velocity: Vector3,
+    pub max_force: Vector3,
+}
+
+impl Default for BodyVelocityData {
+    fn default() -> Self {
+        Self {
+            velocity: Vector3::zero(),
+            max_force: Vector3::zero(),
+        }
+    }
+}
+
+impl Default for RemoteEventData {
+    fn default() -> Self {
+        Self {
+            on_server_event: create_signal("OnServerEvent"),
         }
     }
 }
@@ -686,6 +749,9 @@ impl InstanceData {
             billboard_gui_data: None,
             ui_corner_data: None,
             script_data: None,
+            int_value_data: None,
+            remote_event_data: None,
+            body_velocity_data: None,
             property_changed_signals: HashMap::new(),
             attribute_changed_signals: HashMap::new(),
             destroyed: false,
@@ -754,6 +820,28 @@ impl InstanceData {
 
     pub fn new_server_script_service() -> Self {
         Self::new(ClassName::ServerScriptService, "ServerScriptService")
+    }
+
+    pub fn new_replicated_storage() -> Self {
+        Self::new(ClassName::ReplicatedStorage, "ReplicatedStorage")
+    }
+
+    pub fn new_remote_event(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::RemoteEvent, name);
+        inst.remote_event_data = Some(RemoteEventData::default());
+        inst
+    }
+
+    pub fn new_int_value(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::IntValue, name);
+        inst.int_value_data = Some(IntValueData::default());
+        inst
+    }
+
+    pub fn new_body_velocity(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::BodyVelocity, name);
+        inst.body_velocity_data = Some(BodyVelocityData::default());
+        inst
     }
 
     pub fn new_player_gui(name: &str) -> Self {
@@ -841,6 +929,30 @@ impl Instance {
         self.data.lock().unwrap().name = name.to_string();
     }
 
+    pub fn fire_remote_on_server_event(
+        &self,
+        lua: &Lua,
+        player: &Instance,
+        args: Vec<Value>,
+    ) -> Result<()> {
+        let signal = {
+            let data = self.data.lock().unwrap();
+            data.remote_event_data
+                .as_ref()
+                .map(|r| r.on_server_event.clone())
+        };
+        let Some(signal) = signal else {
+            return Ok(());
+        };
+
+        let mut values = Vec::with_capacity(args.len() + 1);
+        values.push(Value::UserData(lua.create_userdata(player.clone())?));
+        values.extend(args);
+        let threads = signal.fire_as_coroutines(lua, MultiValue::from_iter(values))?;
+        crate::game::lua::events::track_yielded_threads(lua, threads)?;
+        Ok(())
+    }
+
     fn fire_signal(lua: &Lua, signal: &RBXScriptSignal, args: MultiValue) -> Result<()> {
         let threads = signal.fire_as_coroutines(lua, args)?;
         crate::game::lua::events::track_yielded_threads(lua, threads)?;
@@ -883,7 +995,9 @@ impl Instance {
         let animation_id = {
             let data = animation.data.lock().unwrap();
             if data.class_name != ClassName::Animation {
-                return Err(mlua::Error::runtime("LoadAnimation expects an Animation instance"));
+                return Err(mlua::Error::runtime(
+                    "LoadAnimation expects an Animation instance",
+                ));
             }
             data.animation_data
                 .as_ref()
@@ -949,6 +1063,19 @@ impl Instance {
                 .unwrap()
                 .children
                 .push(Arc::clone(&self.data));
+
+            // BodyVelocity compatibility shim: parenting under a Part applies current velocity.
+            let body_velocity = {
+                let data = self.data.lock().unwrap();
+                data.body_velocity_data.clone()
+            };
+            if let Some(bv) = body_velocity {
+                let mut parent_data = new_parent.data.lock().unwrap();
+                if let Some(part) = &mut parent_data.part_data {
+                    part.velocity = bv.velocity;
+                    part.velocity_dirty = true;
+                }
+            }
         } else {
             self.data.lock().unwrap().parent = None;
         }
@@ -961,13 +1088,21 @@ impl Instance {
         if let Some(old_parent) = old_parent {
             let signal = old_parent.data.lock().unwrap().child_removed.clone();
             let child_ud = lua.create_userdata(self.clone())?;
-            Self::fire_signal(lua, &signal, MultiValue::from_iter([Value::UserData(child_ud)]))?;
+            Self::fire_signal(
+                lua,
+                &signal,
+                MultiValue::from_iter([Value::UserData(child_ud)]),
+            )?;
         }
 
         if let Some(new_parent) = parent {
             let signal = new_parent.data.lock().unwrap().child_added.clone();
             let child_ud = lua.create_userdata(self.clone())?;
-            Self::fire_signal(lua, &signal, MultiValue::from_iter([Value::UserData(child_ud)]))?;
+            Self::fire_signal(
+                lua,
+                &signal,
+                MultiValue::from_iter([Value::UserData(child_ud)]),
+            )?;
         }
 
         self.fire_property_changed_if_listening(lua, "Parent")?;
@@ -1056,6 +1191,16 @@ impl Instance {
         new_data.part_data = data.part_data.clone();
         new_data.humanoid_data = data.humanoid_data.clone();
         new_data.model_data = data.model_data.clone();
+        if let Some(int_data) = &data.int_value_data {
+            new_data.int_value_data = Some(IntValueData {
+                value: int_data.value,
+                changed: create_signal("Changed"),
+            });
+        }
+        if data.remote_event_data.is_some() {
+            new_data.remote_event_data = Some(RemoteEventData::default());
+        }
+        new_data.body_velocity_data = data.body_velocity_data.clone();
 
         // Clone GUI data but create fresh signals to avoid sharing handlers
         if let Some(gui) = &data.gui_data {
@@ -1091,7 +1236,12 @@ impl Instance {
             .insert(name.to_string(), value);
     }
 
-    pub fn set_attribute_with_lua(&self, lua: &Lua, name: &str, value: AttributeValue) -> Result<()> {
+    pub fn set_attribute_with_lua(
+        &self,
+        lua: &Lua,
+        name: &str,
+        value: AttributeValue,
+    ) -> Result<()> {
         self.set_attribute(name, value);
 
         let (attribute_changed, specific_signal) = {
@@ -1419,13 +1569,44 @@ impl UserData for Instance {
 
         fields.add_field_method_get("Velocity", |_, this| {
             let data = this.data.lock().unwrap();
-            Ok(data.part_data.as_ref().map(|p| p.velocity))
+            if let Some(bv) = &data.body_velocity_data {
+                Ok(Some(bv.velocity))
+            } else {
+                Ok(data.part_data.as_ref().map(|p| p.velocity))
+            }
         });
         fields.add_field_method_set("Velocity", |_, this, velocity: Vector3| {
+            let parent_part = {
+                let mut data = this.data.lock().unwrap();
+                if let Some(bv) = &mut data.body_velocity_data {
+                    bv.velocity = velocity;
+                    data.parent.as_ref().and_then(|w| w.upgrade())
+                } else {
+                    if let Some(part) = &mut data.part_data {
+                        part.velocity = velocity;
+                        part.velocity_dirty = true;
+                    }
+                    None
+                }
+            };
+            if let Some(parent_ref) = parent_part {
+                let mut parent_data = parent_ref.lock().unwrap();
+                if let Some(part) = &mut parent_data.part_data {
+                    part.velocity = velocity;
+                    part.velocity_dirty = true;
+                }
+            }
+            Ok(())
+        });
+
+        fields.add_field_method_get("MaxForce", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.body_velocity_data.as_ref().map(|bv| bv.max_force))
+        });
+        fields.add_field_method_set("MaxForce", |_, this, max_force: Vector3| {
             let mut data = this.data.lock().unwrap();
-            if let Some(part) = &mut data.part_data {
-                part.velocity = velocity;
-                part.velocity_dirty = true;
+            if let Some(bv) = &mut data.body_velocity_data {
+                bv.max_force = max_force;
             }
             Ok(())
         });
@@ -1456,6 +1637,41 @@ impl UserData for Instance {
         fields.add_field_method_get("TouchEnded", |_, this| {
             let data = this.data.lock().unwrap();
             Ok(data.part_data.as_ref().map(|p| p.touch_ended.clone()))
+        });
+
+        fields.add_field_method_get("OnServerEvent", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data
+                .remote_event_data
+                .as_ref()
+                .map(|r| r.on_server_event.clone()))
+        });
+
+        fields.add_field_method_get("Changed", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.int_value_data.as_ref().map(|v| v.changed.clone()))
+        });
+
+        fields.add_field_method_get("Value", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.int_value_data.as_ref().map(|v| v.value))
+        });
+        fields.add_field_method_set("Value", |lua, this, value: i64| {
+            let changed_signal = {
+                let mut data = this.data.lock().unwrap();
+                if let Some(v) = &mut data.int_value_data {
+                    v.value = value;
+                    Some(v.changed.clone())
+                } else {
+                    None
+                }
+            };
+            if let Some(signal) = changed_signal {
+                let threads = signal
+                    .fire_as_coroutines(lua, MultiValue::from_iter([Value::Integer(value)]))?;
+                crate::game::lua::events::track_yielded_threads(lua, threads)?;
+            }
+            Ok(())
         });
 
         fields.add_field_method_get("Health", |_, this| {
@@ -1592,7 +1808,10 @@ impl UserData for Instance {
 
         fields.add_field_method_get("HealthChanged", |_, this| {
             let data = this.data.lock().unwrap();
-            Ok(data.humanoid_data.as_ref().map(|h| h.health_changed.clone()))
+            Ok(data
+                .humanoid_data
+                .as_ref()
+                .map(|h| h.health_changed.clone()))
         });
 
         fields.add_field_method_get("Running", |_, this| {
@@ -1648,10 +1867,7 @@ impl UserData for Instance {
 
         fields.add_field_method_get("CharacterAdded", |_, this| {
             let data = this.data.lock().unwrap();
-            Ok(data
-                .player_data
-                .as_ref()
-                .map(|p| p.character_added.clone()))
+            Ok(data.player_data.as_ref().map(|p| p.character_added.clone()))
         });
 
         fields.add_field_method_get("CharacterRemoving", |_, this| {
@@ -1992,7 +2208,10 @@ impl UserData for Instance {
         // TextStrokeTransparency (TextLabel, TextButton)
         fields.add_field_method_get("TextStrokeTransparency", |_, this| {
             let data = this.data.lock().unwrap();
-            Ok(data.gui_data.as_ref().and_then(|g| g.text_stroke_transparency))
+            Ok(data
+                .gui_data
+                .as_ref()
+                .and_then(|g| g.text_stroke_transparency))
         });
         fields.add_field_method_set("TextStrokeTransparency", |_, this, transparency: f32| {
             let mut data = this.data.lock().unwrap();
@@ -2241,6 +2460,49 @@ impl UserData for Instance {
 
         methods.add_method("Destroy", |lua, this, ()| this.destroy(lua));
 
+        methods.add_method("FireAllClients", |lua, this, args: MultiValue| {
+            if this.class_name() != ClassName::RemoteEvent {
+                return Ok(());
+            }
+
+            let args_vec: Vec<Value> = args.into_iter().collect();
+            let payload =
+                crate::game::lua::services::remote_event::lua_args_to_payload(lua, &args_vec)?;
+            let game_ud: mlua::AnyUserData = lua.globals().get("__clawblox_game")?;
+            let game = game_ud.borrow::<Game>()?;
+            game.remote_event_service()
+                .fire_all_clients(this.name(), payload, true);
+            Ok(())
+        });
+
+        methods.add_method("FireClient", |lua, this, args: MultiValue| {
+            if this.class_name() != ClassName::RemoteEvent {
+                return Ok(());
+            }
+
+            let mut iter = args.into_iter();
+            let Some(player_value) = iter.next() else {
+                return Ok(());
+            };
+            let player: Instance = mlua::FromLua::from_lua(player_value, lua)?;
+            let target_user_id = {
+                let data = player.data.lock().unwrap();
+                data.player_data.as_ref().map(|p| p.user_id)
+            };
+            let Some(target_user_id) = target_user_id else {
+                return Ok(());
+            };
+
+            let rest: Vec<Value> = iter.collect();
+            let payload =
+                crate::game::lua::services::remote_event::lua_args_to_payload(lua, &rest)?;
+            let game_ud: mlua::AnyUserData = lua.globals().get("__clawblox_game")?;
+            let game = game_ud.borrow::<Game>()?;
+            game.remote_event_service()
+                .fire_client(this.name(), payload, true, target_user_id);
+            Ok(())
+        });
+
         methods.add_method(
             "FindFirstChild",
             |_, this, (name, recursive): (String, Option<bool>)| {
@@ -2264,37 +2526,40 @@ impl UserData for Instance {
             Ok(this.is_descendant_of(&ancestor))
         });
 
-        methods.add_method("SetAttribute", |lua, this, (name, value): (String, Value)| {
-            fn lua_value_to_attr(value: &Value) -> mlua::Result<AttributeValue> {
-                match value {
-                    Value::Nil => Ok(AttributeValue::Nil),
-                    Value::Boolean(b) => Ok(AttributeValue::Bool(*b)),
-                    Value::Integer(n) => Ok(AttributeValue::Number(*n as f64)),
-                    Value::Number(n) => Ok(AttributeValue::Number(*n)),
-                    Value::String(s) => Ok(AttributeValue::String(s.to_str()?.to_string())),
-                    Value::UserData(ud) => {
-                        if let Ok(v) = ud.borrow::<Vector3>() {
-                            Ok(AttributeValue::Vector3(*v))
-                        } else if let Ok(c) = ud.borrow::<Color3>() {
-                            Ok(AttributeValue::Color3(*c))
-                        } else {
-                            Err(mlua::Error::runtime("Unsupported attribute type"))
+        methods.add_method(
+            "SetAttribute",
+            |lua, this, (name, value): (String, Value)| {
+                fn lua_value_to_attr(value: &Value) -> mlua::Result<AttributeValue> {
+                    match value {
+                        Value::Nil => Ok(AttributeValue::Nil),
+                        Value::Boolean(b) => Ok(AttributeValue::Bool(*b)),
+                        Value::Integer(n) => Ok(AttributeValue::Number(*n as f64)),
+                        Value::Number(n) => Ok(AttributeValue::Number(*n)),
+                        Value::String(s) => Ok(AttributeValue::String(s.to_str()?.to_string())),
+                        Value::UserData(ud) => {
+                            if let Ok(v) = ud.borrow::<Vector3>() {
+                                Ok(AttributeValue::Vector3(*v))
+                            } else if let Ok(c) = ud.borrow::<Color3>() {
+                                Ok(AttributeValue::Color3(*c))
+                            } else {
+                                Err(mlua::Error::runtime("Unsupported attribute type"))
+                            }
                         }
-                    }
-                    Value::Table(t) => {
-                        let mut items = Vec::new();
-                        for pair in t.clone().sequence_values::<Value>() {
-                            items.push(lua_value_to_attr(&pair?)?);
+                        Value::Table(t) => {
+                            let mut items = Vec::new();
+                            for pair in t.clone().sequence_values::<Value>() {
+                                items.push(lua_value_to_attr(&pair?)?);
+                            }
+                            Ok(AttributeValue::Table(items))
                         }
-                        Ok(AttributeValue::Table(items))
+                        _ => Err(mlua::Error::runtime("Unsupported attribute type")),
                     }
-                    _ => Err(mlua::Error::runtime("Unsupported attribute type")),
                 }
-            }
-            let attr_value = lua_value_to_attr(&value)?;
-            this.set_attribute_with_lua(lua, &name, attr_value)?;
-            Ok(())
-        });
+                let attr_value = lua_value_to_attr(&value)?;
+                this.set_attribute_with_lua(lua, &name, attr_value)?;
+                Ok(())
+            },
+        );
 
         methods.add_method("GetAttributeChangedSignal", |_, this, name: String| {
             Ok(this.ensure_attribute_signal(&name))
@@ -2391,9 +2656,7 @@ impl UserData for Instance {
             Ok(())
         });
 
-        methods.add_method("HasTag", |_, this, tag: String| {
-            Ok(this.has_tag(&tag))
-        });
+        methods.add_method("HasTag", |_, this, tag: String| Ok(this.has_tag(&tag)));
 
         methods.add_method("RemoveTag", |_, this, tag: String| {
             this.remove_tag(&tag);
@@ -2587,9 +2850,9 @@ impl UserData for Instance {
             if let Some(old_char) = old_character {
                 let threads = character_removing.fire_as_coroutines(
                     lua,
-                    mlua::MultiValue::from_iter([Value::UserData(lua.create_userdata(
-                        old_char.clone(),
-                    )?)]),
+                    mlua::MultiValue::from_iter([Value::UserData(
+                        lua.create_userdata(old_char.clone())?,
+                    )]),
                 )?;
                 crate::game::lua::events::track_yielded_threads(lua, threads)?;
                 old_char.set_parent(None);
@@ -2635,9 +2898,9 @@ impl UserData for Instance {
 
             let threads = character_added.fire_as_coroutines(
                 lua,
-                mlua::MultiValue::from_iter([Value::UserData(lua.create_userdata(
-                    character.clone(),
-                )?)]),
+                mlua::MultiValue::from_iter([Value::UserData(
+                    lua.create_userdata(character.clone())?,
+                )]),
             )?;
             crate::game::lua::events::track_yielded_threads(lua, threads)?;
 
@@ -2705,6 +2968,13 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
                     "ServerScriptService" => {
                         Instance::from_data(InstanceData::new_server_script_service())
                     }
+                    "RemoteEvent" => {
+                        Instance::from_data(InstanceData::new_remote_event("RemoteEvent"))
+                    }
+                    "IntValue" => Instance::from_data(InstanceData::new_int_value("IntValue")),
+                    "BodyVelocity" => {
+                        Instance::from_data(InstanceData::new_body_velocity("BodyVelocity"))
+                    }
                     // Constraints
                     "Weld" => Instance::from_data(InstanceData::new_weld("Weld")),
                     // 3D GUI
@@ -2725,7 +2995,12 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
                         Instance::from_data(InstanceData::new_image_button("ImageButton"))
                     }
                     "UICorner" => Instance::from_data(InstanceData::new_uicorner("UICorner")),
-                    _ => return Err(mlua::Error::runtime(format!("Unknown class '{}'", class_name))),
+                    _ => {
+                        return Err(mlua::Error::runtime(format!(
+                            "Unknown class '{}'",
+                            class_name
+                        )))
+                    }
                 };
 
                 if let Some(parent) = parent {

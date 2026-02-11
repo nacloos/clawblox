@@ -1,4 +1,7 @@
-use mlua::{Lua, MultiValue, ObjectLike, RegistryKey, Result, Thread, ThreadStatus, UserData, UserDataMethods, Value};
+use mlua::{
+    Lua, MultiValue, ObjectLike, RegistryKey, Result, Thread, ThreadStatus, UserData,
+    UserDataMethods, Value,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -10,8 +13,8 @@ use super::animation::AnimationScheduler;
 use super::instance::{AttributeValue, Instance, InstanceData};
 use super::services::{
     register_overlap_params, register_raycast_params, AgentInput, AgentInputService,
-    DataStoreService, HttpService,
-    PlayersService, RemoteEventService, RunService, WorkspaceService,
+    DataStoreService, HttpService, PlayersService, RemoteEventService, RunService,
+    WorkspaceService,
 };
 use super::types::register_all_types;
 use crate::game::async_bridge::AsyncBridge;
@@ -35,6 +38,7 @@ pub struct GameDataModel {
     pub data_store_service: DataStoreService,
     pub remote_event_service: RemoteEventService,
     pub server_script_service: Instance,
+    pub replicated_storage: Instance,
     /// Queue of pending kick requests from Lua scripts
     pub kick_requests: Vec<KickRequest>,
 }
@@ -46,7 +50,11 @@ impl GameDataModel {
         Self::with_config(game_id, 100, async_bridge)
     }
 
-    pub fn with_config(game_id: Uuid, max_players: u32, async_bridge: Option<Arc<AsyncBridge>>) -> Self {
+    pub fn with_config(
+        game_id: Uuid,
+        max_players: u32,
+        async_bridge: Option<Arc<AsyncBridge>>,
+    ) -> Self {
         Self {
             workspace: WorkspaceService::new(),
             players: PlayersService::with_max_players(max_players),
@@ -55,6 +63,7 @@ impl GameDataModel {
             data_store_service: DataStoreService::new(game_id, async_bridge),
             remote_event_service: RemoteEventService::new(),
             server_script_service: Instance::from_data(InstanceData::new_server_script_service()),
+            replicated_storage: Instance::from_data(InstanceData::new_replicated_storage()),
             kick_requests: Vec::new(),
         }
     }
@@ -70,9 +79,17 @@ impl Game {
         Self::with_config(game_id, 100, async_bridge)
     }
 
-    pub fn with_config(game_id: Uuid, max_players: u32, async_bridge: Option<Arc<AsyncBridge>>) -> Self {
+    pub fn with_config(
+        game_id: Uuid,
+        max_players: u32,
+        async_bridge: Option<Arc<AsyncBridge>>,
+    ) -> Self {
         Self {
-            data_model: Arc::new(Mutex::new(GameDataModel::with_config(game_id, max_players, async_bridge))),
+            data_model: Arc::new(Mutex::new(GameDataModel::with_config(
+                game_id,
+                max_players,
+                async_bridge,
+            ))),
         }
     }
 
@@ -101,7 +118,15 @@ impl Game {
     }
 
     pub fn server_script_service(&self) -> Instance {
-        self.data_model.lock().unwrap().server_script_service.clone()
+        self.data_model
+            .lock()
+            .unwrap()
+            .server_script_service
+            .clone()
+    }
+
+    pub fn replicated_storage(&self) -> Instance {
+        self.data_model.lock().unwrap().replicated_storage.clone()
     }
 
     /// Queue a kick request for a player (called from Lua Player:Kick())
@@ -126,7 +151,9 @@ impl UserData for Game {
             match name.as_str() {
                 "Workspace" => Ok(Value::UserData(lua.create_userdata(dm.workspace.clone())?)),
                 "Players" => Ok(Value::UserData(lua.create_userdata(dm.players.clone())?)),
-                "RunService" => Ok(Value::UserData(lua.create_userdata(dm.run_service.clone())?)),
+                "RunService" => Ok(Value::UserData(
+                    lua.create_userdata(dm.run_service.clone())?,
+                )),
                 "AgentInputService" => Ok(Value::UserData(
                     lua.create_userdata(dm.agent_input_service.clone())?,
                 )),
@@ -136,9 +163,12 @@ impl UserData for Game {
                 "RemoteEventService" => Ok(Value::UserData(
                     lua.create_userdata(dm.remote_event_service.clone())?,
                 )),
-                "ServerScriptService" => {
-                    Ok(Value::UserData(lua.create_userdata(dm.server_script_service.clone())?))
-                }
+                "ServerScriptService" => Ok(Value::UserData(
+                    lua.create_userdata(dm.server_script_service.clone())?,
+                )),
+                "ReplicatedStorage" => Ok(Value::UserData(
+                    lua.create_userdata(dm.replicated_storage.clone())?,
+                )),
                 "HttpService" => {
                     drop(dm); // Release lock before creating userdata
                     Ok(Value::UserData(lua.create_userdata(HttpService::new())?))
@@ -152,12 +182,17 @@ impl UserData for Game {
             match key.as_str() {
                 "Workspace" => Ok(Value::UserData(lua.create_userdata(dm.workspace.clone())?)),
                 "Players" => Ok(Value::UserData(lua.create_userdata(dm.players.clone())?)),
-                "RunService" => Ok(Value::UserData(lua.create_userdata(dm.run_service.clone())?)),
+                "RunService" => Ok(Value::UserData(
+                    lua.create_userdata(dm.run_service.clone())?,
+                )),
                 "RemoteEventService" => Ok(Value::UserData(
                     lua.create_userdata(dm.remote_event_service.clone())?,
                 )),
                 "ServerScriptService" => Ok(Value::UserData(
                     lua.create_userdata(dm.server_script_service.clone())?,
+                )),
+                "ReplicatedStorage" => Ok(Value::UserData(
+                    lua.create_userdata(dm.replicated_storage.clone())?,
                 )),
                 _ => Ok(Value::Nil),
             }
@@ -179,6 +214,45 @@ pub struct LuaRuntime {
 }
 
 impl LuaRuntime {
+    fn json_to_lua_value(lua: &Lua, value: &serde_json::Value) -> Result<Value> {
+        match value {
+            serde_json::Value::Null => Ok(Value::Nil),
+            serde_json::Value::Bool(b) => Ok(Value::Boolean(*b)),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Ok(Value::Integer(i))
+                } else if let Some(f) = n.as_f64() {
+                    Ok(Value::Number(f))
+                } else {
+                    Ok(Value::Nil)
+                }
+            }
+            serde_json::Value::String(s) => Ok(Value::String(lua.create_string(s)?)),
+            serde_json::Value::Array(arr) => {
+                let table = lua.create_table()?;
+                for (i, v) in arr.iter().enumerate() {
+                    table.set(i + 1, Self::json_to_lua_value(lua, v)?)?;
+                }
+                Ok(Value::Table(table))
+            }
+            serde_json::Value::Object(obj) => {
+                let table = lua.create_table()?;
+                for (k, v) in obj {
+                    table.set(k.as_str(), Self::json_to_lua_value(lua, v)?)?;
+                }
+                Ok(Value::Table(table))
+            }
+        }
+    }
+
+    fn find_remote_event_by_name(&self, name: &str) -> Option<Instance> {
+        let replicated_storage = self.game.replicated_storage();
+        replicated_storage
+            .get_descendants()
+            .into_iter()
+            .find(|inst| inst.is_a("RemoteEvent") && inst.name() == name)
+    }
+
     /// Creates a new LuaRuntime with optional async bridge for DataStore operations.
     ///
     /// # Arguments
@@ -195,7 +269,11 @@ impl LuaRuntime {
     /// * `game_id` - The unique identifier for this game instance
     /// * `max_players` - Maximum number of players (exposed as Players.MaxPlayers in Lua)
     /// * `async_bridge` - Optional bridge for async database operations.
-    pub fn with_config(game_id: Uuid, max_players: u32, async_bridge: Option<Arc<AsyncBridge>>) -> Result<Self> {
+    pub fn with_config(
+        game_id: Uuid,
+        max_players: u32,
+        async_bridge: Option<Arc<AsyncBridge>>,
+    ) -> Result<Self> {
         let lua = Lua::new();
 
         register_all_types(&lua)?;
@@ -211,8 +289,11 @@ impl LuaRuntime {
         lua.globals().set("__clawblox_game", game.clone())?;
 
         lua.globals().set("Workspace", game.workspace())?;
+        lua.globals().set("workspace", game.workspace())?;
         lua.globals().set("Players", game.players())?;
         lua.globals().set("RunService", game.run_service())?;
+        lua.globals()
+            .set("ReplicatedStorage", game.replicated_storage())?;
         lua.globals()
             .set("RemoteEventService", game.remote_event_service())?;
         lua.globals()
@@ -254,19 +335,56 @@ impl LuaRuntime {
         })?;
         lua.globals().set("warn", warn_fn)?;
 
+        let typeof_fn = lua.create_function(|_, value: Value| {
+            let type_name = match value {
+                Value::Nil => "nil",
+                Value::Boolean(_) => "boolean",
+                Value::Integer(_) | Value::Number(_) => "number",
+                Value::String(_) => "string",
+                Value::Table(_) => "table",
+                Value::Function(_) => "function",
+                Value::Thread(_) => "thread",
+                Value::UserData(ud) => {
+                    if ud.borrow::<super::instance::Instance>().is_ok() {
+                        "Instance"
+                    } else if ud.borrow::<super::types::Vector3>().is_ok() {
+                        "Vector3"
+                    } else if ud.borrow::<super::types::CFrame>().is_ok() {
+                        "CFrame"
+                    } else if ud.borrow::<super::types::Color3>().is_ok() {
+                        "Color3"
+                    } else if ud.borrow::<super::types::UDim>().is_ok() {
+                        "UDim"
+                    } else if ud.borrow::<super::types::UDim2>().is_ok() {
+                        "UDim2"
+                    } else {
+                        "userdata"
+                    }
+                }
+                Value::LightUserData(_) => "userdata",
+                Value::Vector(_) => "vector",
+                Value::Buffer(_) => "buffer",
+                Value::Error(_) => "error",
+                Value::Other(_) => "userdata",
+            };
+            Ok(type_name)
+        })?;
+        lua.globals().set("typeof", typeof_fn)?;
+
         let math_table = lua.globals().get::<mlua::Table>("math")?;
         math_table.set("huge", f64::INFINITY)?;
 
-        let random_fn =
-            lua.create_function(|_, (min, max): (Option<i64>, Option<i64>)| match (min, max) {
-                (None, None) => Ok(rand::random::<f64>()),
-                (Some(max), None) => Ok((rand::random::<f64>() * max as f64).floor()),
-                (Some(min), Some(max)) => {
-                    let range = (max - min + 1) as f64;
-                    Ok((rand::random::<f64>() * range).floor() + min as f64)
-                }
-                _ => Ok(0.0),
-            })?;
+        let random_fn = lua.create_function(|_, (min, max): (Option<i64>, Option<i64>)| match (
+            min, max,
+        ) {
+            (None, None) => Ok(rand::random::<f64>()),
+            (Some(max), None) => Ok((rand::random::<f64>() * max as f64).floor()),
+            (Some(min), Some(max)) => {
+                let range = (max - min + 1) as f64;
+                Ok((rand::random::<f64>() * range).floor() + min as f64)
+            }
+            _ => Ok(0.0),
+        })?;
         math_table.set("random", random_fn)?;
 
         // Time origin for tick() and task scheduling
@@ -279,13 +397,15 @@ impl LuaRuntime {
         // Internal tables for task scheduling (not accessible to game scripts)
         // Maps thread -> resume_at_time (seconds since start)
         let schedule_table = lua.create_table()?;
-        lua.globals().set("__clawblox_thread_schedule", schedule_table)?;
+        lua.globals()
+            .set("__clawblox_thread_schedule", schedule_table)?;
         // Maps thread -> {args} for deferred/delayed threads
         let args_table = lua.create_table()?;
         lua.globals().set("__clawblox_thread_args", args_table)?;
         // Maps thread -> true for cancelled threads
         let cancelled_table = lua.create_table()?;
-        lua.globals().set("__clawblox_cancelled_threads", cancelled_table)?;
+        lua.globals()
+            .set("__clawblox_cancelled_threads", cancelled_table)?;
 
         // --- task library ---
         // Rust helper: __clawblox_schedule_wait(seconds) — schedules current thread to resume after delay
@@ -299,17 +419,17 @@ impl LuaRuntime {
             schedule.set(thread, resume_at)?;
             Ok(())
         })?;
-        lua.globals().set("__clawblox_schedule_wait", schedule_wait_fn)?;
+        lua.globals()
+            .set("__clawblox_schedule_wait", schedule_wait_fn)?;
 
         // Rust helper: __clawblox_now() — returns elapsed seconds since start
         let now_start = start_time;
-        let now_fn = lua.create_function(move |_, ()| {
-            Ok(now_start.elapsed().as_secs_f64())
-        })?;
+        let now_fn = lua.create_function(move |_, ()| Ok(now_start.elapsed().as_secs_f64()))?;
         lua.globals().set("__clawblox_now", now_fn)?;
 
         // Register the task table via Lua code that calls Rust helpers
-        lua.load(r#"
+        lua.load(
+            r#"
             task = {}
             __clawblox_warned_legacy_tick = false
             __clawblox_warned_legacy_wait = false
@@ -396,7 +516,9 @@ impl LuaRuntime {
                 return task.wait(seconds)
             end
 
-        "#).exec()?;
+        "#,
+        )
+        .exec()?;
 
         let table_table = lua.globals().get::<mlua::Table>("table")?;
 
@@ -421,13 +543,14 @@ impl LuaRuntime {
         )?;
         table_table.set("insert", insert_fn)?;
 
-        let remove_fn =
-            lua.create_function(|_, (tbl, pos): (mlua::Table, Option<i64>)| -> Result<Value> {
+        let remove_fn = lua.create_function(
+            |_, (tbl, pos): (mlua::Table, Option<i64>)| -> Result<Value> {
                 let pos = pos.unwrap_or(tbl.raw_len() as i64);
                 let val = tbl.raw_get(pos)?;
                 tbl.raw_remove(pos)?;
                 Ok(val)
-            })?;
+            },
+        )?;
         table_table.set("remove", remove_fn)?;
 
         let pending_coroutines = Arc::new(Mutex::new(Vec::new()));
@@ -609,6 +732,25 @@ impl LuaRuntime {
         // 2. Now fire events (no locks held)
         for (player, inputs) in to_process {
             for input in inputs {
+                if input.input_type == "RemoteEvent" {
+                    if let Some(event_name) = input.data.get("name").and_then(|v| v.as_str()) {
+                        if let Some(remote) = self.find_remote_event_by_name(event_name) {
+                            let args = input
+                                .data
+                                .get("args")
+                                .and_then(|v| v.as_array())
+                                .map(|items| {
+                                    items
+                                        .iter()
+                                        .map(|v| Self::json_to_lua_value(&self.lua, v))
+                                        .collect::<Result<Vec<Value>>>()
+                                })
+                                .transpose()?
+                                .unwrap_or_default();
+                            remote.fire_remote_on_server_event(&self.lua, &player, args)?;
+                        }
+                    }
+                }
                 agent_input_service.fire_input_received(
                     &self.lua,
                     &player,
@@ -626,7 +768,14 @@ impl LuaRuntime {
     }
 
     pub fn fire_player_added(&self, player: &Instance) -> Result<()> {
-        let signal = self.game.players().data.lock().unwrap().player_added.clone();
+        let signal = self
+            .game
+            .players()
+            .data
+            .lock()
+            .unwrap()
+            .player_added
+            .clone();
         // Use fire_as_coroutines to allow callbacks to yield (e.g., for DataStore:GetAsync)
         let yielded_threads = signal.fire_as_coroutines(
             &self.lua,
@@ -735,7 +884,10 @@ mod tests {
         let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
         let default_value: bool = globals.get("defaultResetOnSpawn").unwrap();
         let updated_value: bool = globals.get("updatedResetOnSpawn").unwrap();
-        assert!(default_value, "ScreenGui.ResetOnSpawn should default to true");
+        assert!(
+            default_value,
+            "ScreenGui.ResetOnSpawn should default to true"
+        );
         assert!(
             !updated_value,
             "ScreenGui.ResetOnSpawn should be writable and persist value"
@@ -806,7 +958,10 @@ mod tests {
         let is_playing: bool = track.get("IsPlaying").unwrap();
         let time_position: f64 = track.get("TimePosition").unwrap();
         assert!(!is_playing, "Track should auto-stop after clip length");
-        assert!(time_position > 0.0, "Track time should advance while playing");
+        assert!(
+            time_position > 0.0,
+            "Track time should advance while playing"
+        );
     }
 
     #[test]
@@ -928,7 +1083,10 @@ mod tests {
 
         runtime.tick(1.0 / 60.0).expect("Failed to tick");
         let done: bool = globals.get("waitDone").unwrap();
-        assert!(!done, "Signal:Wait should resume on the frame after signal fires");
+        assert!(
+            !done,
+            "Signal:Wait should resume on the frame after signal fires"
+        );
 
         runtime.tick(1.0 / 60.0).expect("Failed to tick");
         let done: bool = globals.get("waitDone").unwrap();
@@ -1195,7 +1353,10 @@ mod tests {
             .unwrap()
             .get("radiusHit")
             .unwrap();
-        assert!(radius_hit, "Part intersecting sphere by volume should be included");
+        assert!(
+            radius_hit,
+            "Part intersecting sphere by volume should be included"
+        );
     }
 
     #[test]
@@ -1284,7 +1445,10 @@ mod tests {
             .unwrap()
             .get("hitCount")
             .unwrap();
-        assert_eq!(hit_count, 1, "MaxParts should cap overlap query result size");
+        assert_eq!(
+            hit_count, 1,
+            "MaxParts should cap overlap query result size"
+        );
     }
 
     #[test]
@@ -1363,7 +1527,10 @@ mod tests {
         let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
         let hit_trigger: bool = globals.get("hitTrigger").unwrap();
         let hit_solid: bool = globals.get("hitSolid").unwrap();
-        assert!(!hit_trigger, "RespectCanCollide should filter CanCollide=false parts");
+        assert!(
+            !hit_trigger,
+            "RespectCanCollide should filter CanCollide=false parts"
+        );
         assert!(hit_solid, "Solid part should still be included");
     }
 
@@ -1913,5 +2080,134 @@ mod tests {
         let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
         let ran: bool = globals.get("serviceBootRan").unwrap();
         assert!(ran);
+    }
+
+    #[test]
+    fn test_replicated_storage_and_remote_event_fire_all_clients() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local rs = game:GetService("ReplicatedStorage")
+            assert(rs ~= nil, "ReplicatedStorage should exist")
+
+            local remote = Instance.new("RemoteEvent")
+            remote.Name = "StateUpdate"
+            remote.Parent = rs
+
+            remote:FireAllClients({ hello = "world", n = 7 })
+        "#,
+            )
+            .expect("Failed to run script");
+
+        let queued = runtime.game().remote_event_service().drain_events();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].name, "StateUpdate");
+        assert!(queued[0].target_user_id.is_none());
+        assert_eq!(
+            queued[0].payload["hello"],
+            serde_json::Value::String("world".to_string())
+        );
+        assert_eq!(queued[0].payload["n"], serde_json::Value::from(7));
+    }
+
+    #[test]
+    fn test_remote_event_on_server_event_from_agent_input() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local rs = game:GetService("ReplicatedStorage")
+            local remote = Instance.new("RemoteEvent")
+            remote.Name = "PlayerInput"
+            remote.Parent = rs
+
+            _G.remoteHit = false
+            _G.arg1 = nil
+            _G.arg2 = nil
+            _G.playerName = nil
+
+            remote.OnServerEvent:Connect(function(player, a, b)
+                _G.remoteHit = true
+                _G.arg1 = a
+                _G.arg2 = b
+                _G.playerName = player.Name
+            end)
+        "#,
+            )
+            .expect("Failed to run script");
+
+        let (_player, _hrp_id) = runtime.add_player(123, "Tester");
+        runtime.queue_agent_input(
+            123,
+            AgentInput::new(
+                "RemoteEvent".to_string(),
+                serde_json::json!({
+                    "name": "PlayerInput",
+                    "args": [42, "go"]
+                }),
+            ),
+        );
+        runtime
+            .process_agent_inputs()
+            .expect("Failed to process agent inputs");
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let hit: bool = globals.get("remoteHit").unwrap();
+        let arg1: i64 = globals.get("arg1").unwrap();
+        let arg2: String = globals.get("arg2").unwrap();
+        let player_name: String = globals.get("playerName").unwrap();
+        assert!(hit, "OnServerEvent should fire");
+        assert_eq!(arg1, 42);
+        assert_eq!(arg2, "go");
+        assert_eq!(player_name, "Tester");
+    }
+
+    #[test]
+    fn test_int_value_value_and_changed_signal() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local v = Instance.new("IntValue")
+            _G.changedTo = nil
+            v.Changed:Connect(function(n)
+                _G.changedTo = n
+            end)
+            v.Value = 12
+            _G.valueNow = v.Value
+        "#,
+            )
+            .expect("Failed to run script");
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let changed_to: i64 = globals.get("changedTo").unwrap();
+        let value_now: i64 = globals.get("valueNow").unwrap();
+        assert_eq!(changed_to, 12);
+        assert_eq!(value_now, 12);
+    }
+
+    #[test]
+    fn test_body_velocity_applies_to_parent_part_velocity() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local p = Instance.new("Part")
+            p.Parent = Workspace
+
+            local bv = Instance.new("BodyVelocity")
+            bv.MaxForce = Vector3.new(100000, 0, 100000)
+            bv.Velocity = Vector3.new(0, 0, -70)
+            bv.Parent = p
+
+            _G.vz = p.Velocity.Z
+        "#,
+            )
+            .expect("Failed to run script");
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let vz: f32 = globals.get("vz").unwrap();
+        assert!((vz + 70.0).abs() < 0.001);
     }
 }
