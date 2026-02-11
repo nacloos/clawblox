@@ -2188,6 +2188,51 @@ mod tests {
     }
 
     #[test]
+    fn test_other_value_base_types() {
+        let mut runtime = test_runtime();
+        runtime
+            .load_script(
+                r#"
+            local n = Instance.new("NumberValue")
+            local b = Instance.new("BoolValue")
+            local s = Instance.new("StringValue")
+
+            _G.nChanged = nil
+            _G.bChanged = nil
+            _G.sChanged = nil
+
+            n.Changed:Connect(function(v) _G.nChanged = v end)
+            b.Changed:Connect(function(v) _G.bChanged = v end)
+            s.Changed:Connect(function(v) _G.sChanged = v end)
+
+            n.Value = 3.5
+            b.Value = true
+            s.Value = "abc"
+
+            _G.nNow = n.Value
+            _G.bNow = b.Value
+            _G.sNow = s.Value
+        "#,
+            )
+            .expect("Failed to run script");
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let n_changed: f64 = globals.get("nChanged").unwrap();
+        let b_changed: bool = globals.get("bChanged").unwrap();
+        let s_changed: String = globals.get("sChanged").unwrap();
+        let n_now: f64 = globals.get("nNow").unwrap();
+        let b_now: bool = globals.get("bNow").unwrap();
+        let s_now: String = globals.get("sNow").unwrap();
+
+        assert!((n_changed - 3.5).abs() < 1e-6);
+        assert!(b_changed);
+        assert_eq!(s_changed, "abc");
+        assert!((n_now - 3.5).abs() < 1e-6);
+        assert!(b_now);
+        assert_eq!(s_now, "abc");
+    }
+
+    #[test]
     fn test_body_velocity_applies_to_parent_part_velocity() {
         let mut runtime = test_runtime();
         runtime

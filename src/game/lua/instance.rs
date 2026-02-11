@@ -49,6 +49,9 @@ pub enum ClassName {
     ServerScriptService,
     ReplicatedStorage,
     IntValue,
+    NumberValue,
+    BoolValue,
+    StringValue,
     // Constraints
     Weld,
     RemoteEvent,
@@ -86,6 +89,9 @@ impl ClassName {
             ClassName::ServerScriptService => "ServerScriptService",
             ClassName::ReplicatedStorage => "ReplicatedStorage",
             ClassName::IntValue => "IntValue",
+            ClassName::NumberValue => "NumberValue",
+            ClassName::BoolValue => "BoolValue",
+            ClassName::StringValue => "StringValue",
             ClassName::Weld => "Weld",
             ClassName::RemoteEvent => "RemoteEvent",
             ClassName::BodyVelocity => "BodyVelocity",
@@ -121,7 +127,16 @@ impl ClassName {
             "ServerScriptService" => matches!(self, ClassName::ServerScriptService),
             "ReplicatedStorage" => matches!(self, ClassName::ReplicatedStorage),
             "IntValue" => matches!(self, ClassName::IntValue),
-            "ValueBase" => matches!(self, ClassName::IntValue),
+            "NumberValue" => matches!(self, ClassName::NumberValue),
+            "BoolValue" => matches!(self, ClassName::BoolValue),
+            "StringValue" => matches!(self, ClassName::StringValue),
+            "ValueBase" => matches!(
+                self,
+                ClassName::IntValue
+                    | ClassName::NumberValue
+                    | ClassName::BoolValue
+                    | ClassName::StringValue
+            ),
             // Constraints
             "Constraint" => matches!(self, ClassName::Weld),
             "Weld" => matches!(self, ClassName::Weld),
@@ -220,6 +235,9 @@ pub struct InstanceData {
     pub ui_corner_data: Option<UICornerData>,
     pub script_data: Option<ScriptData>,
     pub int_value_data: Option<IntValueData>,
+    pub number_value_data: Option<NumberValueData>,
+    pub bool_value_data: Option<BoolValueData>,
+    pub string_value_data: Option<StringValueData>,
     pub remote_event_data: Option<RemoteEventData>,
     pub body_velocity_data: Option<BodyVelocityData>,
     pub property_changed_signals: HashMap<String, RBXScriptSignal>,
@@ -453,6 +471,51 @@ impl Default for IntValueData {
     fn default() -> Self {
         Self {
             value: 0,
+            changed: create_signal("Changed"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NumberValueData {
+    pub value: f64,
+    pub changed: RBXScriptSignal,
+}
+
+impl Default for NumberValueData {
+    fn default() -> Self {
+        Self {
+            value: 0.0,
+            changed: create_signal("Changed"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BoolValueData {
+    pub value: bool,
+    pub changed: RBXScriptSignal,
+}
+
+impl Default for BoolValueData {
+    fn default() -> Self {
+        Self {
+            value: false,
+            changed: create_signal("Changed"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StringValueData {
+    pub value: String,
+    pub changed: RBXScriptSignal,
+}
+
+impl Default for StringValueData {
+    fn default() -> Self {
+        Self {
+            value: String::new(),
             changed: create_signal("Changed"),
         }
     }
@@ -750,6 +813,9 @@ impl InstanceData {
             ui_corner_data: None,
             script_data: None,
             int_value_data: None,
+            number_value_data: None,
+            bool_value_data: None,
+            string_value_data: None,
             remote_event_data: None,
             body_velocity_data: None,
             property_changed_signals: HashMap::new(),
@@ -835,6 +901,24 @@ impl InstanceData {
     pub fn new_int_value(name: &str) -> Self {
         let mut inst = Self::new(ClassName::IntValue, name);
         inst.int_value_data = Some(IntValueData::default());
+        inst
+    }
+
+    pub fn new_number_value(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::NumberValue, name);
+        inst.number_value_data = Some(NumberValueData::default());
+        inst
+    }
+
+    pub fn new_bool_value(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::BoolValue, name);
+        inst.bool_value_data = Some(BoolValueData::default());
+        inst
+    }
+
+    pub fn new_string_value(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::StringValue, name);
+        inst.string_value_data = Some(StringValueData::default());
         inst
     }
 
@@ -1194,6 +1278,24 @@ impl Instance {
         if let Some(int_data) = &data.int_value_data {
             new_data.int_value_data = Some(IntValueData {
                 value: int_data.value,
+                changed: create_signal("Changed"),
+            });
+        }
+        if let Some(number_data) = &data.number_value_data {
+            new_data.number_value_data = Some(NumberValueData {
+                value: number_data.value,
+                changed: create_signal("Changed"),
+            });
+        }
+        if let Some(bool_data) = &data.bool_value_data {
+            new_data.bool_value_data = Some(BoolValueData {
+                value: bool_data.value,
+                changed: create_signal("Changed"),
+            });
+        }
+        if let Some(string_data) = &data.string_value_data {
+            new_data.string_value_data = Some(StringValueData {
+                value: string_data.value.clone(),
                 changed: create_signal("Changed"),
             });
         }
@@ -1649,26 +1751,67 @@ impl UserData for Instance {
 
         fields.add_field_method_get("Changed", |_, this| {
             let data = this.data.lock().unwrap();
-            Ok(data.int_value_data.as_ref().map(|v| v.changed.clone()))
+            Ok(data
+                .int_value_data
+                .as_ref()
+                .map(|v| v.changed.clone())
+                .or_else(|| data.number_value_data.as_ref().map(|v| v.changed.clone()))
+                .or_else(|| data.bool_value_data.as_ref().map(|v| v.changed.clone()))
+                .or_else(|| data.string_value_data.as_ref().map(|v| v.changed.clone())))
         });
 
-        fields.add_field_method_get("Value", |_, this| {
+        fields.add_field_method_get("Value", |lua, this| {
             let data = this.data.lock().unwrap();
-            Ok(data.int_value_data.as_ref().map(|v| v.value))
+            if let Some(v) = &data.int_value_data {
+                return Ok(Value::Integer(v.value));
+            }
+            if let Some(v) = &data.number_value_data {
+                return Ok(Value::Number(v.value));
+            }
+            if let Some(v) = &data.bool_value_data {
+                return Ok(Value::Boolean(v.value));
+            }
+            if let Some(v) = &data.string_value_data {
+                return Ok(Value::String(lua.create_string(&v.value)?));
+            }
+            Ok(Value::Nil)
         });
-        fields.add_field_method_set("Value", |lua, this, value: i64| {
+        fields.add_field_method_set("Value", |lua, this, value: Value| {
             let changed_signal = {
                 let mut data = this.data.lock().unwrap();
                 if let Some(v) = &mut data.int_value_data {
-                    v.value = value;
+                    v.value = match &value {
+                        Value::Integer(i) => *i,
+                        Value::Number(n) => *n as i64,
+                        _ => v.value,
+                    };
+                    Some(v.changed.clone())
+                } else if let Some(v) = &mut data.number_value_data {
+                    v.value = match &value {
+                        Value::Integer(i) => *i as f64,
+                        Value::Number(n) => *n,
+                        _ => v.value,
+                    };
+                    Some(v.changed.clone())
+                } else if let Some(v) = &mut data.bool_value_data {
+                    v.value = match &value {
+                        Value::Boolean(b) => *b,
+                        _ => v.value,
+                    };
+                    Some(v.changed.clone())
+                } else if let Some(v) = &mut data.string_value_data {
+                    if let Value::String(s) = &value {
+                        if let Ok(text) = s.to_str() {
+                            v.value = text.to_string();
+                        }
+                    }
                     Some(v.changed.clone())
                 } else {
                     None
                 }
             };
             if let Some(signal) = changed_signal {
-                let threads = signal
-                    .fire_as_coroutines(lua, MultiValue::from_iter([Value::Integer(value)]))?;
+                let threads = signal.fire_as_coroutines(lua, MultiValue::from_iter([value]))?;
                 crate::game::lua::events::track_yielded_threads(lua, threads)?;
             }
             Ok(())
@@ -2972,6 +3115,13 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
                         Instance::from_data(InstanceData::new_remote_event("RemoteEvent"))
                     }
                     "IntValue" => Instance::from_data(InstanceData::new_int_value("IntValue")),
+                    "NumberValue" => {
+                        Instance::from_data(InstanceData::new_number_value("NumberValue"))
+                    }
+                    "BoolValue" => Instance::from_data(InstanceData::new_bool_value("BoolValue")),
+                    "StringValue" => {
+                        Instance::from_data(InstanceData::new_string_value("StringValue"))
+                    }
                     "BodyVelocity" => {
                         Instance::from_data(InstanceData::new_body_velocity("BodyVelocity"))
                     }
