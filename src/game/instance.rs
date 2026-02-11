@@ -875,22 +875,29 @@ impl GameInstance {
                 };
 
                 // Roblox: both parts must have CanTouch=true for events to fire
-                let (a_can_touch, a_signal) = {
+                let (a_can_touch, a_group, a_signal) = {
                     let data = inst_a.data.lock().unwrap();
                     match data.part_data.as_ref() {
-                        Some(p) => (p.can_touch, p.touched.clone()),
+                        Some(p) => (p.can_touch, p.collision_group.clone(), p.touched.clone()),
                         None => continue,
                     }
                 };
-                let (b_can_touch, b_signal) = {
+                let (b_can_touch, b_group, b_signal) = {
                     let data = inst_b.data.lock().unwrap();
                     match data.part_data.as_ref() {
-                        Some(p) => (p.can_touch, p.touched.clone()),
+                        Some(p) => (p.can_touch, p.collision_group.clone(), p.touched.clone()),
                         None => continue,
                     }
                 };
 
                 if !a_can_touch || !b_can_touch {
+                    continue;
+                }
+                if !runtime
+                    .game()
+                    .physics_service()
+                    .groups_collidable(&a_group, &b_group)
+                {
                     continue;
                 }
 
@@ -909,22 +916,29 @@ impl GameInstance {
                     _ => continue,
                 };
 
-                let (a_can_touch, a_signal) = {
+                let (a_can_touch, a_group, a_signal) = {
                     let data = inst_a.data.lock().unwrap();
                     match data.part_data.as_ref() {
-                        Some(p) => (p.can_touch, p.touch_ended.clone()),
+                        Some(p) => (p.can_touch, p.collision_group.clone(), p.touch_ended.clone()),
                         None => continue,
                     }
                 };
-                let (b_can_touch, b_signal) = {
+                let (b_can_touch, b_group, b_signal) = {
                     let data = inst_b.data.lock().unwrap();
                     match data.part_data.as_ref() {
-                        Some(p) => (p.can_touch, p.touch_ended.clone()),
+                        Some(p) => (p.can_touch, p.collision_group.clone(), p.touch_ended.clone()),
                         None => continue,
                     }
                 };
 
                 if !a_can_touch || !b_can_touch {
+                    continue;
+                }
+                if !runtime
+                    .game()
+                    .physics_service()
+                    .groups_collidable(&a_group, &b_group)
+                {
                     continue;
                 }
 
@@ -3363,6 +3377,60 @@ mod tests {
             touch_count, 0.0,
             "Anchored+Anchored should never fire Touched. Got count={}",
             touch_count
+        );
+    }
+
+    #[test]
+    fn test_touched_respects_physics_service_collision_groups() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(
+            r#"
+            local PhysicsService = game:GetService("PhysicsService")
+
+            PhysicsService:RegisterCollisionGroup("PlayersGroup")
+            PhysicsService:RegisterCollisionGroup("TriggerGroup")
+            PhysicsService:CollisionGroupSetCollidable("PlayersGroup", "TriggerGroup", false)
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(200, 1, 200)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            local trigger = Instance.new("Part")
+            trigger.Name = "Trigger"
+            trigger.Size = Vector3.new(6, 6, 6)
+            trigger.Position = Vector3.new(10, 3, 0)
+            trigger.Anchored = true
+            trigger.CanCollide = false
+            trigger.Parent = Workspace
+            PhysicsService:SetPartCollisionGroup(trigger, "TriggerGroup")
+
+            trigger.Touched:Connect(function(otherPart)
+                trigger:SetAttribute("TouchCount",
+                    (trigger:GetAttribute("TouchCount") or 0) + 1)
+            end)
+
+            local mover = Instance.new("Part")
+            mover.Name = "Mover"
+            mover.Size = Vector3.new(4, 4, 4)
+            mover.Position = Vector3.new(10, 3, 0)
+            mover.Anchored = false
+            mover.Parent = Workspace
+            PhysicsService:SetPartCollisionGroup(mover, "PlayersGroup")
+        "#,
+        );
+
+        for _ in 0..20 {
+            instance.tick();
+        }
+
+        let touch_count = get_trigger_attr(&instance, "Trigger", "TouchCount");
+        assert_eq!(
+            touch_count, 0.0,
+            "Touched should not fire for non-collidable collision groups"
         );
     }
 

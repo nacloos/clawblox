@@ -14,10 +14,10 @@
   },
   "summary": {
     "full": 13,
-    "approximate": 3,
+    "approximate": 4,
     "api_only": 5,
     "missing": 4,
-    "overall_progress_percent": 76
+    "overall_progress_percent": 78
   },
   "features": [
     {
@@ -166,6 +166,18 @@
       "notes": "Both method and property-style child lookup supported."
     },
     {
+      "id": "physics_service_collision_groups",
+      "area": "PhysicsService",
+      "status": "approximate",
+      "api": [
+        "game:GetService('PhysicsService')",
+        "RegisterCollisionGroup",
+        "CollisionGroupSetCollidable",
+        "SetPartCollisionGroup"
+      ],
+      "notes": "Collision-group state is tracked and used for touch-event gating. Solver-level collision filtering parity is still pending."
+    },
+    {
       "id": "unknown_constraint_families",
       "area": "Constraints",
       "status": "missing",
@@ -257,10 +269,16 @@
       "feature": "get_debug_id",
       "reason": "Roblox internal ID format/semantics are proprietary engine behavior",
       "current_behavior": "stable synthetic ID"
+    },
+    {
+      "feature": "physics_service_collision_groups",
+      "reason": "Collision-group rules are not yet propagated into all low-level physics solver interactions",
+      "current_behavior": "group rules apply to script-level touch gating; broad-phase/narrow-phase filtering parity is partial"
     }
   ],
   "next_priority": [
     "Re-run failing run-set against latest CLI and capture delta",
+    "Wire PhysicsService collision groups into solver-level collision filtering paths",
     "Promote constraint shims (AlignOrientation/BodyAngularVelocity) from api_only toward approximate behavior",
     "Expand BrickColor table coverage to full Roblox named palette",
     "Document parity tiers in runtime docs and CI gating"

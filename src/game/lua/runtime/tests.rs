@@ -1856,7 +1856,7 @@ fn test_physics_service_api_exists() {
             PhysicsService:RegisterCollisionGroup("Players")
             PhysicsService:CollisionGroupSetCollidable("Players", "Players", true)
             PhysicsService:SetPartCollisionGroup(p, "Players")
-            _G.ok = PhysicsService ~= nil
+            _G.ok = PhysicsService ~= nil and p.CollisionGroup == "Players"
         "#,
         )
         .expect("Failed to run script");
