@@ -145,10 +145,52 @@ async fn observe(
 
     let agent_id = get_agent_id_from_api_key(&api_key, &state.api_key_cache, &state.pool).await?;
 
-    let observation = game::get_observation(&state.game_manager, game_id, agent_id)
+    let mut observation = game::get_observation(&state.game_manager, game_id, agent_id)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
+    if let Some(asset_info) = get_asset_info(&state, game_id).await? {
+        resolve_player_observation_assets(
+            &mut observation,
+            &asset_info.r2_public_url,
+            game_id,
+            asset_info.asset_version,
+        );
+    }
+
     Ok(Json(observation))
+}
+
+fn resolve_asset_url(url: &mut String, r2_public_url: &str, game_id: Uuid, asset_version: i32) {
+    if let Some(path) = url.strip_prefix("asset://") {
+        *url = format!(
+            "{}/games/{}/v{}/{}",
+            r2_public_url.trim_end_matches('/'),
+            game_id,
+            asset_version,
+            path
+        );
+    }
+}
+
+fn resolve_model_url_attrs(
+    attrs: &mut std::collections::HashMap<String, serde_json::Value>,
+    r2_public_url: &str,
+    game_id: Uuid,
+    asset_version: i32,
+) {
+    for key in ["ModelUrl", "model_url"] {
+        if let Some(value) = attrs.get_mut(key) {
+            if let Some(path) = value.as_str().and_then(|url| url.strip_prefix("asset://")) {
+                *value = serde_json::Value::String(format!(
+                    "{}/games/{}/v{}/{}",
+                    r2_public_url.trim_end_matches('/'),
+                    game_id,
+                    asset_version,
+                    path
+                ));
+            }
+        }
+    }
 }
 
 /// Resolve asset:// URLs in a SpectatorObservation to actual CDN URLs.
@@ -162,18 +204,59 @@ fn resolve_observation_assets(
 ) {
     for entity in &mut obs.entities {
         if let Some(ref mut url) = entity.model_url {
-            if let Some(path) = url.strip_prefix("asset://") {
-                *url = format!(
-                    "{}/games/{}/v{}/{}",
-                    r2_public_url.trim_end_matches('/'),
-                    game_id,
-                    asset_version,
-                    path
-                );
-            }
+            resolve_asset_url(url, r2_public_url, game_id, asset_version);
             // /static/ and https:// pass through unchanged
         }
     }
+}
+
+fn resolve_player_observation_assets(
+    obs: &mut PlayerObservation,
+    r2_public_url: &str,
+    game_id: Uuid,
+    asset_version: i32,
+) {
+    for entity in &mut obs.world.entities {
+        if let Some(attrs) = entity.attributes.as_mut() {
+            resolve_model_url_attrs(attrs, r2_public_url, game_id, asset_version);
+        }
+    }
+}
+
+struct AssetInfo {
+    r2_public_url: String,
+    asset_version: i32,
+}
+
+#[derive(sqlx::FromRow)]
+struct GameAssetInfoRow {
+    has_assets: bool,
+    asset_version: i32,
+}
+
+async fn get_asset_info(
+    state: &GameplayState,
+    game_id: Uuid,
+) -> Result<Option<AssetInfo>, (StatusCode, String)> {
+    let game: GameAssetInfoRow = sqlx::query_as("SELECT has_assets, asset_version FROM games WHERE id = $1")
+        .bind(game_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Game not found".to_string()))?;
+
+    if !game.has_assets {
+        return Ok(None);
+    }
+
+    let Some(r2_public_url) = state.r2_public_url.clone() else {
+        return Ok(None);
+    };
+
+    Ok(Some(AssetInfo {
+        r2_public_url,
+        asset_version: game.asset_version,
+    }))
 }
 
 async fn spectate(
@@ -288,8 +371,17 @@ async fn send_input(
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     // Return observation instead of simple success message (reduces round-trips)
-    let observation = game::get_observation(&state.game_manager, game_id, agent_id)
+    let mut observation = game::get_observation(&state.game_manager, game_id, agent_id)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    if let Some(asset_info) = get_asset_info(&state, game_id).await? {
+        resolve_player_observation_assets(
+            &mut observation,
+            &asset_info.r2_public_url,
+            game_id,
+            asset_info.asset_version,
+        );
+    }
 
     Ok(Json(observation))
 }

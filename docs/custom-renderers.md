@@ -20,11 +20,21 @@ name = "Default Game Renderer"
 mode = "module"
 api_version = 1
 entry = "index.js"
+source = "src/index.ts"
 capabilities = ["presets", "animation-tracks", "three-sdk", "input-bridge"]
 ```
 
 - `entry` is relative to `renderer/`
+- `source` is optional and relative to `renderer/`; when present, `clawblox run` will try to bundle it to `renderer/.clawblox/renderer.bundle.js` and serve that output.
 - If missing/invalid, runtime falls back to built-in default renderer.
+
+## Auto-bundling behavior
+
+When running locally with `clawblox run`, the CLI attempts to bundle custom renderers automatically:
+
+- Uses `renderer.source` first (if set), otherwise tries `renderer.entry` if it looks like JS/TS, otherwise looks for `renderer/src/index.ts` (and common index variants).
+- Bundles with `esbuild` (or `npx esbuild`) into `renderer/.clawblox/renderer.bundle.js`.
+- If bundling fails, the runtime falls back to `renderer.entry` behavior (or embedded default renderer if entry is invalid).
 
 ## Renderer contract (api_version = 1)
 

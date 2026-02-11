@@ -2607,7 +2607,7 @@ impl UserData for Instance {
             }
             hrp_data.attributes.insert(
                 "ModelUrl".to_string(),
-                AttributeValue::String("/static/models/player.glb".to_string()),
+                AttributeValue::String("asset://player.glb".to_string()),
             );
             let hrp = Instance::from_data(hrp_data);
             hrp.set_parent(Some(&character));

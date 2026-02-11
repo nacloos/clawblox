@@ -39,7 +39,7 @@ pub struct GameDataModel {
     pub kick_requests: Vec<KickRequest>,
 }
 
-const DEFAULT_PLAYER_MODEL_URL: &str = "/static/models/player.glb";
+const DEFAULT_PLAYER_MODEL_URL: &str = "asset://player.glb";
 
 impl GameDataModel {
     pub fn new(game_id: Uuid, async_bridge: Option<Arc<AsyncBridge>>) -> Self {

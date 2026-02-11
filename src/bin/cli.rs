@@ -16,6 +16,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -1129,10 +1130,10 @@ fn sanitize_renderer_entry(raw: &str) -> Option<String> {
 fn build_local_renderer_manifest(
     game_dir: &Path,
     config: &clawblox::config::RendererConfig,
+    entry_override: Option<&str>,
 ) -> LocalRendererManifest {
-    let entry_url = config
-        .entry
-        .as_deref()
+    let entry_candidate = entry_override.or(config.entry.as_deref());
+    let entry_url = entry_candidate
         .and_then(sanitize_renderer_entry)
         .and_then(|entry| {
             let local_path = game_dir.join("renderer").join(&entry);
@@ -1155,6 +1156,142 @@ fn build_local_renderer_manifest(
         mode: config.mode.clone(),
         entry_url,
         capabilities: config.capabilities.clone(),
+    }
+}
+
+fn is_renderer_source_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".ts")
+        || lower.ends_with(".tsx")
+        || lower.ends_with(".js")
+        || lower.ends_with(".jsx")
+        || lower.ends_with(".mjs")
+        || lower.ends_with(".cjs")
+}
+
+fn detect_renderer_source_entry(game_dir: &Path) -> Option<String> {
+    let candidates = [
+        "src/index.ts",
+        "src/index.tsx",
+        "src/index.js",
+        "src/index.jsx",
+        "index.ts",
+        "index.tsx",
+        "index.js",
+        "index.jsx",
+    ];
+    for c in candidates {
+        let p = game_dir.join("renderer").join(c);
+        if p.is_file() {
+            return Some(c.to_string());
+        }
+    }
+    None
+}
+
+fn command_exists(bin: &str) -> bool {
+    Command::new(bin).arg("--version").output().is_ok()
+}
+
+fn bundle_renderer_with_esbuild(game_dir: &Path, source_rel: &str, out_rel: &str) -> Result<(), String> {
+    let renderer_dir = game_dir.join("renderer");
+    let source = renderer_dir.join(source_rel);
+    let out = renderer_dir.join(out_rel);
+
+    let out_parent = out
+        .parent()
+        .ok_or_else(|| format!("Invalid renderer bundle output path: {}", out.display()))?;
+    std::fs::create_dir_all(out_parent)
+        .map_err(|e| format!("Failed to create renderer build dir {}: {}", out_parent.display(), e))?;
+
+    let mut cmd = if command_exists("esbuild") {
+        let mut c = Command::new("esbuild");
+        c.arg(source.as_os_str());
+        c
+    } else if command_exists("npx") {
+        let mut c = Command::new("npx");
+        c.args(["--yes", "esbuild"]);
+        c.arg(source.as_os_str());
+        c
+    } else {
+        return Err(
+            "Could not find esbuild or npx in PATH. Install esbuild (npm i -D esbuild) or Node.js."
+                .to_string(),
+        );
+    };
+
+    let output = cmd
+        .current_dir(game_dir)
+        .args([
+            "--bundle",
+            "--format=esm",
+            "--platform=browser",
+            "--target=es2020",
+            "--sourcemap",
+            "--log-level=warning",
+        ])
+        .arg(format!("--outfile={}", out.display()))
+        .output()
+        .map_err(|e| format!("Failed to spawn esbuild: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!(
+            "esbuild failed bundling {} -> {}.\nstdout:\n{}\nstderr:\n{}",
+            source.display(),
+            out.display(),
+            stdout,
+            stderr
+        ));
+    }
+
+    Ok(())
+}
+
+fn maybe_bundle_renderer_entry(
+    game_dir: &Path,
+    config: &clawblox::config::RendererConfig,
+) -> Option<String> {
+    if config.mode != "module" {
+        return None;
+    }
+
+    let source_rel = config
+        .source
+        .as_deref()
+        .and_then(sanitize_renderer_entry)
+        .or_else(|| {
+            config
+                .entry
+                .as_deref()
+                .and_then(sanitize_renderer_entry)
+                .filter(|entry| is_renderer_source_path(entry))
+        })
+        .or_else(|| detect_renderer_source_entry(game_dir));
+
+    let Some(source_rel) = source_rel else {
+        return None;
+    };
+
+    let source_path = game_dir.join("renderer").join(&source_rel);
+    if !source_path.is_file() {
+        return None;
+    }
+
+    let bundle_rel = "dist/renderer.bundle.js";
+    match bundle_renderer_with_esbuild(game_dir, &source_rel, bundle_rel) {
+        Ok(()) => {
+            println!(
+                "Renderer bundle: renderer/{} -> renderer/{}",
+                source_rel, bundle_rel
+            );
+            Some(bundle_rel.to_string())
+        }
+        Err(e) => {
+            eprintln!("Warning: renderer bundle skipped: {}", e);
+            None
+        }
     }
 }
 
@@ -1181,7 +1318,9 @@ fn run_game(path: PathBuf, port: u16, daemon: bool) {
         .skill
         .as_ref()
         .and_then(|skill_file| std::fs::read_to_string(path.join(skill_file)).ok());
-    let renderer_manifest = build_local_renderer_manifest(&path, &config.renderer);
+    let bundled_entry = maybe_bundle_renderer_entry(&path, &config.renderer);
+    let renderer_manifest =
+        build_local_renderer_manifest(&path, &config.renderer, bundled_entry.as_deref());
 
     let pid_file = pid_path(port);
 
@@ -1535,8 +1674,9 @@ async fn local_input(
     .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
 
     // Return observation
-    let observation = game::get_observation(&state.game_handle, state.game_id, agent_id)
+    let mut observation = game::get_observation(&state.game_handle, state.game_id, agent_id)
         .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
+    resolve_local_player_assets(&mut observation);
 
     Ok(Json(observation))
 }
@@ -1551,19 +1691,45 @@ async fn local_observe(
 
     let (agent_id, _) = get_session(&state, &headers)?;
 
-    let observation = game::get_observation(&state.game_handle, state.game_id, agent_id)
+    let mut observation = game::get_observation(&state.game_handle, state.game_id, agent_id)
         .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
+    resolve_local_player_assets(&mut observation);
 
     Ok(Json(observation))
 }
 
-/// Resolve asset:// URLs to local /assets/ paths for local development.
-fn resolve_local_assets(obs: &mut SpectatorObservation) {
+fn resolve_local_asset_url(url: &mut String) {
+    if let Some(path) = url.strip_prefix("asset://") {
+        *url = format!("/assets/{}", path);
+    }
+}
+
+fn resolve_local_model_url_attr(
+    attrs: &mut std::collections::HashMap<String, serde_json::Value>,
+) {
+    for key in ["ModelUrl", "model_url"] {
+        if let Some(value) = attrs.get_mut(key) {
+            if let Some(path) = value.as_str().and_then(|url| url.strip_prefix("asset://")) {
+                *value = serde_json::Value::String(format!("/assets/{}", path));
+            }
+        }
+    }
+}
+
+/// Resolve asset:// URLs to local /assets/ paths for local spectator observations.
+fn resolve_local_spectator_assets(obs: &mut SpectatorObservation) {
     for entity in &mut obs.entities {
         if let Some(ref mut url) = entity.model_url {
-            if let Some(path) = url.strip_prefix("asset://") {
-                *url = format!("/assets/{}", path);
-            }
+            resolve_local_asset_url(url);
+        }
+    }
+}
+
+/// Resolve asset:// URLs to local /assets/ paths for local player observations.
+fn resolve_local_player_assets(obs: &mut PlayerObservation) {
+    for entity in &mut obs.world.entities {
+        if let Some(attrs) = entity.attributes.as_mut() {
+            resolve_local_model_url_attr(attrs);
         }
     }
 }
@@ -1579,7 +1745,7 @@ async fn local_spectate(
         game::get_spectator_observation_for_instance(&state.game_handle, state.instance_id)
             .map_err(|e| (axum::http::StatusCode::NOT_FOUND, e))?;
 
-    resolve_local_assets(&mut observation);
+    resolve_local_spectator_assets(&mut observation);
 
     Ok(Json(observation))
 }
@@ -1638,7 +1804,7 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState) {
                 match observation {
                     Ok(obs) => {
                         let mut obs = obs;
-                        resolve_local_assets(&mut obs);
+                        resolve_local_spectator_assets(&mut obs);
 
                         if obs.tick != last_tick {
                             last_tick = obs.tick;

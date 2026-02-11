@@ -44,6 +44,10 @@ pub struct RendererConfig {
     /// Optional renderer module entrypoint relative to game_dir/renderer/.
     #[serde(default)]
     pub entry: Option<String>,
+    /// Optional renderer source entrypoint relative to game_dir/renderer/.
+    /// If set, local CLI can bundle this into a runtime-friendly ESM module.
+    #[serde(default)]
+    pub source: Option<String>,
     /// Optional declared capabilities for docs and tooling.
     #[serde(default)]
     pub capabilities: Vec<String>,
@@ -56,6 +60,7 @@ impl Default for RendererConfig {
             mode: default_renderer_mode(),
             api_version: default_renderer_api_version(),
             entry: None,
+            source: None,
             capabilities: vec![],
         }
     }
@@ -175,6 +180,7 @@ mod tests {
             mode = "module"
             api_version = 1
             entry = "index.js"
+            source = "src/index.ts"
             capabilities = ["camera.follow"]
         "#;
         let config: WorldConfig = toml::from_str(toml).unwrap();
@@ -185,6 +191,7 @@ mod tests {
         assert_eq!(config.scripts.tree, Some("scripts".to_string()));
         assert_eq!(config.renderer.mode, "module");
         assert_eq!(config.renderer.entry.as_deref(), Some("index.js"));
+        assert_eq!(config.renderer.source.as_deref(), Some("src/index.ts"));
         assert_eq!(config.renderer.api_version, 1);
     }
 }

@@ -302,7 +302,12 @@ async function bootstrap() {
     rendererTarget = loaded.target
   } catch (error) {
     console.error(error)
-    setStatus('Renderer load failed; using default', 'warn')
+    const configured = manifest?.entry_url
+    if (configured) {
+      setStatus(`Renderer load failed: ${configured}`, 'error')
+      return
+    }
+    setStatus('No custom renderer configured; using default', 'warn')
     const fallback = await import('/ui/renderers/default.js')
     rendererFactory = fallback.createRenderer
     rendererTarget = '/ui/renderers/default.js'
