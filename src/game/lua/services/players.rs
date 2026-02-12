@@ -9,6 +9,7 @@ pub struct PlayersServiceData {
     pub players: Vec<Instance>,
     pub local_player: Option<Instance>,
     pub max_players: u32,
+    pub character_auto_loads: bool,
     pub player_added: RBXScriptSignal,
     pub player_removing: RBXScriptSignal,
 }
@@ -23,6 +24,7 @@ impl PlayersServiceData {
             players: Vec::new(),
             local_player: None,
             max_players,
+            character_auto_loads: true,
             player_added: create_signal("PlayerAdded"),
             player_removing: create_signal("PlayerRemoving"),
         }
@@ -135,6 +137,13 @@ impl UserData for PlayersService {
 
         fields.add_field_method_get("MaxPlayers", |_, this| {
             Ok(this.data.lock().unwrap().max_players)
+        });
+        fields.add_field_method_get("CharacterAutoLoads", |_, this| {
+            Ok(this.data.lock().unwrap().character_auto_loads)
+        });
+        fields.add_field_method_set("CharacterAutoLoads", |_, this, enabled: bool| {
+            this.data.lock().unwrap().character_auto_loads = enabled;
+            Ok(())
         });
 
         fields.add_field_method_get("PlayerAdded", |_, this| {

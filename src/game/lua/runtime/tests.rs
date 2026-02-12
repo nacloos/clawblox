@@ -1507,6 +1507,78 @@ fn test_remote_event_typed_vector3_parity_from_agent_input() {
 }
 
 #[test]
+fn test_instance_clear_all_children_parity() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local folder = Instance.new("Folder")
+            folder.Name = "TokensFolder"
+            folder.Parent = Workspace
+
+            local a = Instance.new("Part")
+            a.Name = "A"
+            a.Parent = folder
+
+            local b = Instance.new("Part")
+            b.Name = "B"
+            b.Parent = folder
+
+            local c = Instance.new("Part")
+            c.Name = "C"
+            c.Parent = b
+
+            _G.beforeChildren = #folder:GetChildren()
+            folder:ClearAllChildren()
+            _G.afterChildren = #folder:GetChildren()
+            _G.aParentIsNil = (a.Parent == nil)
+            _G.bParentIsNil = (b.Parent == nil)
+            _G.cParentIsNil = (c.Parent == nil)
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let before_children: i64 = globals.get("beforeChildren").unwrap();
+    let after_children: i64 = globals.get("afterChildren").unwrap();
+    let a_parent_is_nil: bool = globals.get("aParentIsNil").unwrap();
+    let b_parent_is_nil: bool = globals.get("bParentIsNil").unwrap();
+    let c_parent_is_nil: bool = globals.get("cParentIsNil").unwrap();
+
+    assert_eq!(before_children, 2);
+    assert_eq!(after_children, 0);
+    assert!(a_parent_is_nil);
+    assert!(b_parent_is_nil);
+    assert!(c_parent_is_nil);
+}
+
+#[test]
+fn test_players_character_auto_loads_property_parity() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local Players = game:GetService("Players")
+            _G.defaultValue = Players.CharacterAutoLoads
+            Players.CharacterAutoLoads = false
+            _G.afterSetFalse = Players.CharacterAutoLoads
+            Players.CharacterAutoLoads = true
+            _G.afterSetTrue = Players.CharacterAutoLoads
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let default_value: bool = globals.get("defaultValue").unwrap();
+    let after_set_false: bool = globals.get("afterSetFalse").unwrap();
+    let after_set_true: bool = globals.get("afterSetTrue").unwrap();
+
+    assert!(default_value);
+    assert!(!after_set_false);
+    assert!(after_set_true);
+}
+
+#[test]
 fn test_int_value_value_and_changed_signal() {
     let mut runtime = test_runtime();
     runtime

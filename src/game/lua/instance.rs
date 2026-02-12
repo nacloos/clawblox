@@ -2827,6 +2827,15 @@ impl UserData for Instance {
 
         methods.add_method("Destroy", |lua, this, ()| this.destroy(lua));
 
+        methods.add_method("ClearAllChildren", |lua, this, ()| {
+            // Roblox parity: ClearAllChildren destroys all direct children.
+            // `destroy` recursively destroys descendants and updates parent/child signals.
+            for child in this.get_children() {
+                child.destroy(lua)?;
+            }
+            Ok(())
+        });
+
         methods.add_method("FireAllClients", |lua, this, args: MultiValue| {
             if this.class_name() != ClassName::RemoteEvent {
                 return Ok(());
