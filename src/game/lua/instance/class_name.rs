@@ -21,6 +21,7 @@ pub enum ClassName {
     NumberValue,
     BoolValue,
     StringValue,
+    ObjectValue,
     // Constraints
     Weld,
     RemoteEvent,
@@ -65,6 +66,7 @@ impl ClassName {
             ClassName::NumberValue => "NumberValue",
             ClassName::BoolValue => "BoolValue",
             ClassName::StringValue => "StringValue",
+            ClassName::ObjectValue => "ObjectValue",
             ClassName::Weld => "Weld",
             ClassName::RemoteEvent => "RemoteEvent",
             ClassName::BodyVelocity => "BodyVelocity",
@@ -107,12 +109,14 @@ impl ClassName {
             "NumberValue" => matches!(self, ClassName::NumberValue),
             "BoolValue" => matches!(self, ClassName::BoolValue),
             "StringValue" => matches!(self, ClassName::StringValue),
+            "ObjectValue" => matches!(self, ClassName::ObjectValue),
             "ValueBase" => matches!(
                 self,
                 ClassName::IntValue
                     | ClassName::NumberValue
                     | ClassName::BoolValue
                     | ClassName::StringValue
+                    | ClassName::ObjectValue
             ),
             // Constraints
             "Constraint" => matches!(self, ClassName::Weld),

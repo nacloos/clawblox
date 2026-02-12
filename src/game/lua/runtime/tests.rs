@@ -1603,6 +1603,66 @@ fn test_int_value_value_and_changed_signal() {
 }
 
 #[test]
+fn test_object_value_value_and_changed_signal_parity() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local folder = Instance.new("Folder")
+            folder.Name = "Root"
+            folder.Parent = Workspace
+
+            local ov = Instance.new("ObjectValue")
+            ov.Name = "Ref"
+            ov.Parent = folder
+
+            local target = Instance.new("Part")
+            target.Name = "TargetPart"
+            target.Parent = folder
+
+            _G.className = ov.ClassName
+            _G.initialNil = (ov.Value == nil)
+
+            _G.changedCount = 0
+            _G.lastChangedNil = false
+            ov.Changed:Connect(function(v)
+                _G.changedCount = _G.changedCount + 1
+                _G.lastChangedNil = (v == nil)
+            end)
+
+            ov.Value = target
+            _G.valueName = ov.Value and ov.Value.Name or ""
+
+            ov.Value = nil
+            _G.afterNil = (ov.Value == nil)
+
+            local ok, _err = pcall(function()
+                ov.Value = 123
+            end)
+            _G.invalidOk = ok
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let class_name: String = globals.get("className").unwrap();
+    let initial_nil: bool = globals.get("initialNil").unwrap();
+    let value_name: String = globals.get("valueName").unwrap();
+    let after_nil: bool = globals.get("afterNil").unwrap();
+    let changed_count: i64 = globals.get("changedCount").unwrap();
+    let last_changed_nil: bool = globals.get("lastChangedNil").unwrap();
+    let invalid_ok: bool = globals.get("invalidOk").unwrap();
+
+    assert_eq!(class_name, "ObjectValue");
+    assert!(initial_nil);
+    assert_eq!(value_name, "TargetPart");
+    assert!(after_nil);
+    assert_eq!(changed_count, 2);
+    assert!(last_changed_nil);
+    assert!(!invalid_ok);
+}
+
+#[test]
 fn test_other_value_base_types() {
     let mut runtime = test_runtime();
     runtime

@@ -68,6 +68,7 @@ pub struct InstanceData {
     pub number_value_data: Option<NumberValueData>,
     pub bool_value_data: Option<BoolValueData>,
     pub string_value_data: Option<StringValueData>,
+    pub object_value_data: Option<ObjectValueData>,
     pub remote_event_data: Option<RemoteEventData>,
     pub body_velocity_data: Option<BodyVelocityData>,
     pub body_force_data: Option<BodyForceData>,
@@ -363,6 +364,21 @@ impl Default for StringValueData {
     fn default() -> Self {
         Self {
             value: String::new(),
+            changed: create_signal("Changed"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ObjectValueData {
+    pub value: Option<WeakInstanceRef>,
+    pub changed: RBXScriptSignal,
+}
+
+impl Default for ObjectValueData {
+    fn default() -> Self {
+        Self {
+            value: None,
             changed: create_signal("Changed"),
         }
     }
@@ -714,6 +730,7 @@ impl InstanceData {
             number_value_data: None,
             bool_value_data: None,
             string_value_data: None,
+            object_value_data: None,
             remote_event_data: None,
             body_velocity_data: None,
             body_force_data: None,
@@ -821,6 +838,12 @@ impl InstanceData {
     pub fn new_string_value(name: &str) -> Self {
         let mut inst = Self::new(ClassName::StringValue, name);
         inst.string_value_data = Some(StringValueData::default());
+        inst
+    }
+
+    pub fn new_object_value(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::ObjectValue, name);
+        inst.object_value_data = Some(ObjectValueData::default());
         inst
     }
 
@@ -1264,6 +1287,12 @@ impl Instance {
         if let Some(string_data) = &data.string_value_data {
             new_data.string_value_data = Some(StringValueData {
                 value: string_data.value.clone(),
+                changed: create_signal("Changed"),
+            });
+        }
+        if let Some(object_data) = &data.object_value_data {
+            new_data.object_value_data = Some(ObjectValueData {
+                value: object_data.value.clone(),
                 changed: create_signal("Changed"),
             });
         }
@@ -1901,7 +1930,8 @@ impl UserData for Instance {
                 .map(|v| v.changed.clone())
                 .or_else(|| data.number_value_data.as_ref().map(|v| v.changed.clone()))
                 .or_else(|| data.bool_value_data.as_ref().map(|v| v.changed.clone()))
-                .or_else(|| data.string_value_data.as_ref().map(|v| v.changed.clone())))
+                .or_else(|| data.string_value_data.as_ref().map(|v| v.changed.clone()))
+                .or_else(|| data.object_value_data.as_ref().map(|v| v.changed.clone())))
         });
 
         fields.add_field_method_get("Value", |lua, this| {
@@ -1917,6 +1947,15 @@ impl UserData for Instance {
             }
             if let Some(v) = &data.string_value_data {
                 return Ok(Value::String(lua.create_string(&v.value)?));
+            }
+            if let Some(v) = &data.object_value_data {
+                if let Some(value_ref) = &v.value {
+                    if let Some(strong) = value_ref.upgrade() {
+                        let inst = Instance::from_ref(strong);
+                        return Ok(Value::UserData(Instance::cached_userdata(lua, &inst)?));
+                    }
+                }
+                return Ok(Value::Nil);
             }
             Ok(Value::Nil)
         });
@@ -1947,6 +1986,27 @@ impl UserData for Instance {
                     if let Value::String(s) = &value {
                         if let Ok(text) = s.to_str() {
                             v.value = text.to_string();
+                        }
+                    }
+                    Some(v.changed.clone())
+                } else if let Some(v) = &mut data.object_value_data {
+                    match &value {
+                        Value::Nil => {
+                            v.value = None;
+                        }
+                        Value::UserData(ud) => {
+                            if let Ok(inst) = ud.borrow::<Instance>() {
+                                v.value = Some(Arc::downgrade(&inst.data));
+                            } else {
+                                return Err(mlua::Error::runtime(
+                                    "ObjectValue.Value expects Instance or nil",
+                                ));
+                            }
+                        }
+                        _ => {
+                            return Err(mlua::Error::runtime(
+                                "ObjectValue.Value expects Instance or nil",
+                            ));
                         }
                     }
                     Some(v.changed.clone())
@@ -3451,6 +3511,9 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
                     "BoolValue" => Instance::from_data(InstanceData::new_bool_value("BoolValue")),
                     "StringValue" => {
                         Instance::from_data(InstanceData::new_string_value("StringValue"))
+                    }
+                    "ObjectValue" => {
+                        Instance::from_data(InstanceData::new_object_value("ObjectValue"))
                     }
                     "BodyVelocity" => {
                         Instance::from_data(InstanceData::new_body_velocity("BodyVelocity"))

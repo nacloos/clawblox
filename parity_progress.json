@@ -1,6 +1,6 @@
 {
   "report_version": "1.0",
-  "generated_at": "2026-02-11",
+  "generated_at": "2026-02-12",
   "scope": {
     "runtime": "clawblox",
     "workstream": "Roblox parity",
@@ -13,11 +13,11 @@
     "missing": "Not implemented or known to be incomplete"
   },
   "summary": {
-    "full": 23,
+    "full": 26,
     "approximate": 6,
     "api_only": 5,
     "missing": 4,
-    "overall_progress_percent": 92
+    "overall_progress_percent": 94
   },
   "features": [
     {
@@ -241,6 +241,27 @@
       "notes": "Method now returns cached Player userdata identity, allowing table-keyed state (e.g., PlayerData[player]) to work reliably."
     },
     {
+      "id": "instance_clear_all_children",
+      "area": "Instance",
+      "status": "full",
+      "api": ["Instance:ClearAllChildren"],
+      "notes": "Removes all direct children with parity-compatible behavior and event propagation."
+    },
+    {
+      "id": "players_character_auto_loads",
+      "area": "Players Service",
+      "status": "full",
+      "api": ["Players.CharacterAutoLoads"],
+      "notes": "Boolean property is readable/writable and respects server-side script expectations."
+    },
+    {
+      "id": "object_value_class",
+      "area": "ValueBase",
+      "status": "full",
+      "api": ["Instance.new('ObjectValue')", "ObjectValue.Value", "ObjectValue.Changed"],
+      "notes": "Supports Instance/nil assignment semantics and Changed signaling compatible with Roblox usage."
+    },
+    {
       "id": "unknown_constraint_families",
       "area": "Constraints",
       "status": "missing",
@@ -305,6 +326,13 @@
       "likely_root_cause": "API absent before fix",
       "mapped_feature": "get_debug_id",
       "expected_after_fix": "warning removed"
+    },
+    {
+      "run": "base_model (latest variants)",
+      "latest_issue": "Unknown class ObjectValue",
+      "likely_root_cause": "ObjectValue class/value semantics missing before fix",
+      "mapped_feature": "object_value_class",
+      "expected_after_fix": "script no longer halts on ObjectValue construction/value assignment"
     }
   ],
   "explicit_behavioral_limits": [
