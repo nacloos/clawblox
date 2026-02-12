@@ -1,4 +1,7 @@
-use mlua::{FromLua, Lua, MultiValue, Result, UserData, UserDataFields, UserDataMethods, Value};
+use mlua::{
+    AnyUserData, FromLua, Lua, MultiValue, Result, Table, UserData, UserDataFields,
+    UserDataMethods, Value,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -908,6 +911,27 @@ pub struct Instance {
 }
 
 impl Instance {
+    pub(crate) fn cached_userdata(lua: &Lua, instance: &Instance) -> Result<AnyUserData> {
+        const CACHE_KEY: &str = "__clawblox_instance_userdata_cache";
+        let cache = match lua.named_registry_value::<Table>(CACHE_KEY) {
+            Ok(table) => table,
+            Err(_) => {
+                let table = lua.create_table()?;
+                lua.set_named_registry_value(CACHE_KEY, table.clone())?;
+                table
+            }
+        };
+
+        let id_key = instance.id().0.to_string();
+        if let Ok(existing) = cache.get::<AnyUserData>(id_key.as_str()) {
+            return Ok(existing);
+        }
+
+        let created = lua.create_userdata(instance.clone())?;
+        cache.set(id_key.as_str(), created.clone())?;
+        Ok(created)
+    }
+
     pub fn new(class_name: ClassName, name: &str) -> Self {
         Self {
             data: Arc::new(Mutex::new(InstanceData::new(class_name, name))),
@@ -953,7 +977,7 @@ impl Instance {
         };
 
         let mut values = Vec::with_capacity(args.len() + 1);
-        values.push(Value::UserData(lua.create_userdata(player.clone())?));
+        values.push(Value::UserData(Instance::cached_userdata(lua, player)?));
         values.extend(args);
         let threads = signal.fire_as_coroutines(lua, MultiValue::from_iter(values))?;
         crate::game::lua::events::track_yielded_threads(lua, threads)?;

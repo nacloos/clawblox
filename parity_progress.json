@@ -13,11 +13,11 @@
     "missing": "Not implemented or known to be incomplete"
   },
   "summary": {
-    "full": 20,
+    "full": 22,
     "approximate": 6,
     "api_only": 5,
     "missing": 4,
-    "overall_progress_percent": 87
+    "overall_progress_percent": 90
   },
   "features": [
     {
@@ -218,6 +218,20 @@
       "status": "approximate",
       "api": ["Ray.new", "Workspace:FindPartOnRay", "Workspace:FindPartOnRayWithIgnoreList"],
       "notes": "Legacy ray API is supported via Workspace.Raycast-backed compatibility implementation."
+    },
+    {
+      "id": "dynamic_part_transform_writes",
+      "area": "Physics/Part",
+      "status": "full",
+      "api": ["Part.Position", "Part.CFrame"],
+      "notes": "Lua Position/CFrame writes now sync into both anchored and non-anchored physics bodies, enabling server-authoritative movement scripts."
+    },
+    {
+      "id": "player_userdata_identity_consistency",
+      "area": "Lua Runtime/Events",
+      "status": "full",
+      "api": ["Players.PlayerAdded callback arg", "RemoteEvent.OnServerEvent callback arg", "AgentInputService.InputReceived callback arg"],
+      "notes": "Player Instance userdata is cached per Lua runtime so table-keyed player state remains stable across callbacks."
     },
     {
       "id": "unknown_constraint_families",

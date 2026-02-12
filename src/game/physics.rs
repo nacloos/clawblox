@@ -279,6 +279,25 @@ impl PhysicsWorld {
         }
     }
 
+    /// Teleports a dynamic body to a world position.
+    pub fn set_dynamic_position(&mut self, handle: RigidBodyHandle, position: [f32; 3]) {
+        if let Some(body) = self.rigid_body_set.get_mut(handle) {
+            if body.is_dynamic() {
+                body.set_translation(vector![position[0], position[1], position[2]], true);
+            }
+        }
+    }
+
+    /// Sets a dynamic body's world orientation from a 3x3 rotation matrix.
+    pub fn set_dynamic_rotation(&mut self, handle: RigidBodyHandle, rotation: &[[f32; 3]; 3]) {
+        if let Some(body) = self.rigid_body_set.get_mut(handle) {
+            if body.is_dynamic() {
+                let quat = rotation_matrix_to_quaternion(rotation);
+                body.set_rotation(quat, true);
+            }
+        }
+    }
+
     /// Sets the velocity of a dynamic part
     pub fn set_velocity(&mut self, handle: RigidBodyHandle, velocity: [f32; 3]) {
         if let Some(body) = self.rigid_body_set.get_mut(handle) {

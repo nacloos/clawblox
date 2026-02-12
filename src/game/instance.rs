@@ -693,21 +693,36 @@ impl GameInstance {
                         part_data.shape_dirty = false;
                     }
 
-                    // Anchored parts - always sync position/rotation from Lua
-                    if part_data.anchored {
+                    // Position/CFrame writes from Lua should move both anchored and dynamic parts.
+                    // This preserves Roblox-like semantics for server-authoritative movement scripts.
+                    if part_data.position_dirty {
                         if let Some(handle) = self.physics.get_handle(lua_id) {
-                            self.physics.set_kinematic_position_with_dt(
-                                handle,
-                                [
-                                    part_data.position.x,
-                                    part_data.position.y,
-                                    part_data.position.z,
-                                ],
-                                dt,
-                            );
-                            self.physics
-                                .set_kinematic_rotation(handle, &part_data.cframe.rotation);
+                            if part_data.anchored {
+                                self.physics.set_kinematic_position_with_dt(
+                                    handle,
+                                    [
+                                        part_data.position.x,
+                                        part_data.position.y,
+                                        part_data.position.z,
+                                    ],
+                                    dt,
+                                );
+                                self.physics
+                                    .set_kinematic_rotation(handle, &part_data.cframe.rotation);
+                            } else {
+                                self.physics.set_dynamic_position(
+                                    handle,
+                                    [
+                                        part_data.position.x,
+                                        part_data.position.y,
+                                        part_data.position.z,
+                                    ],
+                                );
+                                self.physics
+                                    .set_dynamic_rotation(handle, &part_data.cframe.rotation);
+                            }
                         }
+                        part_data.position_dirty = false;
                     }
                 }
             }
@@ -3113,6 +3128,225 @@ mod tests {
             "Player should move significantly faster with higher WalkSpeed. Default: {}, Fast: {}",
             distance_default,
             distance_fast
+        );
+    }
+
+    #[test]
+    fn test_remote_event_position_write_on_unanchored_part_moves_xz() {
+        // Regression: scripts that move unanchored parts via Position writes each Heartbeat
+        // should move in X/Z when driven by RemoteEvent input.
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(
+            r#"
+            local Players = game:GetService("Players")
+            local ReplicatedStorage = game:GetService("ReplicatedStorage")
+            local RunService = game:GetService("RunService")
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(200, 1, 200)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            local input = Instance.new("RemoteEvent")
+            input.Name = "PlayerInput"
+            input.Parent = ReplicatedStorage
+
+            local moveByPlayer = {}
+            local bodyByPlayer = {}
+
+            Players.PlayerAdded:Connect(function(player)
+                local body = Instance.new("Part")
+                body.Name = player.Name .. "_Body"
+                body.Size = Vector3.new(4, 2, 2)
+                body.Anchored = false
+                body.CanCollide = true
+                body.Position = Vector3.new(0, 6, 0)
+                body.Parent = Workspace
+
+                bodyByPlayer[player] = body
+                moveByPlayer[player] = Vector3.new(0, 0, 0)
+            end)
+
+            input.OnServerEvent:Connect(function(player, moveVec)
+                moveByPlayer[player] = Vector3.new(moveVec.X, 0, moveVec.Z)
+            end)
+
+            RunService.Heartbeat:Connect(function(dt)
+                for player, body in pairs(bodyByPlayer) do
+                    if body and body.Parent then
+                        local v = moveByPlayer[player] or Vector3.new(0, 0, 0)
+                        body.Position = body.Position + v * 25 * dt
+                    end
+                end
+            end)
+        "#,
+        );
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "Probe"));
+        let user_id = *instance.players.get(&agent_id).unwrap();
+
+        for _ in 0..10 {
+            instance.tick();
+        }
+
+        let get_body_x = |instance: &GameInstance| {
+            let obs = instance.get_player_observation(agent_id).unwrap();
+            obs.world
+                .entities
+                .iter()
+                .find(|e| e.name == "Probe_Body")
+                .map(|e| e.position[0])
+                .expect("Probe_Body should exist in world entities")
+        };
+
+        let x_before = get_body_x(&instance);
+
+        for _ in 0..60 {
+            instance.queue_agent_input(
+                user_id,
+                "RemoteEvent".to_string(),
+                serde_json::json!({
+                    "name": "PlayerInput",
+                    "args": [{
+                        "$type": "Vector3",
+                        "x": 1.0,
+                        "y": 0.0,
+                        "z": 0.0
+                    }]
+                }),
+            );
+            instance.tick();
+        }
+
+        let x_after = get_body_x(&instance);
+        let dx = (x_after - x_before).abs();
+
+        assert!(
+            dx > 5.0,
+            "Probe_Body should move in X with RemoteEvent-driven Position writes. before={}, after={}, dx={}",
+            x_before,
+            x_after,
+            dx
+        );
+    }
+
+    #[test]
+    fn test_player_userdata_identity_stable_for_remote_event_tables() {
+        // Regression: scripts commonly key state by Player instance. The same player object
+        // must be seen across PlayerAdded and RemoteEvent.OnServerEvent.
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(
+            r#"
+            local Players = game:GetService("Players")
+            local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+            local input = Instance.new("RemoteEvent")
+            input.Name = "PlayerInput"
+            input.Parent = ReplicatedStorage
+
+            local seen = {}
+            local bodyByPlayer = {}
+            _G.remoteHitCount = 0
+            _G.identityOk = 0
+
+            Players.PlayerAdded:Connect(function(player)
+                local body = Instance.new("Part")
+                body.Name = player.Name .. "_Body"
+                body.Size = Vector3.new(2, 2, 2)
+                body.Anchored = true
+                body.Position = Vector3.new(0, 3, 0)
+                body.Parent = Workspace
+
+                seen[player] = true
+                bodyByPlayer[player] = body
+            end)
+
+            input.OnServerEvent:Connect(function(player, _moveVec)
+                _G.remoteHitCount = (_G.remoteHitCount or 0) + 1
+                _G.identityOk = seen[player] and 1 or 0
+                local body = bodyByPlayer[player]
+                if body then
+                    body:SetAttribute("RemoteHit", 1)
+                    body:SetAttribute("IdentityOk", seen[player] and 1 or 0)
+                end
+            end)
+        "#,
+        );
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "ProbeId"));
+        let user_id = *instance.players.get(&agent_id).unwrap();
+
+        // Let PlayerAdded handlers run and part replication settle.
+        for _ in 0..5 {
+            instance.tick();
+        }
+
+        for _ in 0..8 {
+            instance.queue_agent_input(
+                user_id,
+                "RemoteEvent".to_string(),
+                serde_json::json!({
+                    "name": "PlayerInput",
+                    "args": [{
+                        "$type": "Vector3",
+                        "x": 1.0,
+                        "y": 0.0,
+                        "z": 0.0
+                    }]
+                }),
+            );
+            instance.tick();
+        }
+
+        let globals = instance
+            .lua_runtime
+            .as_ref()
+            .expect("Lua runtime should exist")
+            .lua()
+            .globals();
+        let remote_hit_count: i64 = globals.get("remoteHitCount").unwrap_or(0);
+        let identity_ok_global: i64 = globals.get("identityOk").unwrap_or(0);
+
+        let obs = instance.get_player_observation(agent_id).unwrap();
+        let body = obs
+            .world
+            .entities
+            .iter()
+            .find(|e| e.name == "ProbeId_Body")
+            .expect("ProbeId_Body should exist");
+        let attrs = body.attributes.as_ref().expect("Body should have attributes");
+        let remote_hit = attrs
+            .get("RemoteHit")
+            .and_then(|v| v.as_f64())
+            .unwrap_or_default();
+        let identity_ok = attrs
+            .get("IdentityOk")
+            .and_then(|v| v.as_f64())
+            .unwrap_or_default();
+
+        assert!(
+            remote_hit_count > 0,
+            "OnServerEvent should run (remoteHitCount={})",
+            remote_hit_count
+        );
+        assert_eq!(
+            identity_ok_global, 1,
+            "identityOk global should be true after OnServerEvent"
+        );
+        assert!(
+            remote_hit > 0.5,
+            "Body attribute should confirm OnServerEvent path (RemoteHit={})",
+            remote_hit
+        );
+        assert_eq!(
+            identity_ok as i64, 1,
+            "Player identity should be stable for table key lookups across callbacks"
         );
     }
 

@@ -900,7 +900,9 @@ impl LuaRuntime {
         // Use fire_as_coroutines to allow callbacks to yield (e.g., for DataStore:GetAsync)
         let yielded_threads = signal.fire_as_coroutines(
             &self.lua,
-            MultiValue::from_iter([Value::UserData(self.lua.create_userdata(player.clone())?)]),
+            MultiValue::from_iter([Value::UserData(Instance::cached_userdata(
+                &self.lua, player,
+            )?)]),
         )?;
         // Track yielded threads for resumption
         self.track_yielded_threads(yielded_threads)?;
@@ -919,7 +921,9 @@ impl LuaRuntime {
         // Use fire_as_coroutines to allow callbacks to yield (e.g., for DataStore:SetAsync)
         let yielded_threads = signal.fire_as_coroutines(
             &self.lua,
-            MultiValue::from_iter([Value::UserData(self.lua.create_userdata(player.clone())?)]),
+            MultiValue::from_iter([Value::UserData(Instance::cached_userdata(
+                &self.lua, player,
+            )?)]),
         )?;
         self.track_yielded_threads(yielded_threads)?;
         Ok(())

@@ -72,7 +72,7 @@ impl AgentInputService {
         let threads = signal.fire_as_coroutines(
             lua,
             MultiValue::from_iter([
-                Value::UserData(lua.create_userdata(player.clone())?),
+                Value::UserData(Instance::cached_userdata(lua, player)?),
                 Value::String(lua.create_string(input_type)?),
                 lua_data,
             ]),
