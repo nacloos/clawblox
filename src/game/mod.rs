@@ -90,15 +90,22 @@ impl GameManager {
         error_mode: ErrorMode,
     ) -> (Self, GameManagerHandle) {
         let async_bridge = Arc::new(AsyncBridge::new(pool));
-        let state = Arc::new(GameManagerState::new(Some(async_bridge), error_mode, false));
+        Self::new_with_bridge(tick_rate, Some(async_bridge), error_mode, false)
+    }
+
+    pub fn new_with_bridge(
+        tick_rate: u64,
+        async_bridge: Option<Arc<AsyncBridge>>,
+        error_mode: ErrorMode,
+        disable_gc: bool,
+    ) -> (Self, GameManagerHandle) {
+        let state = Arc::new(GameManagerState::new(async_bridge, error_mode, disable_gc));
         let handle = Arc::clone(&state);
         (Self { state, tick_rate }, handle)
     }
 
     pub fn new_without_db(tick_rate: u64, error_mode: ErrorMode) -> (Self, GameManagerHandle) {
-        let state = Arc::new(GameManagerState::new(None, error_mode, true));
-        let handle = Arc::clone(&state);
-        (Self { state, tick_rate }, handle)
+        Self::new_with_bridge(tick_rate, None, error_mode, true)
     }
 
     pub fn run(self) {

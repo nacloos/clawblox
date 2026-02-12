@@ -9,7 +9,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use dashmap::DashMap;
 use flate2::{write::GzEncoder, Compression};
 use futures_util::{SinkExt, StreamExt};
@@ -30,15 +30,38 @@ use libc;
 use include_dir::{include_dir, Dir};
 use tower_http::services::ServeDir;
 
-use clawblox::game::{
-    self, find_or_create_instance,
-    instance::{ErrorMode, PlayerObservation, SpectatorObservation},
-    script_bundle::load_world_and_entry_script,
-    GameManager, GameManagerHandle,
+use clawblox::{
+    db,
+    game::{
+        self,
+        async_bridge::AsyncBridge,
+        find_or_create_instance,
+        instance::{ErrorMode, PlayerObservation, SpectatorObservation},
+        script_bundle::load_world_and_entry_script,
+        GameManager, GameManagerHandle,
+    },
 };
 
 static DOCS_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/docs");
 static LOCAL_RUNTIME_UI_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/frontend_runtime/dist");
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum LocalDatastore {
+    Sqlite,
+    Postgres,
+    #[value(name = "none")]
+    NoDb,
+}
+
+impl LocalDatastore {
+    fn as_arg(self) -> &'static str {
+        match self {
+            Self::Sqlite => "sqlite",
+            Self::Postgres => "postgres",
+            Self::NoDb => "none",
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "clawblox")]
@@ -55,7 +78,7 @@ enum Commands {
         /// Name for the new project (creates subdirectory). Omit to init in current directory.
         name: Option<String>,
     },
-    /// Run a game locally without database
+    /// Run a game locally
     Run {
         /// Path to game directory (default: current directory)
         #[arg(default_value = ".")]
@@ -66,6 +89,9 @@ enum Commands {
         /// Run as daemon (internal use only)
         #[arg(long, hide = true)]
         daemon: bool,
+        /// Datastore backend for local DataStoreService
+        #[arg(long, value_enum, default_value_t = LocalDatastore::Sqlite)]
+        datastore: LocalDatastore,
     },
     /// Start a game locally in background (daemon mode)
     Start {
@@ -75,6 +101,9 @@ enum Commands {
         /// Port to run the server on
         #[arg(short, long, default_value = "8080")]
         port: u16,
+        /// Datastore backend for local DataStoreService
+        #[arg(long, value_enum, default_value_t = LocalDatastore::Sqlite)]
+        datastore: LocalDatastore,
     },
     /// Stop a background game server started with `clawblox start`
     Stop {
@@ -124,8 +153,17 @@ fn main() {
 
     match cli.command {
         Commands::Init { name } => init_project(name),
-        Commands::Run { path, port, daemon } => run_game(path, port, daemon),
-        Commands::Start { path, port } => start_game(path, port),
+        Commands::Run {
+            path,
+            port,
+            daemon,
+            datastore,
+        } => run_game(path, port, daemon, datastore),
+        Commands::Start {
+            path,
+            port,
+            datastore,
+        } => start_game(path, port, datastore),
         Commands::Stop { port } => stop_game(port),
         Commands::Login {
             name,
@@ -1312,7 +1350,7 @@ fn maybe_bundle_renderer_entry(
     }
 }
 
-fn run_game(path: PathBuf, port: u16, daemon: bool) {
+fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
     let path = std::fs::canonicalize(&path).unwrap_or_else(|_| {
         eprintln!("Error: Path '{}' does not exist", path.display());
         std::process::exit(1);
@@ -1352,8 +1390,50 @@ fn run_game(path: PathBuf, port: u16, daemon: bool) {
         println!("Script tree: scripts (auto-detected)");
     }
 
-    // Create game manager without database (Halt mode: stop on first Lua error)
-    let (game_manager, game_handle) = GameManager::new_without_db(60, ErrorMode::Halt);
+    // Create game manager with selected datastore backend.
+    // Local run keeps GC disabled regardless of datastore mode.
+    let (game_manager, game_handle) = match datastore {
+        LocalDatastore::NoDb => {
+            println!("Datastore: none (DataStoreService disabled)");
+            GameManager::new_without_db(60, ErrorMode::Halt)
+        }
+        LocalDatastore::Postgres => {
+            println!("Datastore: postgres (via DATABASE_URL)");
+            let pool = tokio::runtime::Runtime::new()
+                .expect("Failed to create tokio runtime")
+                .block_on(async { db::create_pool().await })
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: failed to connect to postgres: {}", e);
+                    eprintln!("Hint: set DATABASE_URL or use --datastore sqlite");
+                    std::process::exit(1);
+                });
+            let bridge = Arc::new(AsyncBridge::from_postgres(Arc::new(pool)));
+            GameManager::new_with_bridge(60, Some(bridge), ErrorMode::Halt, true)
+        }
+        LocalDatastore::Sqlite => {
+            let db_path = path.join(".clawblox").join("local.db");
+            if let Some(parent) = db_path.parent() {
+                std::fs::create_dir_all(parent).unwrap_or_else(|e| {
+                    eprintln!("Error: failed to create local datastore directory: {}", e);
+                    std::process::exit(1);
+                });
+            }
+            println!("Datastore: sqlite ({})", db_path.display());
+            let pool = tokio::runtime::Runtime::new()
+                .expect("Failed to create tokio runtime")
+                .block_on(async {
+                    let pool = db::create_sqlite_pool(&db_path).await?;
+                    db::ensure_local_datastore_schema(&pool).await?;
+                    Ok::<_, sqlx::Error>(pool)
+                })
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: failed to initialize sqlite datastore: {}", e);
+                    std::process::exit(1);
+                });
+            let bridge = Arc::new(AsyncBridge::from_sqlite(Arc::new(pool)));
+            GameManager::new_with_bridge(60, Some(bridge), ErrorMode::Halt, true)
+        }
+    };
 
     // Use a random game_id for this session
     let game_id = Uuid::new_v4();
@@ -1450,7 +1530,7 @@ fn run_game(path: PathBuf, port: u16, daemon: bool) {
     });
 }
 
-fn start_game(path: PathBuf, port: u16) {
+fn start_game(path: PathBuf, port: u16, datastore: LocalDatastore) {
     let path = std::fs::canonicalize(&path).unwrap_or_else(|_| {
         eprintln!("Error: Path '{}' does not exist", path.display());
         std::process::exit(1);
@@ -1475,6 +1555,8 @@ fn start_game(path: PathBuf, port: u16) {
             &path.to_string_lossy(),
             "--port",
             &port.to_string(),
+            "--datastore",
+            datastore.as_arg(),
             "--daemon",
         ])
         .stdout(log_file)
