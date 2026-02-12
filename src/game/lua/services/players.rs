@@ -1,4 +1,4 @@
-use mlua::{UserData, UserDataFields, UserDataMethods};
+use mlua::{UserData, UserDataFields, UserDataMethods, Value};
 use std::sync::{Arc, Mutex};
 
 use crate::game::lua::events::create_signal;
@@ -152,8 +152,12 @@ impl UserData for PlayersService {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("GetPlayers", |_, this, ()| Ok(this.get_players()));
 
-        methods.add_method("GetPlayerByUserId", |_, this, user_id: u64| {
-            Ok(this.get_player_by_user_id(user_id))
+        methods.add_method("GetPlayerByUserId", |lua, this, user_id: u64| {
+            if let Some(player) = this.get_player_by_user_id(user_id) {
+                Ok(Value::UserData(Instance::cached_userdata(lua, &player)?))
+            } else {
+                Ok(Value::Nil)
+            }
         });
 
         methods.add_method("GetPlayerFromCharacter", |_, this, character: Instance| {

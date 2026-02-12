@@ -3351,6 +3351,150 @@ mod tests {
     }
 
     #[test]
+    fn test_collectible_touched_owner_player_lookup_path() {
+        // Reproduces generated-game collectible logic:
+        // hit:GetAttribute("Owner") -> Players:GetPlayerByUserId(ownerId)
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(
+            r#"
+            local Players = game:GetService("Players")
+            local ReplicatedStorage = game:GetService("ReplicatedStorage")
+            local RunService = game:GetService("RunService")
+
+            local input = Instance.new("RemoteEvent")
+            input.Name = "PlayerInput"
+            input.Parent = ReplicatedStorage
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(200, 1, 200)
+            floor.Anchored = true
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Parent = Workspace
+
+            local bodyByPlayer = {}
+            local moveByPlayer = {}
+
+            local collectible = Instance.new("Part")
+            collectible.Name = "Collectible"
+            collectible.Size = Vector3.new(2, 2, 2)
+            collectible.Shape = Enum.PartType.Ball
+            collectible.Anchored = true
+            collectible.CanCollide = false
+            collectible.Position = Vector3.new(20, 3, 0)
+            collectible.Parent = Workspace
+            collectible:SetAttribute("HitCount", 0)
+            collectible:SetAttribute("LookupOk", 0)
+
+            collectible.Touched:Connect(function(hit)
+                collectible:SetAttribute("HitCount", (collectible:GetAttribute("HitCount") or 0) + 1)
+                local ownerId = hit:GetAttribute("Owner")
+                if ownerId then
+                    local player = Players:GetPlayerByUserId(ownerId)
+                    if player then
+                        collectible:SetAttribute("LookupOk", 1)
+                    end
+                end
+            end)
+
+            Players.PlayerAdded:Connect(function(player)
+                local body = Instance.new("Part")
+                body.Name = player.Name .. "_Body"
+                body.Size = Vector3.new(4, 2, 2)
+                body.Anchored = false
+                body.CanCollide = true
+                body.Position = Vector3.new(0, 6, 0)
+                body:SetAttribute("Owner", player.UserId)
+                body.Parent = Workspace
+                bodyByPlayer[player] = body
+                moveByPlayer[player] = Vector3.new(0, 0, 0)
+            end)
+
+            input.OnServerEvent:Connect(function(player, moveVec)
+                moveByPlayer[player] = Vector3.new(moveVec.X, 0, moveVec.Z)
+            end)
+
+            RunService.Heartbeat:Connect(function(dt)
+                for player, body in pairs(bodyByPlayer) do
+                    local v = moveByPlayer[player] or Vector3.new(0, 0, 0)
+                    body.Position = body.Position + v * 25 * dt
+                end
+            end)
+        "#,
+        );
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "ProbeTouch"));
+        let user_id = *instance.players.get(&agent_id).unwrap();
+
+        for _ in 0..10 {
+            instance.tick();
+        }
+
+        // Drive body roughly toward collectible at x=20,z=0
+        for _ in 0..80 {
+            instance.queue_agent_input(
+                user_id,
+                "RemoteEvent".to_string(),
+                serde_json::json!({
+                    "name": "PlayerInput",
+                    "args": [{
+                        "$type": "Vector3",
+                        "x": 1.0,
+                        "y": 0.0,
+                        "z": 0.0
+                    }]
+                }),
+            );
+            instance.tick();
+        }
+        for _ in 0..10 {
+            instance.queue_agent_input(
+                user_id,
+                "RemoteEvent".to_string(),
+                serde_json::json!({
+                    "name": "PlayerInput",
+                    "args": [{
+                        "$type": "Vector3",
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 0.0
+                    }]
+                }),
+            );
+            instance.tick();
+        }
+
+        let obs = instance.get_player_observation(agent_id).unwrap();
+        let collectible = obs
+            .world
+            .entities
+            .iter()
+            .find(|e| e.name == "Collectible")
+            .expect("Collectible should exist");
+        let attrs = collectible
+            .attributes
+            .as_ref()
+            .expect("Collectible should have attributes");
+
+        let hit_count = attrs
+            .get("HitCount")
+            .and_then(|v| v.as_f64())
+            .unwrap_or_default();
+        let lookup_ok = attrs
+            .get("LookupOk")
+            .and_then(|v| v.as_f64())
+            .unwrap_or_default();
+
+        assert!(hit_count >= 1.0, "Touched should fire at least once");
+        assert!(
+            lookup_ok >= 1.0,
+            "GetPlayerByUserId(ownerId) should resolve the touching player"
+        );
+    }
+
+    #[test]
     fn test_touched_events_fire_on_overlap() {
         let mut instance = GameInstance::new(Uuid::new_v4(), None);
 

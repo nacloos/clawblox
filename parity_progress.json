@@ -13,11 +13,11 @@
     "missing": "Not implemented or known to be incomplete"
   },
   "summary": {
-    "full": 22,
+    "full": 23,
     "approximate": 6,
     "api_only": 5,
     "missing": 4,
-    "overall_progress_percent": 90
+    "overall_progress_percent": 92
   },
   "features": [
     {
@@ -232,6 +232,13 @@
       "status": "full",
       "api": ["Players.PlayerAdded callback arg", "RemoteEvent.OnServerEvent callback arg", "AgentInputService.InputReceived callback arg"],
       "notes": "Player Instance userdata is cached per Lua runtime so table-keyed player state remains stable across callbacks."
+    },
+    {
+      "id": "players_getplayerbyuserid_identity",
+      "area": "Players Service",
+      "status": "full",
+      "api": ["Players:GetPlayerByUserId"],
+      "notes": "Method now returns cached Player userdata identity, allowing table-keyed state (e.g., PlayerData[player]) to work reliably."
     },
     {
       "id": "unknown_constraint_families",
