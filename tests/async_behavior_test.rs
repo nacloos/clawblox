@@ -53,7 +53,9 @@ fn test_resume_async_function() {
         .expect("Failed to create async function");
 
     // Create a thread and resume it
-    let thread = lua.create_thread(async_fn).expect("Failed to create thread");
+    let thread = lua
+        .create_thread(async_fn)
+        .expect("Failed to create thread");
 
     println!("Thread status before resume: {:?}", thread.status());
 
@@ -83,7 +85,9 @@ fn test_resume_immediate_async() {
         })
         .expect("Failed to create async function");
 
-    let thread = lua.create_thread(async_fn).expect("Failed to create thread");
+    let thread = lua
+        .create_thread(async_fn)
+        .expect("Failed to create thread");
 
     println!("Thread status before: {:?}", thread.status());
 
@@ -101,12 +105,12 @@ fn test_async_in_lua_coroutine() {
     let lua = Lua::new();
 
     let async_fn = lua
-        .create_async_function(|_lua, ()| async {
-            Ok(Value::Integer(42))
-        })
+        .create_async_function(|_lua, ()| async { Ok(Value::Integer(42)) })
         .expect("Failed to create async function");
 
-    lua.globals().set("async_fn", async_fn).expect("Failed to set global");
+    lua.globals()
+        .set("async_fn", async_fn)
+        .expect("Failed to set global");
 
     // Create a Lua coroutine that calls our async function
     let lua_code = r#"
@@ -120,7 +124,10 @@ fn test_async_in_lua_coroutine() {
     "#;
 
     let result: (bool, Value, String) = lua.load(lua_code).eval().expect("Failed to run Lua");
-    println!("Lua coroutine result: status={}, result={:?}, co_status={}", result.0, result.1, result.2);
+    println!(
+        "Lua coroutine result: status={}, result={:?}, co_status={}",
+        result.0, result.1, result.2
+    );
 }
 
 /// Test the nested coroutine pattern (what our DataStore does)
@@ -132,9 +139,8 @@ fn test_nested_thread_pattern() {
     let get_async_impl = lua
         .create_function(|lua, ()| {
             // Create an async function internally
-            let async_fn = lua.create_async_function(|_lua, ()| async {
-                Ok(Value::Integer(42))
-            })?;
+            let async_fn =
+                lua.create_async_function(|_lua, ()| async { Ok(Value::Integer(42)) })?;
 
             // Create a thread and resume it
             let thread = lua.create_thread(async_fn)?;
@@ -145,10 +151,15 @@ fn test_nested_thread_pattern() {
         })
         .expect("Failed to create function");
 
-    lua.globals().set("get_async", get_async_impl).expect("Failed to set global");
+    lua.globals()
+        .set("get_async", get_async_impl)
+        .expect("Failed to set global");
 
     // Call it from Lua
-    let result: Value = lua.load("return get_async()").eval().expect("Failed to run");
+    let result: Value = lua
+        .load("return get_async()")
+        .eval()
+        .expect("Failed to run");
     println!("Nested pattern result: {:?}", result);
 }
 
@@ -176,7 +187,9 @@ fn test_detect_pending_value() {
         })
         .expect("Failed to create async function");
 
-    let thread = lua.create_thread(async_fn).expect("Failed to create thread");
+    let thread = lua
+        .create_thread(async_fn)
+        .expect("Failed to create thread");
 
     // First resume - should return PENDING
     let result = thread.resume::<Value>(()).expect("Resume failed");
@@ -228,7 +241,9 @@ fn test_polling_until_complete() {
         })
         .expect("Failed to create async function");
 
-    let thread = lua.create_thread(async_fn).expect("Failed to create thread");
+    let thread = lua
+        .create_thread(async_fn)
+        .expect("Failed to create thread");
 
     // Start the async operation
     let _ = thread.resume::<Value>(());

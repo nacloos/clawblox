@@ -99,15 +99,27 @@ impl CFrame {
     }
 
     pub fn look_vector(&self) -> Vector3 {
-        Vector3::new(-self.rotation[0][2], -self.rotation[1][2], -self.rotation[2][2])
+        Vector3::new(
+            -self.rotation[0][2],
+            -self.rotation[1][2],
+            -self.rotation[2][2],
+        )
     }
 
     pub fn right_vector(&self) -> Vector3 {
-        Vector3::new(self.rotation[0][0], self.rotation[1][0], self.rotation[2][0])
+        Vector3::new(
+            self.rotation[0][0],
+            self.rotation[1][0],
+            self.rotation[2][0],
+        )
     }
 
     pub fn up_vector(&self) -> Vector3 {
-        Vector3::new(self.rotation[0][1], self.rotation[1][1], self.rotation[2][1])
+        Vector3::new(
+            self.rotation[0][1],
+            self.rotation[1][1],
+            self.rotation[2][1],
+        )
     }
 
     pub fn inverse(&self) -> Self {
@@ -225,15 +237,9 @@ impl CFrame {
             point.z - self.position.z,
         );
         Vector3::new(
-            self.rotation[0][0] * rel.x
-                + self.rotation[1][0] * rel.y
-                + self.rotation[2][0] * rel.z,
-            self.rotation[0][1] * rel.x
-                + self.rotation[1][1] * rel.y
-                + self.rotation[2][1] * rel.z,
-            self.rotation[0][2] * rel.x
-                + self.rotation[1][2] * rel.y
-                + self.rotation[2][2] * rel.z,
+            self.rotation[0][0] * rel.x + self.rotation[1][0] * rel.y + self.rotation[2][0] * rel.z,
+            self.rotation[0][1] * rel.x + self.rotation[1][1] * rel.y + self.rotation[2][1] * rel.z,
+            self.rotation[0][2] * rel.x + self.rotation[1][2] * rel.y + self.rotation[2][2] * rel.z,
         )
     }
 
@@ -306,11 +312,14 @@ impl UserData for CFrame {
         });
         methods.add_method("GetComponents", |_, this, ()| {
             let c = this.get_components();
-            Ok((c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11]))
+            Ok((
+                c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11],
+            ))
         });
 
-        methods.add_meta_method(MetaMethod::Mul, |lua, this, value: mlua::Value| {
-            match value {
+        methods.add_meta_method(
+            MetaMethod::Mul,
+            |lua, this, value: mlua::Value| match value {
                 mlua::Value::UserData(ud) => {
                     if let Ok(cf) = ud.borrow::<CFrame>() {
                         Ok(mlua::Value::UserData(
@@ -325,8 +334,8 @@ impl UserData for CFrame {
                     }
                 }
                 _ => Err(mlua::Error::runtime("Expected CFrame or Vector3")),
-            }
-        });
+            },
+        );
 
         methods.add_meta_method(MetaMethod::Add, |_, this, v: Vector3| {
             Ok(CFrame {
@@ -364,32 +373,30 @@ pub fn register_cframe(lua: &Lua) -> Result<()> {
 
     cframe_table.set(
         "new",
-        lua.create_function(
-            |inner_lua, args: mlua::MultiValue| -> Result<CFrame> {
-                match args.len() {
-                    0 => Ok(CFrame::identity()),
-                    1 => {
-                        let mut iter = args.into_iter();
-                        let pos: Vector3 = mlua::FromLua::from_lua(iter.next().unwrap(), inner_lua)?;
-                        Ok(CFrame::from_position(pos))
-                    }
-                    3 => {
-                        let mut iter = args.into_iter();
-                        let x: f32 = mlua::FromLua::from_lua(iter.next().unwrap(), inner_lua)?;
-                        let y: f32 = mlua::FromLua::from_lua(iter.next().unwrap(), inner_lua)?;
-                        let z: f32 = mlua::FromLua::from_lua(iter.next().unwrap(), inner_lua)?;
-                        Ok(CFrame::new(x, y, z))
-                    }
-                    2 => {
-                        let mut iter = args.into_iter();
-                        let pos: Vector3 = mlua::FromLua::from_lua(iter.next().unwrap(), inner_lua)?;
-                        let target: Vector3 = mlua::FromLua::from_lua(iter.next().unwrap(), inner_lua)?;
-                        Ok(CFrame::look_at(pos, target, None))
-                    }
-                    _ => Err(mlua::Error::runtime("Invalid arguments to CFrame.new")),
+        lua.create_function(|inner_lua, args: mlua::MultiValue| -> Result<CFrame> {
+            match args.len() {
+                0 => Ok(CFrame::identity()),
+                1 => {
+                    let mut iter = args.into_iter();
+                    let pos: Vector3 = mlua::FromLua::from_lua(iter.next().unwrap(), inner_lua)?;
+                    Ok(CFrame::from_position(pos))
                 }
-            },
-        )?,
+                3 => {
+                    let mut iter = args.into_iter();
+                    let x: f32 = mlua::FromLua::from_lua(iter.next().unwrap(), inner_lua)?;
+                    let y: f32 = mlua::FromLua::from_lua(iter.next().unwrap(), inner_lua)?;
+                    let z: f32 = mlua::FromLua::from_lua(iter.next().unwrap(), inner_lua)?;
+                    Ok(CFrame::new(x, y, z))
+                }
+                2 => {
+                    let mut iter = args.into_iter();
+                    let pos: Vector3 = mlua::FromLua::from_lua(iter.next().unwrap(), inner_lua)?;
+                    let target: Vector3 = mlua::FromLua::from_lua(iter.next().unwrap(), inner_lua)?;
+                    Ok(CFrame::look_at(pos, target, None))
+                }
+                _ => Err(mlua::Error::runtime("Invalid arguments to CFrame.new")),
+            }
+        })?,
     )?;
 
     cframe_table.set(

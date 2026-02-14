@@ -46,11 +46,7 @@ fn mat_t_mul_vec(m: &[[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-fn intersect_box_local(
-    origin: [f32; 3],
-    dir: [f32; 3],
-    half: [f32; 3],
-) -> Option<(f32, [f32; 3])> {
+fn intersect_box_local(origin: [f32; 3], dir: [f32; 3], half: [f32; 3]) -> Option<(f32, [f32; 3])> {
     let eps = 1e-8;
     let mut t_near = f32::NEG_INFINITY;
     let mut t_far = f32::INFINITY;
@@ -315,9 +311,8 @@ fn obb_intersects_obb(
                 + half_a[(i + 2) % 3] * abs_r[(i + 1) % 3][j];
             let rb = half_b[(j + 1) % 3] * abs_r[i][(j + 2) % 3]
                 + half_b[(j + 2) % 3] * abs_r[i][(j + 1) % 3];
-            let t_proj = (t[(i + 2) % 3] * r[(i + 1) % 3][j]
-                - t[(i + 1) % 3] * r[(i + 2) % 3][j])
-                .abs();
+            let t_proj =
+                (t[(i + 2) % 3] * r[(i + 1) % 3][j] - t[(i + 1) % 3] * r[(i + 2) % 3][j]).abs();
             if t_proj > ra + rb {
                 return false;
             }
@@ -365,11 +360,11 @@ fn shape_from_part(size: Vector3, shape: PartType) -> Option<SharedShape> {
             let hz = sz / 2.0;
             let points = [
                 point![-hx, -hy, -hz],
-                point![ hx, -hy, -hz],
-                point![-hx, -hy,  hz],
-                point![ hx, -hy,  hz],
-                point![-hx,  hy, -hz],
-                point![-hx,  hy,  hz],
+                point![hx, -hy, -hz],
+                point![-hx, -hy, hz],
+                point![hx, -hy, hz],
+                point![-hx, hy, -hz],
+                point![-hx, hy, hz],
             ];
             SharedShape::convex_hull(&points)?
         }
@@ -378,9 +373,15 @@ fn shape_from_part(size: Vector3, shape: PartType) -> Option<SharedShape> {
 
 fn cframe_to_isometry(cframe: CFrame) -> Isometry3<f32> {
     let m = Matrix3::new(
-        cframe.rotation[0][0], cframe.rotation[0][1], cframe.rotation[0][2],
-        cframe.rotation[1][0], cframe.rotation[1][1], cframe.rotation[1][2],
-        cframe.rotation[2][0], cframe.rotation[2][1], cframe.rotation[2][2],
+        cframe.rotation[0][0],
+        cframe.rotation[0][1],
+        cframe.rotation[0][2],
+        cframe.rotation[1][0],
+        cframe.rotation[1][1],
+        cframe.rotation[1][2],
+        cframe.rotation[2][0],
+        cframe.rotation[2][1],
+        cframe.rotation[2][2],
     );
     let rot = Rotation3::from_matrix_unchecked(m);
     Isometry3::from_parts(
@@ -651,7 +652,9 @@ impl WorkspaceService {
                 })
             }; // Lock released here
 
-            let Some((can_query, can_collide, collision_group, size, position, rotation, shape)) = part_info else {
+            let Some((can_query, can_collide, collision_group, size, position, rotation, shape)) =
+                part_info
+            else {
                 continue;
             };
 
@@ -670,9 +673,10 @@ impl WorkspaceService {
             }
 
             // Now check filtering without holding any lock
-            let should_filter = params.filter_instances.iter().any(|i| {
-                i.id() == descendant.id() || descendant.is_descendant_of(i)
-            });
+            let should_filter = params
+                .filter_instances
+                .iter()
+                .any(|i| i.id() == descendant.id() || descendant.is_descendant_of(i));
 
             let skip = match params.filter_type {
                 RaycastFilterType::Exclude => should_filter,
@@ -701,7 +705,9 @@ impl WorkspaceService {
             let hit = match shape {
                 PartType::Block => intersect_box_local(local_origin, local_dir, half),
                 PartType::Ball => intersect_sphere_local(local_origin, local_dir, half[0]),
-                PartType::Cylinder => intersect_cylinder_local(local_origin, local_dir, half[0], half[1]),
+                PartType::Cylinder => {
+                    intersect_cylinder_local(local_origin, local_dir, half[0], half[1])
+                }
                 PartType::Wedge => intersect_wedge_local(local_origin, local_dir, half),
             };
 
@@ -746,9 +752,10 @@ impl WorkspaceService {
 
         let mut out = Vec::new();
         for inst in self.get_descendants() {
-            let should_filter = params.filter_instances.iter().any(|i| {
-                i.id() == inst.id() || inst.is_descendant_of(i)
-            });
+            let should_filter = params
+                .filter_instances
+                .iter()
+                .any(|i| i.id() == inst.id() || inst.is_descendant_of(i));
             let skip = match params.filter_type {
                 RaycastFilterType::Exclude => should_filter,
                 RaycastFilterType::Include => !should_filter,
@@ -808,9 +815,10 @@ impl WorkspaceService {
         let sphere_center = [position.x, position.y, position.z];
         let mut out = Vec::new();
         for inst in self.get_descendants() {
-            let should_filter = params.filter_instances.iter().any(|i| {
-                i.id() == inst.id() || inst.is_descendant_of(i)
-            });
+            let should_filter = params
+                .filter_instances
+                .iter()
+                .any(|i| i.id() == inst.id() || inst.is_descendant_of(i));
             let skip = match params.filter_type {
                 RaycastFilterType::Exclude => should_filter,
                 RaycastFilterType::Include => !should_filter,
@@ -835,7 +843,13 @@ impl WorkspaceService {
                         let part_center = [part.position.x, part.position.y, part.position.z];
                         let part_rot = part.cframe.rotation;
                         let part_half = [part.size.x / 2.0, part.size.y / 2.0, part.size.z / 2.0];
-                        sphere_intersects_obb(sphere_center, radius, part_center, part_rot, part_half)
+                        sphere_intersects_obb(
+                            sphere_center,
+                            radius,
+                            part_center,
+                            part_rot,
+                            part_half,
+                        )
                     }
                 } else {
                     false
@@ -873,9 +887,10 @@ impl WorkspaceService {
 
         let mut out = Vec::new();
         for inst in self.get_descendants() {
-            let should_filter = params.filter_instances.iter().any(|i| {
-                i.id() == inst.id() || inst.is_descendant_of(i)
-            });
+            let should_filter = params
+                .filter_instances
+                .iter()
+                .any(|i| i.id() == inst.id() || inst.is_descendant_of(i));
             let skip = match params.filter_type {
                 RaycastFilterType::Exclude => should_filter,
                 RaycastFilterType::Include => !should_filter,
@@ -902,7 +917,9 @@ impl WorkspaceService {
                 }
             };
 
-            let Some((can_query, can_collide, collision_group, size, cframe, shape_type)) = part_data else {
+            let Some((can_query, can_collide, collision_group, size, cframe, shape_type)) =
+                part_data
+            else {
                 continue;
             };
 
@@ -923,8 +940,9 @@ impl WorkspaceService {
                 continue;
             };
             let iso = cframe_to_isometry(cframe);
-            let intersects = intersection_test(&query_iso, query_shape.as_ref(), &iso, shape.as_ref())
-                .unwrap_or(false);
+            let intersects =
+                intersection_test(&query_iso, query_shape.as_ref(), &iso, shape.as_ref())
+                    .unwrap_or(false);
             if intersects {
                 out.push(inst);
                 if params.max_parts > 0 && out.len() >= params.max_parts {

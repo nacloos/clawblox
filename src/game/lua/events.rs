@@ -1,4 +1,7 @@
-use mlua::{Function, Lua, MultiValue, RegistryKey, Result, Thread, UserData, UserDataFields, UserDataMethods, Value};
+use mlua::{
+    Function, Lua, MultiValue, RegistryKey, Result, Thread, UserData, UserDataFields,
+    UserDataMethods, Value,
+};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -121,11 +124,15 @@ impl RBXScriptSignal {
         let connection = RBXScriptConnection::new(Arc::clone(&self.inner));
         let id = connection.id();
 
-        self.inner.lock().unwrap().connections.push(ConnectionEntry {
-            id,
-            callback: key,
-            once: false,
-        });
+        self.inner
+            .lock()
+            .unwrap()
+            .connections
+            .push(ConnectionEntry {
+                id,
+                callback: key,
+                once: false,
+            });
 
         Ok(connection)
     }
@@ -135,11 +142,15 @@ impl RBXScriptSignal {
         let connection = RBXScriptConnection::new(Arc::clone(&self.inner));
         let id = connection.id();
 
-        self.inner.lock().unwrap().connections.push(ConnectionEntry {
-            id,
-            callback: key,
-            once: true,
-        });
+        self.inner
+            .lock()
+            .unwrap()
+            .connections
+            .push(ConnectionEntry {
+                id,
+                callback: key,
+                once: true,
+            });
 
         Ok(connection)
     }
@@ -172,7 +183,10 @@ impl RBXScriptSignal {
                     if error_mode == ErrorMode::Halt {
                         return Err(e);
                     }
-                    eprintln!("[Lua Error] Callback error in signal '{}': {}", self.name, e);
+                    eprintln!(
+                        "[Lua Error] Callback error in signal '{}': {}",
+                        self.name, e
+                    );
                 }
                 if once {
                     to_remove.push(id);

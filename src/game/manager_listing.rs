@@ -1,7 +1,7 @@
 use uuid::Uuid;
 
-use crate::game::{GameInfo, GameManagerHandle, InstanceInfo};
 use crate::game::instance::GameStatus;
+use crate::game::{GameInfo, GameManagerHandle, InstanceInfo};
 
 pub fn list_instances(state: &GameManagerHandle) -> Vec<InstanceInfo> {
     state
@@ -31,7 +31,8 @@ pub fn list_instances(state: &GameManagerHandle) -> Vec<InstanceInfo> {
 }
 
 pub fn list_games(state: &GameManagerHandle) -> Vec<GameInfo> {
-    let mut game_infos: std::collections::HashMap<Uuid, GameInfo> = std::collections::HashMap::new();
+    let mut game_infos: std::collections::HashMap<Uuid, GameInfo> =
+        std::collections::HashMap::new();
 
     for entry in state.instances.iter() {
         let instance = entry.value().read();

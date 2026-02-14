@@ -29,7 +29,9 @@ pub fn sample_ground_sensor(
     grounded: bool,
     config: ControllerManagerConfig,
 ) -> GroundSensorSample {
-    if let Some(support) = physics.get_ground_kinematic_support(character_id, config.ground_query_distance) {
+    if let Some(support) =
+        physics.get_ground_kinematic_support(character_id, config.ground_query_distance)
+    {
         GroundSensorSample {
             grounded,
             support_velocity: Some(support.velocity),

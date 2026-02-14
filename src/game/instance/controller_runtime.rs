@@ -3,8 +3,8 @@ use uuid::Uuid;
 use super::super::constants::humanoid as humanoid_consts;
 use super::super::constants::physics as consts;
 use super::super::humanoid_movement::{build_motion_plan, resolve_vertical_velocity_after_move};
-use super::super::lua::types::Vector3;
 use super::super::lua::types::HumanoidStateType;
+use super::super::lua::types::Vector3;
 use super::character_controller::{
     evaluate_ground_controller, sample_ground_sensor, ControllerManagerConfig,
 };
@@ -37,7 +37,11 @@ pub(super) fn sync_move_targets(instance: &mut GameInstance) {
         };
 
         let player_data = player.data.lock().unwrap();
-        let Some(character_weak) = player_data.player_data.as_ref().and_then(|pd| pd.character.as_ref()) else {
+        let Some(character_weak) = player_data
+            .player_data
+            .as_ref()
+            .and_then(|pd| pd.character.as_ref())
+        else {
             warn_once_move_to(instance, agent_id, "Missing character");
             continue;
         };
@@ -54,7 +58,9 @@ pub(super) fn sync_move_targets(instance: &mut GameInstance) {
             let mut child_data = child_ref.lock().unwrap();
             if let Some(humanoid) = &mut child_data.humanoid_data {
                 found_humanoid = true;
-                instance.physics.set_character_walk_speed(hrp_id, humanoid.walk_speed);
+                instance
+                    .physics
+                    .set_character_walk_speed(hrp_id, humanoid.walk_speed);
                 if humanoid.jump_requested {
                     humanoid.jump_requested = false;
                     instance
@@ -108,7 +114,14 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
         .collect();
 
     for (agent_id, hrp_id) in agent_hrp_pairs {
-        let (current_pos, target, vertical_velocity, horizontal_velocity, grounded, move_to_elapsed) = {
+        let (
+            current_pos,
+            target,
+            vertical_velocity,
+            horizontal_velocity,
+            grounded,
+            move_to_elapsed,
+        ) = {
             let Some(state) = instance.physics.get_character_state(hrp_id) else {
                 continue;
             };
@@ -134,7 +147,8 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             ground_query_distance: consts::CHARACTER_GROUND_QUERY_DISTANCE,
             platform_stick_distance: consts::CHARACTER_PLATFORM_STICK_DISTANCE,
         };
-        let ground_sample = sample_ground_sensor(&instance.physics, hrp_id, grounded, controller_config);
+        let ground_sample =
+            sample_ground_sensor(&instance.physics, hrp_id, grounded, controller_config);
         let ground_decision = evaluate_ground_controller(ground_sample, controller_config);
         instance.physics.tick_character_jump_buffer(hrp_id, dt);
         let near_ground = ground_sample
@@ -142,9 +156,10 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             .map(|d| d <= consts::SNAP_TO_GROUND + 0.05)
             .unwrap_or(false);
         let can_jump = grounded || near_ground;
-        let jump_power = instance
-            .physics
-            .try_consume_character_jump(hrp_id, can_jump, vertical_velocity);
+        let jump_power =
+            instance
+                .physics
+                .try_consume_character_jump(hrp_id, can_jump, vertical_velocity);
         let contact_velocity = instance
             .physics
             .get_character_contact_kinematic_velocity(hrp_id);
@@ -182,7 +197,10 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
 
         let mut post_move_grounded = grounded;
         let mut applied_horizontal = [motion_plan.desired[0], motion_plan.desired[2]];
-        if let Some(movement) = instance.physics.move_character(hrp_id, motion_plan.desired, dt) {
+        if let Some(movement) = instance
+            .physics
+            .move_character(hrp_id, motion_plan.desired, dt)
+        {
             new_vertical_velocity = resolve_vertical_velocity_after_move(
                 new_vertical_velocity,
                 motion_plan.desired[1],
@@ -197,7 +215,8 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             state.vertical_velocity = new_vertical_velocity;
             state.move_to_elapsed = new_move_to_elapsed;
             if dt > 0.0 {
-                state.horizontal_velocity = [applied_horizontal[0] / dt, applied_horizontal[1] / dt];
+                state.horizontal_velocity =
+                    [applied_horizontal[0] / dt, applied_horizontal[1] / dt];
             } else {
                 state.horizontal_velocity = motion_plan.new_horizontal_velocity;
             }
@@ -217,9 +236,9 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             new_vertical_velocity,
         );
         if humanoid_auto_rotate_enabled(instance, agent_id) {
-            let speed =
-                (locomotion_vec[0] * locomotion_vec[0] + locomotion_vec[2] * locomotion_vec[2])
-                    .sqrt();
+            let speed = (locomotion_vec[0] * locomotion_vec[0]
+                + locomotion_vec[2] * locomotion_vec[2])
+                .sqrt();
             if speed > 0.05 {
                 let target_yaw = yaw_from_horizontal_velocity(locomotion_vec);
                 apply_smoothed_auto_rotate(instance, hrp_id, target_yaw, dt);
@@ -259,12 +278,7 @@ fn yaw_from_quaternion_xyzw(q: [f32; 4]) -> f32 {
     siny_cosp.atan2(cosy_cosp)
 }
 
-fn apply_smoothed_auto_rotate(
-    instance: &mut GameInstance,
-    hrp_id: u64,
-    target_yaw: f32,
-    dt: f32,
-) {
+fn apply_smoothed_auto_rotate(instance: &mut GameInstance, hrp_id: u64, target_yaw: f32, dt: f32) {
     let Some(handle) = instance.physics.get_handle(hrp_id) else {
         return;
     };
@@ -305,7 +319,8 @@ fn fire_move_to_finished(instance: &mut GameInstance, agent_id: Uuid, reached: b
                 .player_data
                 .as_ref()
                 .and_then(|p| p.character.as_ref())
-                .and_then(|w| w.upgrade()) else {
+                .and_then(|w| w.upgrade())
+            else {
                 return Ok(());
             };
             drop(player_data);
@@ -360,7 +375,11 @@ fn update_humanoid_locomotion_state(
 
         let horizontal_speed = (velocity[0] * velocity[0] + velocity[2] * velocity[2]).sqrt();
         let move_direction = if horizontal_speed > 1e-4 {
-            Vector3::new(velocity[0] / horizontal_speed, 0.0, velocity[2] / horizontal_speed)
+            Vector3::new(
+                velocity[0] / horizontal_speed,
+                0.0,
+                velocity[2] / horizontal_speed,
+            )
         } else {
             Vector3::zero()
         };
@@ -437,7 +456,8 @@ fn update_humanoid_locomotion_state(
             }
         }
 
-        if let (Some(signal), Some((old_state, new_state))) = (state_changed_signal, state_transition)
+        if let (Some(signal), Some((old_state, new_state))) =
+            (state_changed_signal, state_transition)
         {
             let lua = runtime.lua();
             let threads = signal.fire_as_coroutines(

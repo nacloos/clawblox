@@ -1,4 +1,4 @@
-use mlua::{UserData, UserDataFields, UserDataMethods, Value, Result as LuaResult, Lua};
+use mlua::{Lua, Result as LuaResult, UserData, UserDataFields, UserDataMethods, Value};
 
 /// HttpService provides JSON encoding/decoding utilities
 #[derive(Clone)]
@@ -15,12 +15,12 @@ impl HttpService {
             Value::Nil => serde_json::Value::Null,
             Value::Boolean(b) => serde_json::Value::Bool(*b),
             Value::Integer(i) => serde_json::Value::Number((*i).into()),
-            Value::Number(n) => {
-                serde_json::Number::from_f64(*n)
-                    .map(serde_json::Value::Number)
-                    .unwrap_or(serde_json::Value::Null)
+            Value::Number(n) => serde_json::Number::from_f64(*n)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            Value::String(s) => {
+                serde_json::Value::String(s.to_str().map(|s| s.to_string()).unwrap_or_default())
             }
-            Value::String(s) => serde_json::Value::String(s.to_str().map(|s| s.to_string()).unwrap_or_default()),
             Value::Table(t) => {
                 // Check if it's an array (sequential integer keys starting at 1)
                 let mut is_array = true;
@@ -57,7 +57,9 @@ impl HttpService {
                     for pair in t.clone().pairs::<Value, Value>() {
                         if let Ok((key, val)) = pair {
                             let key_str = match key {
-                                Value::String(s) => s.to_str().map(|s| s.to_string()).unwrap_or_default(),
+                                Value::String(s) => {
+                                    s.to_str().map(|s| s.to_string()).unwrap_or_default()
+                                }
                                 Value::Integer(i) => i.to_string(),
                                 Value::Number(n) => n.to_string(),
                                 _ => continue,
@@ -123,11 +125,12 @@ impl UserData for HttpService {
             Ok(serde_json::to_string(&json).unwrap_or_else(|_| "null".to_string()))
         });
 
-        methods.add_method("JSONDecode", |lua, _, json_str: String| {
-            match serde_json::from_str::<serde_json::Value>(&json_str) {
+        methods.add_method(
+            "JSONDecode",
+            |lua, _, json_str: String| match serde_json::from_str::<serde_json::Value>(&json_str) {
                 Ok(json) => HttpService::json_to_lua(lua, &json),
                 Err(_) => Ok(Value::Nil),
-            }
-        });
+            },
+        );
     }
 }

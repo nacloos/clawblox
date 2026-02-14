@@ -10,8 +10,7 @@ use super::events::{create_signal, track_yielded_threads, RBXScriptSignal};
 use super::runtime::Game;
 use super::services::{PlayersService, WorkspaceService};
 use super::types::{
-    CFrame, Color3, HumanoidStateType, Material, PartType, PhysicalProperties, UDim, UDim2,
-    Vector3,
+    CFrame, Color3, HumanoidStateType, Material, PartType, PhysicalProperties, UDim, UDim2, Vector3,
 };
 use crate::game::constants::humanoid as humanoid_consts;
 
@@ -2133,7 +2132,10 @@ impl UserData for Instance {
 
         fields.add_field_method_get("HealthDisplayDistance", |_, this| {
             let data = this.data.lock().unwrap();
-            Ok(data.humanoid_data.as_ref().map(|h| h.health_display_distance))
+            Ok(data
+                .humanoid_data
+                .as_ref()
+                .map(|h| h.health_display_distance))
         });
         fields.add_field_method_set("HealthDisplayDistance", |_, this, value: f32| {
             let mut data = this.data.lock().unwrap();
@@ -3167,13 +3169,16 @@ impl UserData for Instance {
             Ok(())
         });
 
-        methods.add_method("Move", |_, this, (direction, _relative): (Vector3, Option<bool>)| {
-            let mut data = this.data.lock().unwrap();
-            if let Some(humanoid) = &mut data.humanoid_data {
-                humanoid.move_input_direction = direction;
-            }
-            Ok(())
-        });
+        methods.add_method(
+            "Move",
+            |_, this, (direction, _relative): (Vector3, Option<bool>)| {
+                let mut data = this.data.lock().unwrap();
+                if let Some(humanoid) = &mut data.humanoid_data {
+                    humanoid.move_input_direction = direction;
+                }
+                Ok(())
+            },
+        );
 
         methods.add_method(
             "MoveTo",
@@ -3352,15 +3357,18 @@ impl UserData for Instance {
             Ok(())
         });
 
-        methods.add_method("SetNetworkOwnershipAuto", |_, this, _enabled: Option<bool>| {
-            if this.data.lock().unwrap().part_data.is_none() {
-                return Err(mlua::Error::runtime(
-                    "SetNetworkOwnershipAuto is only supported on BasePart",
-                ));
-            }
-            // Same parity rationale as SetNetworkOwner: network ownership is not modeled yet.
-            Ok(())
-        });
+        methods.add_method(
+            "SetNetworkOwnershipAuto",
+            |_, this, _enabled: Option<bool>| {
+                if this.data.lock().unwrap().part_data.is_none() {
+                    return Err(mlua::Error::runtime(
+                        "SetNetworkOwnershipAuto is only supported on BasePart",
+                    ));
+                }
+                // Same parity rationale as SetNetworkOwner: network ownership is not modeled yet.
+                Ok(())
+            },
+        );
 
         methods.add_method("LoadCharacter", |lua, this, ()| {
             let (player_name, old_character, character_added, character_removing) = {
@@ -3518,18 +3526,14 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
                     "BodyVelocity" => {
                         Instance::from_data(InstanceData::new_body_velocity("BodyVelocity"))
                     }
-                    "BodyForce" => {
-                        Instance::from_data(InstanceData::new_body_force("BodyForce"))
-                    }
+                    "BodyForce" => Instance::from_data(InstanceData::new_body_force("BodyForce")),
                     "BodyAngularVelocity" => Instance::from_data(
                         InstanceData::new_body_angular_velocity("BodyAngularVelocity"),
                     ),
-                    "Attachment" => {
-                        Instance::from_data(InstanceData::new_attachment("Attachment"))
+                    "Attachment" => Instance::from_data(InstanceData::new_attachment("Attachment")),
+                    "AlignOrientation" => {
+                        Instance::from_data(InstanceData::new_align_orientation("AlignOrientation"))
                     }
-                    "AlignOrientation" => Instance::from_data(
-                        InstanceData::new_align_orientation("AlignOrientation"),
-                    ),
                     // Constraints
                     "Weld" => Instance::from_data(InstanceData::new_weld("Weld")),
                     // 3D GUI

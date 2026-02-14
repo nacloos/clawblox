@@ -22,7 +22,7 @@ pub mod physics {
     pub const CHARACTER_SPAWN_HEIGHT: f32 = 3.0;
 
     /// Character controller autostep max height
-    pub const AUTOSTEP_MAX_HEIGHT: f32 = 1.0;  // Generous autostep for platforms
+    pub const AUTOSTEP_MAX_HEIGHT: f32 = 1.0; // Generous autostep for platforms
 
     /// Character controller autostep min width (very small for platform edges)
     pub const AUTOSTEP_MIN_WIDTH: f32 = 0.01;

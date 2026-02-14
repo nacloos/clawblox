@@ -1,10 +1,10 @@
+use axum::extract::DefaultBodyLimit;
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     routing::post,
     Json, Router,
 };
-use axum::extract::DefaultBodyLimit;
 use flate2::read::GzDecoder;
 use serde::Serialize;
 use sqlx::PgPool;
@@ -64,8 +64,10 @@ async fn upload_assets(
     body: axum::body::Bytes,
 ) -> Result<Json<UploadAssetsResponse>, (StatusCode, String)> {
     // Auth: extract API key
-    let api_key = extract_api_key(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
+    let api_key = extract_api_key(&headers).ok_or((
+        StatusCode::UNAUTHORIZED,
+        "Missing Authorization header".to_string(),
+    ))?;
 
     // Verify API key and get agent_id
     let agent = sqlx::query_as::<_, (Uuid,)>("SELECT id FROM agents WHERE api_key = $1")
@@ -76,13 +78,12 @@ async fn upload_assets(
         .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
 
     // Fetch game and verify ownership
-    let game: crate::db::models::Game =
-        sqlx::query_as("SELECT * FROM games WHERE id = $1")
-            .bind(game_id)
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            .ok_or((StatusCode::NOT_FOUND, "Game not found".to_string()))?;
+    let game: crate::db::models::Game = sqlx::query_as("SELECT * FROM games WHERE id = $1")
+        .bind(game_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Game not found".to_string()))?;
 
     if game.creator_id != Some(agent.0) {
         return Err((StatusCode::FORBIDDEN, "You don't own this game".to_string()));
@@ -113,8 +114,12 @@ async fn upload_assets(
     let mut files_to_upload: Vec<(String, Vec<u8>, String)> = Vec::new();
 
     for entry_result in entries {
-        let mut entry = entry_result
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid archive entry: {}", e)))?;
+        let mut entry = entry_result.map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Invalid archive entry: {}", e),
+            )
+        })?;
 
         // Skip directories and symlinks
         let entry_type = entry.header().entry_type();
@@ -129,7 +134,12 @@ async fn upload_assets(
 
         let path = entry
             .path()
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid path in archive: {}", e)))?
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid path in archive: {}", e),
+                )
+            })?
             .to_path_buf();
 
         let path_str = path.to_string_lossy().to_string();
@@ -171,16 +181,22 @@ async fn upload_assets(
 
         // Read file contents
         let mut data = Vec::new();
-        entry
-            .read_to_end(&mut data)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to read archive entry: {}", e)))?;
+        entry.read_to_end(&mut data).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Failed to read archive entry: {}", e),
+            )
+        })?;
 
         // Security: total extracted size limit
         total_bytes += data.len();
         if total_bytes > MAX_EXTRACTED_BYTES {
             return Err((
                 StatusCode::BAD_REQUEST,
-                format!("Archive too large (max {} MB extracted)", MAX_EXTRACTED_BYTES / 1024 / 1024),
+                format!(
+                    "Archive too large (max {} MB extracted)",
+                    MAX_EXTRACTED_BYTES / 1024 / 1024
+                ),
             ));
         }
 

@@ -41,4 +41,3 @@ mod tests {
         assert_eq!(transitions.ended, vec![(1, 2)]);
     }
 }
-

@@ -12,9 +12,7 @@ use super::lua::types::PartType;
 /// Converts a 3x3 rotation matrix to a UnitQuaternion (Shepperd's method).
 pub fn rotation_matrix_to_quaternion(m: &[[f32; 3]; 3]) -> UnitQuaternion<f32> {
     let rot = nalgebra::Matrix3::new(
-        m[0][0], m[0][1], m[0][2],
-        m[1][0], m[1][1], m[1][2],
-        m[2][0], m[2][1], m[2][2],
+        m[0][0], m[0][1], m[0][2], m[1][0], m[1][1], m[1][2], m[2][0], m[2][1], m[2][2],
     );
     let rotation = nalgebra::Rotation3::from_matrix_unchecked(rot);
     UnitQuaternion::from_rotation_matrix(&rotation)
@@ -34,7 +32,7 @@ pub fn quaternion_to_rotation_matrix(q: &UnitQuaternion<f32>) -> [[f32; 3]; 3] {
 // Collision groups for Roblox-style physics behavior
 // Characters don't collide with each other, only with static geometry
 // Note: rapier3d uses InteractionGroups (not CollisionGroups like bevy_rapier)
-const GROUP_STATIC: Group = Group::GROUP_1;    // Walls, floors, obstacles
+const GROUP_STATIC: Group = Group::GROUP_1; // Walls, floors, obstacles
 const GROUP_CHARACTER: Group = Group::GROUP_2; // Player characters
 
 /// State for a character controller (player or NPC)
@@ -106,11 +104,11 @@ fn build_collider(size: [f32; 3], shape: PartType, can_collide: bool) -> Collide
             let hz = sz / 2.0;
             let points = [
                 point![-hx, -hy, -hz], // bottom-left-back
-                point![ hx, -hy, -hz], // bottom-right-back
-                point![-hx, -hy,  hz], // bottom-left-front
-                point![ hx, -hy,  hz], // bottom-right-front
-                point![-hx,  hy, -hz], // top-left-back
-                point![-hx,  hy,  hz], // top-left-front
+                point![hx, -hy, -hz],  // bottom-right-back
+                point![-hx, -hy, hz],  // bottom-left-front
+                point![hx, -hy, hz],   // bottom-right-front
+                point![-hx, hy, -hz],  // top-left-back
+                point![-hx, hy, hz],   // top-left-front
             ];
             SharedShape::convex_hull(&points)
                 .expect("Wedge convex hull should always succeed with 6 valid vertices")
@@ -202,8 +200,9 @@ impl PhysicsWorld {
         // Create collider with correct shape
         let collider = build_collider(size, shape, can_collide);
 
-        let collider_handle = self.collider_set
-            .insert_with_parent(collider, handle, &mut self.rigid_body_set);
+        let collider_handle =
+            self.collider_set
+                .insert_with_parent(collider, handle, &mut self.rigid_body_set);
 
         // Store mappings
         self.lua_to_body.insert(lua_id, handle);
@@ -325,9 +324,9 @@ impl PhysicsWorld {
 
     /// Gets the rotation of a rigid body as a 3x3 rotation matrix
     pub fn get_rotation_matrix(&self, handle: RigidBodyHandle) -> Option<[[f32; 3]; 3]> {
-        self.rigid_body_set.get(handle).map(|body| {
-            quaternion_to_rotation_matrix(body.rotation())
-        })
+        self.rigid_body_set
+            .get(handle)
+            .map(|body| quaternion_to_rotation_matrix(body.rotation()))
     }
 
     /// Gets the velocity of a rigid body
@@ -359,7 +358,8 @@ impl PhysicsWorld {
             if let Some(body) = self.rigid_body_set.get_mut(handle) {
                 if anchored {
                     body.set_body_type(RigidBodyType::KinematicPositionBased, true);
-                    self.kinematic_linear_velocities.insert(handle, [0.0, 0.0, 0.0]);
+                    self.kinematic_linear_velocities
+                        .insert(handle, [0.0, 0.0, 0.0]);
                 } else {
                     body.set_body_type(RigidBodyType::Dynamic, true);
                     self.kinematic_linear_velocities.remove(&handle);
@@ -370,13 +370,18 @@ impl PhysicsWorld {
 
     /// Updates the size of a part's collider
     pub fn set_size(&mut self, lua_id: u64, size: [f32; 3]) {
-        let shape = self.lua_to_shape.get(&lua_id).copied().unwrap_or(PartType::Block);
+        let shape = self
+            .lua_to_shape
+            .get(&lua_id)
+            .copied()
+            .unwrap_or(PartType::Block);
         if let Some(&handle) = self.lua_to_body.get(&lua_id) {
             if let Some(body) = self.rigid_body_set.get(handle) {
                 let colliders: Vec<_> = body.colliders().iter().cloned().collect();
 
                 // Read can_collide from existing collider before removing
-                let can_collide = colliders.first()
+                let can_collide = colliders
+                    .first()
                     .and_then(|&ch| self.collider_set.get(ch))
                     .map(|c| !c.is_sensor())
                     .unwrap_or(true);
@@ -392,8 +397,11 @@ impl PhysicsWorld {
                 }
 
                 let collider = build_collider(size, shape, can_collide);
-                let new_ch = self.collider_set
-                    .insert_with_parent(collider, handle, &mut self.rigid_body_set);
+                let new_ch = self.collider_set.insert_with_parent(
+                    collider,
+                    handle,
+                    &mut self.rigid_body_set,
+                );
                 self.collider_to_lua.insert(new_ch, lua_id);
             }
         }
@@ -420,7 +428,8 @@ impl PhysicsWorld {
             if let Some(body) = self.rigid_body_set.get(handle) {
                 let colliders: Vec<_> = body.colliders().iter().cloned().collect();
 
-                let can_collide = colliders.first()
+                let can_collide = colliders
+                    .first()
                     .and_then(|&ch| self.collider_set.get(ch))
                     .map(|c| !c.is_sensor())
                     .unwrap_or(true);
@@ -436,8 +445,11 @@ impl PhysicsWorld {
                 }
 
                 let collider = build_collider(size, shape, can_collide);
-                let new_ch = self.collider_set
-                    .insert_with_parent(collider, handle, &mut self.rigid_body_set);
+                let new_ch = self.collider_set.insert_with_parent(
+                    collider,
+                    handle,
+                    &mut self.rigid_body_set,
+                );
                 self.collider_to_lua.insert(new_ch, lua_id);
             }
         }
@@ -464,9 +476,9 @@ impl PhysicsWorld {
         let collider = ColliderBuilder::capsule_y(half_height, radius)
             .collision_groups(InteractionGroups::new(GROUP_CHARACTER, GROUP_STATIC))
             .build();
-        let collider_handle = self
-            .collider_set
-            .insert_with_parent(collider, body_handle, &mut self.rigid_body_set);
+        let collider_handle =
+            self.collider_set
+                .insert_with_parent(collider, body_handle, &mut self.rigid_body_set);
 
         // Create character controller with consistent settings (same as move_character)
         let mut controller = KinematicCharacterController::default();
@@ -570,7 +582,9 @@ impl PhysicsWorld {
 
     /// Gets current locomotion walk speed for a character controller.
     pub fn get_character_walk_speed(&self, lua_id: u64) -> Option<f32> {
-        self.character_controllers.get(&lua_id).map(|s| s.walk_speed)
+        self.character_controllers
+            .get(&lua_id)
+            .map(|s| s.walk_speed)
     }
 
     /// Teleports a character to a specific position (clears target + vertical velocity)
@@ -624,7 +638,10 @@ impl PhysicsWorld {
     }
 
     /// Gets mutable character controller state
-    pub fn get_character_state_mut(&mut self, lua_id: u64) -> Option<&mut CharacterControllerState> {
+    pub fn get_character_state_mut(
+        &mut self,
+        lua_id: u64,
+    ) -> Option<&mut CharacterControllerState> {
         self.character_controllers.get_mut(&lua_id)
     }
 
@@ -670,10 +687,7 @@ impl PhysicsWorld {
         }
 
         let normalized = direction / max_dist;
-        let ray = Ray::new(
-            point![from[0], from[1], from[2]],
-            normalized,
-        );
+        let ray = Ray::new(point![from[0], from[1], from[2]], normalized);
 
         let filter = if let Some(body_handle) = exclude_body {
             QueryFilter::default().exclude_rigid_body(body_handle)
@@ -737,7 +751,9 @@ impl PhysicsWorld {
                     shape,
                     filter,
                     |other_collider_handle| {
-                        if let Some(&other_lua_id) = self.collider_to_lua.get(&other_collider_handle) {
+                        if let Some(&other_lua_id) =
+                            self.collider_to_lua.get(&other_collider_handle)
+                        {
                             if other_lua_id != lua_id {
                                 let pair = if lua_id < other_lua_id {
                                     (lua_id, other_lua_id)
@@ -758,7 +774,12 @@ impl PhysicsWorld {
 
     /// Casts a ray downward from a position to detect ground
     /// Returns (hit_distance, hit_y) if ground is found within max_distance
-    pub fn raycast_down(&self, origin: [f32; 3], max_distance: f32, exclude_body: Option<RigidBodyHandle>) -> Option<(f32, f32)> {
+    pub fn raycast_down(
+        &self,
+        origin: [f32; 3],
+        max_distance: f32,
+        exclude_body: Option<RigidBodyHandle>,
+    ) -> Option<(f32, f32)> {
         let ray = Ray::new(
             point![origin[0], origin[1], origin[2]],
             vector![0.0, -1.0, 0.0],
@@ -787,13 +808,21 @@ impl PhysicsWorld {
 
     /// Returns the linear velocity of the kinematic body directly supporting this character.
     /// Used for Roblox-like moving platform carry behavior.
-    pub fn get_ground_kinematic_velocity(&self, lua_id: u64, max_distance: f32) -> Option<[f32; 3]> {
+    pub fn get_ground_kinematic_velocity(
+        &self,
+        lua_id: u64,
+        max_distance: f32,
+    ) -> Option<[f32; 3]> {
         self.get_ground_kinematic_support(lua_id, max_distance)
             .map(|support| support.velocity)
     }
 
     /// Returns kinematic support data for the surface directly below this character.
-    pub fn get_ground_kinematic_support(&self, lua_id: u64, max_distance: f32) -> Option<GroundKinematicSupport> {
+    pub fn get_ground_kinematic_support(
+        &self,
+        lua_id: u64,
+        max_distance: f32,
+    ) -> Option<GroundKinematicSupport> {
         let state = self.character_controllers.get(&lua_id)?;
         let body = self.rigid_body_set.get(state.body_handle)?;
         let origin = body.translation();
@@ -874,8 +903,10 @@ impl PhysicsWorld {
                     return true;
                 }
 
-                let point_velocity = other_body.velocity_at_point(&point![center.x, center.y, center.z]);
-                let horiz_speed_sq = point_velocity.x * point_velocity.x + point_velocity.z * point_velocity.z;
+                let point_velocity =
+                    other_body.velocity_at_point(&point![center.x, center.y, center.z]);
+                let horiz_speed_sq =
+                    point_velocity.x * point_velocity.x + point_velocity.z * point_velocity.z;
                 if horiz_speed_sq > best_horiz_speed_sq {
                     best_horiz_speed_sq = horiz_speed_sq;
                     best = Some([point_velocity.x, point_velocity.y, point_velocity.z]);
@@ -921,11 +952,18 @@ impl PhysicsWorld {
         };
 
         // Match physics-world's collision filter: collide with all except other characters
-        let desired = vector![desired_translation[0], desired_translation[1], desired_translation[2]];
+        let desired = vector![
+            desired_translation[0],
+            desired_translation[1],
+            desired_translation[2]
+        ];
         let filter = QueryFilter::default()
             .exclude_rigid_body(body_handle)
             .exclude_sensors()
-            .groups(InteractionGroups::new(GROUP_STATIC, Group::ALL & !GROUP_CHARACTER));
+            .groups(InteractionGroups::new(
+                GROUP_STATIC,
+                Group::ALL & !GROUP_CHARACTER,
+            ));
 
         let movement = controller.move_shape(
             dt,
@@ -978,8 +1016,8 @@ mod tests {
             [0.0, 10.0, 0.0],
             &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [4.0, 1.0, 2.0],
-            true,  // anchored
-            true,  // can_collide
+            true, // anchored
+            true, // can_collide
             PartType::Block,
         );
 
@@ -1045,18 +1083,31 @@ mod tests {
 
         let (distance, ground_y) = hit.unwrap();
         // Character at Y=6, floor top at Y=0.5, distance = 5.5
-        assert!(distance > 5.0 && distance < 6.0, "Distance to floor should be ~5.5, got {}", distance);
-        assert!((ground_y - 0.5).abs() < 0.1, "Ground Y should be ~0.5 (floor top), got {}", ground_y);
+        assert!(
+            distance > 5.0 && distance < 6.0,
+            "Distance to floor should be ~5.5, got {}",
+            distance
+        );
+        assert!(
+            (ground_y - 0.5).abs() < 0.1,
+            "Ground Y should be ~0.5 (floor top), got {}",
+            ground_y
+        );
 
         // Test movement with controller translation (should not suppress horizontal)
         if let Some(state) = world.get_character_state_mut(char_id) {
             state.grounded = true;
         }
-        let movement = world.move_character(char_id, [1.0, -0.05, 0.0], 1.0 / 60.0).unwrap();
+        let movement = world
+            .move_character(char_id, [1.0, -0.05, 0.0], 1.0 / 60.0)
+            .unwrap();
         world.step(1.0 / 60.0);
 
         let final_pos = world.get_character_position(char_id).unwrap();
-        assert!(movement.translation.x.abs() > 0.0, "Horizontal movement should be applied");
+        assert!(
+            movement.translation.x.abs() > 0.0,
+            "Horizontal movement should be applied"
+        );
         assert!(final_pos[0] > 0.5, "Should have moved in X");
     }
 
@@ -1080,7 +1131,9 @@ mod tests {
             state.grounded = true;
         }
 
-        let movement = world.move_character(char_id, [1.0, -0.05, 0.0], 1.0 / 60.0).unwrap();
+        let movement = world
+            .move_character(char_id, [1.0, -0.05, 0.0], 1.0 / 60.0)
+            .unwrap();
         assert!(
             movement.translation.x.abs() > 0.0 || movement.translation.z.abs() > 0.0,
             "Horizontal movement should not be suppressed when grounded"
@@ -1161,7 +1214,11 @@ mod tests {
         let v = world
             .get_ground_kinematic_velocity(char_id, 4.0)
             .expect("Expected supporting kinematic velocity");
-        assert!(v[1] > 0.0, "Platform upward velocity should be positive, got {:?}", v);
+        assert!(
+            v[1] > 0.0,
+            "Platform upward velocity should be positive, got {:?}",
+            v
+        );
     }
 
     #[test]
@@ -1188,11 +1245,7 @@ mod tests {
         let theta = 0.5_f32;
         let c = theta.cos();
         let s = theta.sin();
-        let rot_y = [
-            [c, 0.0, s],
-            [0.0, 1.0, 0.0],
-            [-s, 0.0, c],
-        ];
+        let rot_y = [[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]];
         world.set_kinematic_rotation(spinner, &rot_y);
         world.step(dt);
         world.query_pipeline.update(&world.collider_set);
@@ -1215,9 +1268,9 @@ mod tests {
         // Floor at Y=0 (like the game)
         world.add_part(
             1,
-            [0.0, -1.0, 0.0],       // center at Y=-1
+            [0.0, -1.0, 0.0], // center at Y=-1
             &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [100.0, 2.0, 100.0],    // top at Y=0
+            [100.0, 2.0, 100.0], // top at Y=0
             true,
             true,
             PartType::Block,
@@ -1226,9 +1279,9 @@ mod tests {
         // Thin platform at Y=0.1 (like base platform in tsunami game)
         world.add_part(
             2,
-            [0.0, 0.1, 0.0],        // center at Y=0.1
+            [0.0, 0.1, 0.0], // center at Y=0.1
             &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [30.0, 0.2, 30.0],      // top at Y=0.2
+            [30.0, 0.2, 30.0], // top at Y=0.2
             true,
             true,
             PartType::Block,
@@ -1240,9 +1293,10 @@ mod tests {
 
         // Simulate falling (like the game does)
         let dt = 1.0 / 60.0;
-        for _ in 0..30 {  // About 0.5 seconds of falling
+        for _ in 0..30 {
+            // About 0.5 seconds of falling
             world.query_pipeline.update(&world.collider_set);
-            let gravity_movement: f32 = -196.2 * dt * dt;  // Gravity acceleration
+            let gravity_movement: f32 = -196.2 * dt * dt; // Gravity acceleration
             world.move_character(char_id, [0.0, gravity_movement.max(-0.2), 0.0], dt);
             world.step(dt);
         }
@@ -1253,7 +1307,9 @@ mod tests {
 
         // Try horizontal movement (like the game does)
         world.query_pipeline.update(&world.collider_set);
-        let movement = world.move_character(char_id, [0.26, -0.02, 0.0], dt).unwrap();
+        let movement = world
+            .move_character(char_id, [0.26, -0.02, 0.0], dt)
+            .unwrap();
 
         println!("Movement result: {:?}", movement.translation);
 
@@ -1305,12 +1361,17 @@ mod tests {
             world.query_pipeline.update(&world.collider_set);
             // When grounded, zero vertical like the game does
             let desired_y = if grounded { 0.0 } else { -0.008 };
-            let movement = world.move_character(char_id, [0.2, desired_y, 0.0], dt).unwrap();
+            let movement = world
+                .move_character(char_id, [0.2, desired_y, 0.0], dt)
+                .unwrap();
             grounded = movement.grounded;
             world.step(dt);
             if i < 5 || movement.translation.x.abs() < 0.01 {
                 let pos = world.get_character_position(char_id).unwrap();
-                println!("  Frame {}: pos={:.2} applied_x={:.3} grounded={}", i, pos[0], movement.translation.x, movement.grounded);
+                println!(
+                    "  Frame {}: pos={:.2} applied_x={:.3} grounded={}",
+                    i, pos[0], movement.translation.x, movement.grounded
+                );
             }
         }
 
@@ -1325,11 +1386,16 @@ mod tests {
             world.query_pipeline.update(&world.collider_set);
             // When grounded, zero vertical like the game does
             let desired_y = if grounded { 0.0 } else { -0.008 };
-            let movement = world.move_character(char_id, [-0.2, desired_y, 0.0], dt).unwrap();
+            let movement = world
+                .move_character(char_id, [-0.2, desired_y, 0.0], dt)
+                .unwrap();
             grounded = movement.grounded;
             world.step(dt);
             let pos = world.get_character_position(char_id).unwrap();
-            println!("  Frame {}: pos={:.2} applied_x={:.3} grounded={}", i, pos[0], movement.translation.x, movement.grounded);
+            println!(
+                "  Frame {}: pos={:.2} applied_x={:.3} grounded={}",
+                i, pos[0], movement.translation.x, movement.grounded
+            );
             if movement.translation.x.abs() < 0.01 {
                 stuck_count += 1;
             }
@@ -1355,7 +1421,7 @@ mod tests {
             1,
             [0.0, -0.5, 0.0],
             &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [100.0, 1.0, 100.0],  // top at Y=0
+            [100.0, 1.0, 100.0], // top at Y=0
             true,
             true,
             PartType::Block,
@@ -1364,9 +1430,9 @@ mod tests {
         // Small obstacle (0.3 studs tall, should be steppable with max_height=0.5)
         world.add_part(
             2,
-            [5.0, 0.15, 0.0],      // center at Y=0.15
+            [5.0, 0.15, 0.0], // center at Y=0.15
             &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [1.0, 0.3, 4.0],       // top at Y=0.3
+            [1.0, 0.3, 4.0], // top at Y=0.3
             true,
             true,
             PartType::Block,
@@ -1391,8 +1457,10 @@ mod tests {
 
             let pos = world.get_character_position(char_id).unwrap();
             if i % 10 == 0 || (pos[0] > 4.0 && pos[0] < 6.0) {
-                println!("Frame {}: pos=({:.2}, {:.2}, {:.2}) grounded={}",
-                    i, pos[0], pos[1], pos[2], movement.grounded);
+                println!(
+                    "Frame {}: pos=({:.2}, {:.2}, {:.2}) grounded={}",
+                    i, pos[0], pos[1], pos[2], movement.grounded
+                );
             }
         }
 
@@ -1427,7 +1495,7 @@ mod tests {
             2,
             [5.0, 0.5, 0.0],
             &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [1.0, 1.0, 4.0],       // top at Y=1.0
+            [1.0, 1.0, 4.0], // top at Y=1.0
             true,
             true,
             PartType::Block,
@@ -1466,9 +1534,9 @@ mod tests {
         // Ground (lower level) - extends UNDER the platform to avoid seam
         world.add_part(
             1,
-            [0.0, -0.5, 0.0],        // center
+            [0.0, -0.5, 0.0], // center
             &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [200.0, 1.0, 100.0],     // top at Y=0, extends from X=-100 to X=100
+            [200.0, 1.0, 100.0], // top at Y=0, extends from X=-100 to X=100
             true,
             true,
             PartType::Block,
@@ -1477,9 +1545,9 @@ mod tests {
         // Raised platform (like tsunami base) - sits ON TOP of ground
         world.add_part(
             2,
-            [50.0, 0.1, 0.0],        // center at Y=0.1
+            [50.0, 0.1, 0.0], // center at Y=0.1
             &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [100.0, 0.2, 100.0],     // top at Y=0.2, bottom at Y=0, X from 0 to 100
+            [100.0, 0.2, 100.0], // top at Y=0.2, bottom at Y=0, X from 0 to 100
             true,
             true,
             PartType::Block,
@@ -1504,8 +1572,10 @@ mod tests {
 
             let pos = world.get_character_position(char_id).unwrap();
             if i % 5 == 0 || (pos[0] > -2.0 && pos[0] < 5.0) {
-                println!("Frame {}: pos=({:.2}, {:.2}, {:.2}) grounded={}",
-                    i, pos[0], pos[1], pos[2], movement.grounded);
+                println!(
+                    "Frame {}: pos=({:.2}, {:.2}, {:.2}) grounded={}",
+                    i, pos[0], pos[1], pos[2], movement.grounded
+                );
             }
         }
 

@@ -9,7 +9,10 @@ use tokio::sync::oneshot;
 
 /// Simulates the DataStore pattern: async function that awaits a channel.
 /// This is what DataStore:GetAsync does internally.
-fn create_mock_get_async(lua: &Lua, rx: Arc<std::sync::Mutex<Option<oneshot::Receiver<i32>>>>) -> mlua::Function {
+fn create_mock_get_async(
+    lua: &Lua,
+    rx: Arc<std::sync::Mutex<Option<oneshot::Receiver<i32>>>>,
+) -> mlua::Function {
     let rx_clone = rx.clone();
     lua.create_async_function(move |_lua, _key: String| {
         let rx = rx_clone.clone();
@@ -36,7 +39,9 @@ fn test_datastore_yields_in_heartbeat_callback() {
 
     // Create mock DataStore-like GetAsync
     let get_async = create_mock_get_async(&lua, rx);
-    lua.globals().set("MockGetAsync", get_async).expect("Set global");
+    lua.globals()
+        .set("MockGetAsync", get_async)
+        .expect("Set global");
 
     // Track what happened
     lua.load("_G.events = {}").exec().expect("Init");
@@ -180,10 +185,14 @@ fn test_multiple_callbacks_with_datastore() {
 
     // Second tick: poll both
     // Only thread2 should complete
-    let _ = thread1.resume::<()>(());  // Still waiting
-    let _ = thread2.resume::<()>(());  // Completes
+    let _ = thread1.resume::<()>(()); // Still waiting
+    let _ = thread2.resume::<()>(()); // Completes
 
-    assert_eq!(thread1.status(), ThreadStatus::Resumable, "Thread 1 still waiting");
+    assert_eq!(
+        thread1.status(),
+        ThreadStatus::Resumable,
+        "Thread 1 still waiting"
+    );
     assert_eq!(thread2.status(), ThreadStatus::Finished, "Thread 2 done");
 
     // Complete callback 1
@@ -205,7 +214,10 @@ fn test_multiple_callbacks_with_datastore() {
     // Verify out-of-order completion
     let cb2_done_pos = order.iter().position(|e| e == "cb2_done:200").unwrap();
     let cb1_done_pos = order.iter().position(|e| e == "cb1_done:100").unwrap();
-    assert!(cb2_done_pos < cb1_done_pos, "Callback 2 should complete before callback 1");
+    assert!(
+        cb2_done_pos < cb1_done_pos,
+        "Callback 2 should complete before callback 1"
+    );
 
     println!("Multiple callbacks with DataStore work correctly!");
 }
@@ -221,7 +233,9 @@ fn test_sync_physics_while_datastore_waits() {
     let get_async = create_mock_get_async(&lua, rx);
     lua.globals().set("LoadPlayerData", get_async).expect("Set");
 
-    lua.load("_G.physics_ticks = 0; _G.player_data = nil").exec().expect("Init");
+    lua.load("_G.physics_ticks = 0; _G.player_data = nil")
+        .exec()
+        .expect("Init");
 
     // Callback that loads player data
     let load_callback = lua
@@ -262,8 +276,14 @@ fn test_sync_physics_while_datastore_waits() {
     let physics_ticks: i32 = lua.load("return _G.physics_ticks").eval().expect("Get");
     let player_data: Value = lua.load("return _G.player_data").eval().expect("Get");
 
-    assert_eq!(physics_ticks, 10, "Physics should run while DataStore waits");
-    assert!(matches!(player_data, Value::Nil), "Player data shouldn't be loaded yet");
+    assert_eq!(
+        physics_ticks, 10,
+        "Physics should run while DataStore waits"
+    );
+    assert!(
+        matches!(player_data, Value::Nil),
+        "Player data shouldn't be loaded yet"
+    );
 
     // Complete the DataStore operation
     tx.send(9999).expect("DB");

@@ -3,9 +3,9 @@ use uuid::Uuid;
 
 use rayon::prelude::*;
 
-use crate::game::{GameInstanceHandle, GameManagerHandle};
 use crate::game::instance::GameStatus;
 use crate::game::panic_reporting;
+use crate::game::{GameInstanceHandle, GameManagerHandle};
 
 fn process_instance(
     state: &GameManagerHandle,
@@ -75,5 +75,7 @@ pub fn tick_instances(state: &GameManagerHandle) {
 
     instances
         .par_iter()
-        .for_each(|(instance_id, instance_handle)| process_instance(state, *instance_id, instance_handle));
+        .for_each(|(instance_id, instance_handle)| {
+            process_instance(state, *instance_id, instance_handle)
+        });
 }

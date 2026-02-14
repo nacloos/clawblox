@@ -54,11 +54,7 @@ async fn main() {
             .catch_unwind()
             .await;
         if let Err(payload) = result {
-            game::panic_reporting::log_panic(
-                "tokio_task",
-                "sync_instances_to_db",
-                &*payload,
-            );
+            game::panic_reporting::log_panic("tokio_task", "sync_instances_to_db", &*payload);
         }
     });
 
@@ -67,11 +63,7 @@ async fn main() {
     });
     thread::spawn(move || {
         if let Err(payload) = game_thread.join() {
-            game::panic_reporting::log_panic(
-                "game_manager_thread",
-                "game_manager.run",
-                &*payload,
-            );
+            game::panic_reporting::log_panic("game_manager_thread", "game_manager.run", &*payload);
             std::process::exit(1);
         }
     });

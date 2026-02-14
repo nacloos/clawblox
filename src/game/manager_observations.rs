@@ -1,7 +1,7 @@
 use uuid::Uuid;
 
-use super::{get_player_instance, GameManagerHandle};
 use super::instance::{MapInfo, PlayerObservation, SpectatorObservation};
+use super::{get_player_instance, GameManagerHandle};
 
 pub fn get_observation(
     state: &GameManagerHandle,
@@ -55,9 +55,8 @@ pub fn get_spectator_observation(
         }
     }
 
-    let instance_id = best_instance_id.ok_or_else(|| {
-        "No valid non-halted instances found for this game".to_string()
-    })?;
+    let instance_id = best_instance_id
+        .ok_or_else(|| "No valid non-halted instances found for this game".to_string())?;
 
     state
         .spectator_cache
@@ -88,10 +87,7 @@ pub fn get_spectator_observation_for_instance(
 }
 
 /// Get static map geometry for a game (cached per game_id)
-pub fn get_map(
-    state: &GameManagerHandle,
-    game_id: Uuid,
-) -> Result<MapInfo, String> {
+pub fn get_map(state: &GameManagerHandle, game_id: Uuid) -> Result<MapInfo, String> {
     // Check cache first
     if let Some(cached) = state.map_cache.get(&game_id) {
         return Ok(cached.clone());

@@ -1240,7 +1240,10 @@ fn test_workspace_child_access_via_property_index() {
     let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
     let child_exists: bool = globals.get("childExists").unwrap();
     let child_count: i64 = globals.get("childCount").unwrap();
-    assert!(child_exists, "Workspace.TokensFolder should resolve via __index");
+    assert!(
+        child_exists,
+        "Workspace.TokensFolder should resolve via __index"
+    );
     assert_eq!(child_count, 0);
 }
 
@@ -2182,7 +2185,10 @@ fn test_debris_add_item_destroys_after_lifetime() {
         .get_descendants()
         .into_iter()
         .any(|i| i.name() == "DebrisVictim");
-    assert!(exists_before, "Debris victim should exist before frame processing");
+    assert!(
+        exists_before,
+        "Debris victim should exist before frame processing"
+    );
 
     runtime.tick(1.0 / 60.0).expect("Failed to tick");
 

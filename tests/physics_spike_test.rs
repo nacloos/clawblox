@@ -90,9 +90,11 @@ fn test_spike_kinematic_kinematic_contacts() {
     let mut tp = TestPipeline::new();
 
     // Anchored cuboid (kinematic) at origin
-    let body_a = tp
-        .rigid_body_set
-        .insert(RigidBodyBuilder::kinematic_position_based().translation(vector![0.0, 0.0, 0.0]).build());
+    let body_a = tp.rigid_body_set.insert(
+        RigidBodyBuilder::kinematic_position_based()
+            .translation(vector![0.0, 0.0, 0.0])
+            .build(),
+    );
     let _col_a = tp.collider_set.insert_with_parent(
         ColliderBuilder::cuboid(1.0, 1.0, 1.0)
             .collision_groups(InteractionGroups::new(GROUP_STATIC, Group::ALL))
@@ -103,9 +105,11 @@ fn test_spike_kinematic_kinematic_contacts() {
     );
 
     // Character capsule (kinematic) overlapping at origin
-    let body_b = tp
-        .rigid_body_set
-        .insert(RigidBodyBuilder::kinematic_position_based().translation(vector![0.0, 0.0, 0.0]).build());
+    let body_b = tp.rigid_body_set.insert(
+        RigidBodyBuilder::kinematic_position_based()
+            .translation(vector![0.0, 0.0, 0.0])
+            .build(),
+    );
     let _col_b = tp.collider_set.insert_with_parent(
         ColliderBuilder::capsule_y(0.5, 0.5)
             .collision_groups(InteractionGroups::new(GROUP_CHARACTER, Group::ALL))
@@ -125,23 +129,37 @@ fn test_spike_kinematic_kinematic_contacts() {
     }
 
     let mut intersection_count = 0;
-    tp.narrow_phase.intersection_pairs().for_each(|(_c1, _c2, intersecting)| {
-        if intersecting {
-            intersection_count += 1;
-        }
-    });
+    tp.narrow_phase
+        .intersection_pairs()
+        .for_each(|(_c1, _c2, intersecting)| {
+            if intersecting {
+                intersection_count += 1;
+            }
+        });
 
     println!("  Contact pairs with active contacts: {}", contact_count);
-    println!("  Intersection pairs:                 {}", intersection_count);
-    println!("  Result: {}", if contact_count == 0 && intersection_count == 0 {
-        "CONFIRMED - No contacts between kinematic bodies"
-    } else {
-        "UNEXPECTED - Contacts detected!"
-    });
+    println!(
+        "  Intersection pairs:                 {}",
+        intersection_count
+    );
+    println!(
+        "  Result: {}",
+        if contact_count == 0 && intersection_count == 0 {
+            "CONFIRMED - No contacts between kinematic bodies"
+        } else {
+            "UNEXPECTED - Contacts detected!"
+        }
+    );
 
     // We EXPECT zero contacts — this confirms the limitation
-    assert_eq!(contact_count, 0, "Kinematic-kinematic should have no contact pairs");
-    assert_eq!(intersection_count, 0, "Kinematic-kinematic should have no intersection pairs");
+    assert_eq!(
+        contact_count, 0,
+        "Kinematic-kinematic should have no contact pairs"
+    );
+    assert_eq!(
+        intersection_count, 0,
+        "Kinematic-kinematic should have no intersection pairs"
+    );
 }
 
 // ===========================================================================
@@ -158,7 +176,9 @@ fn test_spike_kinematic_kinematic_sensor_workaround() {
         let mut tp = TestPipeline::new();
 
         let body_a = tp.rigid_body_set.insert(
-            RigidBodyBuilder::kinematic_position_based().translation(vector![0.0, 0.0, 0.0]).build(),
+            RigidBodyBuilder::kinematic_position_based()
+                .translation(vector![0.0, 0.0, 0.0])
+                .build(),
         );
         tp.collider_set.insert_with_parent(
             ColliderBuilder::cuboid(1.0, 1.0, 1.0)
@@ -170,7 +190,9 @@ fn test_spike_kinematic_kinematic_sensor_workaround() {
         );
 
         let body_b = tp.rigid_body_set.insert(
-            RigidBodyBuilder::kinematic_position_based().translation(vector![0.0, 0.0, 0.0]).build(),
+            RigidBodyBuilder::kinematic_position_based()
+                .translation(vector![0.0, 0.0, 0.0])
+                .build(),
         );
         tp.collider_set.insert_with_parent(
             ColliderBuilder::capsule_y(0.5, 0.5)
@@ -185,10 +207,17 @@ fn test_spike_kinematic_kinematic_sensor_workaround() {
         tp.step_n(5);
 
         let mut count = 0;
-        tp.narrow_phase.intersection_pairs().for_each(|(_c1, _c2, intersecting)| {
-            if intersecting { count += 1; }
-        });
-        println!("  Approach A (kinematic solid + kinematic sensor): intersections={}", count);
+        tp.narrow_phase
+            .intersection_pairs()
+            .for_each(|(_c1, _c2, intersecting)| {
+                if intersecting {
+                    count += 1;
+                }
+            });
+        println!(
+            "  Approach A (kinematic solid + kinematic sensor): intersections={}",
+            count
+        );
     }
 
     // --- Approach B: Kinematic solid + separate fixed sensor body overlapping character ---
@@ -197,7 +226,9 @@ fn test_spike_kinematic_kinematic_sensor_workaround() {
 
         // Anchored part: kinematic solid
         let body_a = tp.rigid_body_set.insert(
-            RigidBodyBuilder::kinematic_position_based().translation(vector![0.0, 0.0, 0.0]).build(),
+            RigidBodyBuilder::kinematic_position_based()
+                .translation(vector![0.0, 0.0, 0.0])
+                .build(),
         );
         tp.collider_set.insert_with_parent(
             ColliderBuilder::cuboid(1.0, 1.0, 1.0)
@@ -210,12 +241,16 @@ fn test_spike_kinematic_kinematic_sensor_workaround() {
 
         // Character: kinematic body (for KCC movement)
         let _body_char = tp.rigid_body_set.insert(
-            RigidBodyBuilder::kinematic_position_based().translation(vector![0.0, 0.0, 0.0]).build(),
+            RigidBodyBuilder::kinematic_position_based()
+                .translation(vector![0.0, 0.0, 0.0])
+                .build(),
         );
 
         // Separate sensor: dynamic body with zero mass (or fixed) co-located with character
         let sensor_body = tp.rigid_body_set.insert(
-            RigidBodyBuilder::dynamic().translation(vector![0.0, 0.0, 0.0]).build(),
+            RigidBodyBuilder::dynamic()
+                .translation(vector![0.0, 0.0, 0.0])
+                .build(),
         );
         tp.collider_set.insert_with_parent(
             ColliderBuilder::capsule_y(0.5, 0.5)
@@ -230,10 +265,17 @@ fn test_spike_kinematic_kinematic_sensor_workaround() {
         tp.step_n(5);
 
         let mut count = 0;
-        tp.narrow_phase.intersection_pairs().for_each(|(_c1, _c2, intersecting)| {
-            if intersecting { count += 1; }
-        });
-        println!("  Approach B (kinematic solid + dynamic sensor): intersections={}", count);
+        tp.narrow_phase
+            .intersection_pairs()
+            .for_each(|(_c1, _c2, intersecting)| {
+                if intersecting {
+                    count += 1;
+                }
+            });
+        println!(
+            "  Approach B (kinematic solid + dynamic sensor): intersections={}",
+            count
+        );
     }
 
     // --- Approach C: Both kinematic, BOTH sensors ---
@@ -241,7 +283,9 @@ fn test_spike_kinematic_kinematic_sensor_workaround() {
         let mut tp = TestPipeline::new();
 
         let body_a = tp.rigid_body_set.insert(
-            RigidBodyBuilder::kinematic_position_based().translation(vector![0.0, 0.0, 0.0]).build(),
+            RigidBodyBuilder::kinematic_position_based()
+                .translation(vector![0.0, 0.0, 0.0])
+                .build(),
         );
         tp.collider_set.insert_with_parent(
             ColliderBuilder::cuboid(1.0, 1.0, 1.0)
@@ -254,7 +298,9 @@ fn test_spike_kinematic_kinematic_sensor_workaround() {
         );
 
         let body_b = tp.rigid_body_set.insert(
-            RigidBodyBuilder::kinematic_position_based().translation(vector![0.0, 0.0, 0.0]).build(),
+            RigidBodyBuilder::kinematic_position_based()
+                .translation(vector![0.0, 0.0, 0.0])
+                .build(),
         );
         tp.collider_set.insert_with_parent(
             ColliderBuilder::capsule_y(0.5, 0.5)
@@ -269,10 +315,17 @@ fn test_spike_kinematic_kinematic_sensor_workaround() {
         tp.step_n(5);
 
         let mut count = 0;
-        tp.narrow_phase.intersection_pairs().for_each(|(_c1, _c2, intersecting)| {
-            if intersecting { count += 1; }
-        });
-        println!("  Approach C (kinematic sensor + kinematic sensor): intersections={}", count);
+        tp.narrow_phase
+            .intersection_pairs()
+            .for_each(|(_c1, _c2, intersecting)| {
+                if intersecting {
+                    count += 1;
+                }
+            });
+        println!(
+            "  Approach C (kinematic sensor + kinematic sensor): intersections={}",
+            count
+        );
     }
 
     // --- Approach D: Use query pipeline intersection test instead of narrow phase ---
@@ -281,7 +334,9 @@ fn test_spike_kinematic_kinematic_sensor_workaround() {
 
         // Anchored part: kinematic solid
         let body_a = tp.rigid_body_set.insert(
-            RigidBodyBuilder::kinematic_position_based().translation(vector![0.0, 0.0, 0.0]).build(),
+            RigidBodyBuilder::kinematic_position_based()
+                .translation(vector![0.0, 0.0, 0.0])
+                .build(),
         );
         tp.collider_set.insert_with_parent(
             ColliderBuilder::cuboid(1.0, 1.0, 1.0)
@@ -293,7 +348,9 @@ fn test_spike_kinematic_kinematic_sensor_workaround() {
 
         // Character: kinematic body at same position
         let char_body = tp.rigid_body_set.insert(
-            RigidBodyBuilder::kinematic_position_based().translation(vector![0.0, 0.0, 0.0]).build(),
+            RigidBodyBuilder::kinematic_position_based()
+                .translation(vector![0.0, 0.0, 0.0])
+                .build(),
         );
         let _char_col = tp.collider_set.insert_with_parent(
             ColliderBuilder::capsule_y(0.5, 0.5)
@@ -325,7 +382,10 @@ fn test_spike_kinematic_kinematic_sensor_workaround() {
                 true // continue searching
             },
         );
-        println!("  Approach D (query_pipeline.intersections_with_shape): overlaps={}", overlaps.len());
+        println!(
+            "  Approach D (query_pipeline.intersections_with_shape): overlaps={}",
+            overlaps.len()
+        );
     }
 
     println!();
@@ -341,7 +401,9 @@ fn test_spike_kinematic_kinematic_sensor_workaround() {
 #[test]
 fn test_spike_character_on_rotating_platform() {
     println!("\n=== TEST 3: Character on Rotating Platform ===");
-    println!("Question: Does a character stay on a platform rotating via set_next_kinematic_rotation?");
+    println!(
+        "Question: Does a character stay on a platform rotating via set_next_kinematic_rotation?"
+    );
 
     let mut tp = TestPipeline::new();
 
@@ -448,8 +510,13 @@ fn test_spike_character_on_rotating_platform() {
 
     println!("  Y range: [{:.2}, {:.2}]", min_y, max_y);
     println!("  Character moved in XZ: {}", char_moved_xz);
-    println!("  Result: Character {} on rotating platform, {} rotate with it",
-        if (max_y - min_y) < 2.0 { "STAYS" } else { "FALLS OFF" },
+    println!(
+        "  Result: Character {} on rotating platform, {} rotate with it",
+        if (max_y - min_y) < 2.0 {
+            "STAYS"
+        } else {
+            "FALLS OFF"
+        },
         if char_moved_xz { "DOES" } else { "does NOT" }
     );
 
@@ -457,7 +524,9 @@ fn test_spike_character_on_rotating_platform() {
         println!("  NOTE: move_shape() inherently follows kinematic platform rotation.");
         println!("  This means NO manual tangential velocity compensation is needed.");
     } else {
-        println!("  NOTE: Manual tangential velocity compensation IS needed for rotating platforms.");
+        println!(
+            "  NOTE: Manual tangential velocity compensation IS needed for rotating platforms."
+        );
     }
 
     // Character should stay roughly on top (Y shouldn't drop drastically)
@@ -520,7 +589,10 @@ fn test_spike_character_on_vertically_moving_platform() {
     let mut total_gap: f32 = 0.0;
     let mut frame_count: u32 = 0;
 
-    println!("  Platform moves up for 90 frames, then down for 90 frames (speed={} studs/s)", speed);
+    println!(
+        "  Platform moves up for 90 frames, then down for 90 frames (speed={} studs/s)",
+        speed
+    );
     for i in 0..180 {
         // Move platform: up for first 90 frames, down for next 90
         let platform_y = if i < 90 {
@@ -585,13 +657,16 @@ fn test_spike_character_on_vertically_moving_platform() {
     let avg_gap = total_gap / frame_count as f32;
     println!("  Max gap:     {:.3} studs", max_gap);
     println!("  Average gap: {:.3} studs", avg_gap);
-    println!("  Result: {}", if max_gap < 0.1 {
-        "GOOD - Minimal bouncing"
-    } else if max_gap < 0.5 {
-        "MODERATE - Some bouncing, may need platform-velocity compensation"
-    } else {
-        "BAD - Significant bouncing, platform-velocity compensation required"
-    });
+    println!(
+        "  Result: {}",
+        if max_gap < 0.1 {
+            "GOOD - Minimal bouncing"
+        } else if max_gap < 0.5 {
+            "MODERATE - Some bouncing, may need platform-velocity compensation"
+        } else {
+            "BAD - Significant bouncing, platform-velocity compensation required"
+        }
+    );
 
     // Don't hard-fail — just document the severity
     // The test passes as long as the character doesn't fall through the platform
@@ -663,17 +738,23 @@ fn test_spike_kinematic_pushes_dynamic() {
         if i % 30 == 0 || i == 119 {
             let dyn_x = tp.rigid_body_set.get(dynamic_body).unwrap().translation().x;
             let push_x = tp.rigid_body_set.get(pusher).unwrap().translation().x;
-            println!("  Frame {:3}: pusher_x={:.2} dynamic_x={:.2}", i, push_x, dyn_x);
+            println!(
+                "  Frame {:3}: pusher_x={:.2} dynamic_x={:.2}",
+                i, push_x, dyn_x
+            );
         }
     }
 
     let final_dynamic_x = tp.rigid_body_set.get(dynamic_body).unwrap().translation().x;
     println!("  Final dynamic box X: {:.2}", final_dynamic_x);
-    println!("  Result: {}", if final_dynamic_x > initial_dynamic_x + 1.0 {
-        "CONFIRMED - Kinematic pushes dynamic natively"
-    } else {
-        "FAILED - Kinematic does NOT push dynamic"
-    });
+    println!(
+        "  Result: {}",
+        if final_dynamic_x > initial_dynamic_x + 1.0 {
+            "CONFIRMED - Kinematic pushes dynamic natively"
+        } else {
+            "FAILED - Kinematic does NOT push dynamic"
+        }
+    );
 
     assert!(
         final_dynamic_x > initial_dynamic_x + 1.0,
@@ -730,12 +811,14 @@ fn test_spike_sensor_events_dynamic() {
 
         let ball_y = tp.rigid_body_set.get(ball_body).unwrap().translation().y;
 
-        tp.narrow_phase.intersection_pairs().for_each(|(_c1, _c2, intersecting)| {
-            if intersecting && !detected_intersection {
-                detected_intersection = true;
-                detection_frame = Some(i);
-            }
-        });
+        tp.narrow_phase
+            .intersection_pairs()
+            .for_each(|(_c1, _c2, intersecting)| {
+                if intersecting && !detected_intersection {
+                    detected_intersection = true;
+                    detection_frame = Some(i);
+                }
+            });
 
         if i % 20 == 0 || detected_intersection && detection_frame == Some(i) {
             println!(
@@ -745,12 +828,18 @@ fn test_spike_sensor_events_dynamic() {
         }
     }
 
-    println!("  Intersection detected: {} (frame {:?})", detected_intersection, detection_frame);
-    println!("  Result: {}", if detected_intersection {
-        "CONFIRMED - Dynamic-sensor intersection events fire"
-    } else {
-        "FAILED - No intersection events"
-    });
+    println!(
+        "  Intersection detected: {} (frame {:?})",
+        detected_intersection, detection_frame
+    );
+    println!(
+        "  Result: {}",
+        if detected_intersection {
+            "CONFIRMED - Dynamic-sensor intersection events fire"
+        } else {
+            "FAILED - No intersection events"
+        }
+    );
 
     assert!(
         detected_intersection,
@@ -801,11 +890,13 @@ fn test_spike_sensor_sensor_no_events() {
     tp.step_n(5);
 
     let mut intersection_count = 0;
-    tp.narrow_phase.intersection_pairs().for_each(|(_c1, _c2, intersecting)| {
-        if intersecting {
-            intersection_count += 1;
-        }
-    });
+    tp.narrow_phase
+        .intersection_pairs()
+        .for_each(|(_c1, _c2, intersecting)| {
+            if intersecting {
+                intersection_count += 1;
+            }
+        });
 
     let mut contact_count = 0;
     for pair in tp.narrow_phase.contact_pairs() {
@@ -816,14 +907,23 @@ fn test_spike_sensor_sensor_no_events() {
 
     println!("  Intersection pairs: {}", intersection_count);
     println!("  Contact pairs:      {}", contact_count);
-    println!("  Result: {}", if intersection_count == 0 && contact_count == 0 {
-        "CONFIRMED - Two sensors do NOT detect each other (matches Roblox CanCollide=false behavior)"
-    } else {
-        "UNEXPECTED - Sensors detected each other!"
-    });
+    println!(
+        "  Result: {}",
+        if intersection_count == 0 && contact_count == 0 {
+            "CONFIRMED - Two sensors do NOT detect each other (matches Roblox CanCollide=false behavior)"
+        } else {
+            "UNEXPECTED - Sensors detected each other!"
+        }
+    );
 
-    assert_eq!(intersection_count, 0, "Sensor-sensor should not produce intersections");
-    assert_eq!(contact_count, 0, "Sensor-sensor should not produce contacts");
+    assert_eq!(
+        intersection_count, 0,
+        "Sensor-sensor should not produce intersections"
+    );
+    assert_eq!(
+        contact_count, 0,
+        "Sensor-sensor should not produce contacts"
+    );
 }
 
 // ===========================================================================
@@ -848,9 +948,19 @@ fn test_spike_wedge_convex_hull() {
     ];
 
     let maybe_shape = SharedShape::convex_hull(&points);
-    println!("  convex_hull() returned: {}", if maybe_shape.is_some() { "Some" } else { "None" });
+    println!(
+        "  convex_hull() returned: {}",
+        if maybe_shape.is_some() {
+            "Some"
+        } else {
+            "None"
+        }
+    );
 
-    assert!(maybe_shape.is_some(), "convex_hull() should successfully create a wedge shape");
+    assert!(
+        maybe_shape.is_some(),
+        "convex_hull() should successfully create a wedge shape"
+    );
 
     // Now test a ball sliding down the slope
     let wedge_body = tp.rigid_body_set.insert(
@@ -873,38 +983,52 @@ fn test_spike_wedge_convex_hull() {
             .build(),
     );
     tp.collider_set.insert_with_parent(
-        ColliderBuilder::ball(0.3)
-            .friction(0.3)
-            .build(),
+        ColliderBuilder::ball(0.3).friction(0.3).build(),
         ball_body,
         &mut tp.rigid_body_set,
     );
 
     let initial_pos = *tp.rigid_body_set.get(ball_body).unwrap().translation();
-    println!("  Ball initial position: ({:.2}, {:.2}, {:.2})", initial_pos.x, initial_pos.y, initial_pos.z);
+    println!(
+        "  Ball initial position: ({:.2}, {:.2}, {:.2})",
+        initial_pos.x, initial_pos.y, initial_pos.z
+    );
 
     for i in 0..120 {
         tp.step();
 
         if i % 30 == 0 || i == 119 {
             let pos = tp.rigid_body_set.get(ball_body).unwrap().translation();
-            println!("  Frame {:3}: ball=({:.2}, {:.2}, {:.2})", i, pos.x, pos.y, pos.z);
+            println!(
+                "  Frame {:3}: ball=({:.2}, {:.2}, {:.2})",
+                i, pos.x, pos.y, pos.z
+            );
         }
     }
 
     let final_pos = *tp.rigid_body_set.get(ball_body).unwrap().translation();
-    println!("  Ball final position: ({:.2}, {:.2}, {:.2})", final_pos.x, final_pos.y, final_pos.z);
+    println!(
+        "  Ball final position: ({:.2}, {:.2}, {:.2})",
+        final_pos.x, final_pos.y, final_pos.z
+    );
 
     // Ball should have moved (either slid down the slope or bounced off)
     let moved = (final_pos - initial_pos).norm();
     println!("  Ball displacement: {:.2}", moved);
-    println!("  Result: {}", if moved > 1.0 {
-        "CONFIRMED - Convex hull works, ball interacts with wedge"
-    } else {
-        "UNEXPECTED - Ball didn't move much"
-    });
+    println!(
+        "  Result: {}",
+        if moved > 1.0 {
+            "CONFIRMED - Convex hull works, ball interacts with wedge"
+        } else {
+            "UNEXPECTED - Ball didn't move much"
+        }
+    );
 
-    assert!(moved > 1.0, "Ball should interact with wedge shape (displacement={:.2})", moved);
+    assert!(
+        moved > 1.0,
+        "Ball should interact with wedge shape (displacement={:.2})",
+        moved
+    );
 }
 
 // ===========================================================================
@@ -961,7 +1085,10 @@ fn test_spike_event_type_matrix() {
         },
     ];
 
-    println!("  {:<25} {:>12} {:>15}", "Scenario", "contacts", "intersections");
+    println!(
+        "  {:<25} {:>12} {:>15}",
+        "Scenario", "contacts", "intersections"
+    );
     println!("  {}", "-".repeat(55));
 
     for scenario in &scenarios {
@@ -975,7 +1102,9 @@ fn test_spike_event_type_matrix() {
             RigidBodyType::Fixed => RigidBodyBuilder::fixed(),
             _ => RigidBodyBuilder::fixed(),
         };
-        let body_a = tp.rigid_body_set.insert(builder_a.translation(vector![0.0, 0.0, 0.0]).build());
+        let body_a = tp
+            .rigid_body_set
+            .insert(builder_a.translation(vector![0.0, 0.0, 0.0]).build());
         tp.collider_set.insert_with_parent(
             ColliderBuilder::cuboid(1.0, 1.0, 1.0)
                 .sensor(scenario.sensor_a)
@@ -991,7 +1120,9 @@ fn test_spike_event_type_matrix() {
             RigidBodyType::Fixed => RigidBodyBuilder::fixed(),
             _ => RigidBodyBuilder::fixed(),
         };
-        let body_b = tp.rigid_body_set.insert(builder_b.translation(vector![0.5, 0.0, 0.0]).build());
+        let body_b = tp
+            .rigid_body_set
+            .insert(builder_b.translation(vector![0.5, 0.0, 0.0]).build());
         tp.collider_set.insert_with_parent(
             ColliderBuilder::cuboid(1.0, 1.0, 1.0)
                 .sensor(scenario.sensor_b)
@@ -1012,11 +1143,13 @@ fn test_spike_event_type_matrix() {
         }
 
         let mut has_intersections = false;
-        tp.narrow_phase.intersection_pairs().for_each(|(_c1, _c2, intersecting)| {
-            if intersecting {
-                has_intersections = true;
-            }
-        });
+        tp.narrow_phase
+            .intersection_pairs()
+            .for_each(|(_c1, _c2, intersecting)| {
+                if intersecting {
+                    has_intersections = true;
+                }
+            });
 
         let contact_str = if has_contacts { "YES" } else { "NO" };
         let intersection_str = if has_intersections { "YES" } else { "NO" };

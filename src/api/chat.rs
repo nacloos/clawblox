@@ -8,9 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tower_governor::{
-    governor::GovernorConfigBuilder,
-    key_extractor::KeyExtractor,
-    GovernorError, GovernorLayer,
+    governor::GovernorConfigBuilder, key_extractor::KeyExtractor, GovernorError, GovernorLayer,
 };
 use uuid::Uuid;
 
@@ -57,12 +55,13 @@ async fn get_agent_from_api_key(
     }
 
     // Cache miss - query DB
-    let agent = sqlx::query_as::<_, (Uuid, String)>("SELECT id, name FROM agents WHERE api_key = $1")
-        .bind(api_key)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
+    let agent =
+        sqlx::query_as::<_, (Uuid, String)>("SELECT id, name FROM agents WHERE api_key = $1")
+            .bind(api_key)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
 
     cache.insert(api_key.to_string(), agent.clone());
     Ok(agent)
@@ -92,21 +91,18 @@ pub fn routes(
         .finish()
         .unwrap();
 
-    let mut agent_routes = Router::new()
-        .route("/games/{id}/chat", post(send_message));
+    let mut agent_routes = Router::new().route("/games/{id}/chat", post(send_message));
 
     if r2.is_some() {
         agent_routes = agent_routes.route(
             "/games/{id}/chat/voice",
-            post(send_voice_message)
-                .layer(DefaultBodyLimit::max(MAX_AUDIO_SIZE)),
+            post(send_voice_message).layer(DefaultBodyLimit::max(MAX_AUDIO_SIZE)),
         );
     }
 
     agent_routes = agent_routes.layer(GovernorLayer::new(governor_conf));
 
-    let public_routes = Router::new()
-        .route("/games/{id}/chat/messages", get(get_messages));
+    let public_routes = Router::new().route("/games/{id}/chat/messages", get(get_messages));
 
     agent_routes.merge(public_routes).with_state(state)
 }
@@ -129,8 +125,10 @@ async fn send_message(
     headers: HeaderMap,
     Json(body): Json<SendMessageRequest>,
 ) -> Result<Json<SendMessageResponse>, (StatusCode, String)> {
-    let api_key = extract_api_key(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
+    let api_key = extract_api_key(&headers).ok_or((
+        StatusCode::UNAUTHORIZED,
+        "Missing Authorization header".to_string(),
+    ))?;
 
     let (agent_id, agent_name) =
         get_agent_from_api_key(&api_key, &state.api_key_cache, &state.pool).await?;
@@ -138,7 +136,10 @@ async fn send_message(
     // Validate content
     let content = body.content.trim().to_string();
     if content.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "Message content cannot be empty".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Message content cannot be empty".to_string(),
+        ));
     }
     if content.len() > 500 {
         return Err((
@@ -167,11 +168,10 @@ async fn send_message(
     };
 
     // Resolve agent's instance
-    let instance_id = game::get_player_instance(&state.game_manager, agent_id, game_id)
-        .ok_or((
-            StatusCode::BAD_REQUEST,
-            "Agent is not in a game instance".to_string(),
-        ))?;
+    let instance_id = game::get_player_instance(&state.game_manager, agent_id, game_id).ok_or((
+        StatusCode::BAD_REQUEST,
+        "Agent is not in a game instance".to_string(),
+    ))?;
 
     let row: (Uuid, DateTime<Utc>) = sqlx::query_as(
         r#"INSERT INTO chat_messages (game_id, instance_id, agent_id, agent_name, content, message_type, media_url)
@@ -213,8 +213,10 @@ async fn send_voice_message(
         "Voice messages are not available (R2 not configured)".to_string(),
     ))?;
 
-    let api_key = extract_api_key(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
+    let api_key = extract_api_key(&headers).ok_or((
+        StatusCode::UNAUTHORIZED,
+        "Missing Authorization header".to_string(),
+    ))?;
 
     let (agent_id, agent_name) =
         get_agent_from_api_key(&api_key, &state.api_key_cache, &state.pool).await?;
@@ -223,18 +225,21 @@ async fn send_voice_message(
     let mut audio_data: Option<Vec<u8>> = None;
     let mut audio_content_type: Option<String> = None;
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid multipart data: {e}")))?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid multipart data: {e}"),
+        )
+    })? {
         let name = field.name().unwrap_or("").to_string();
         match name.as_str() {
             "content" => {
-                let text = field
-                    .text()
-                    .await
-                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to read content field: {e}")))?;
+                let text = field.text().await.map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("Failed to read content field: {e}"),
+                    )
+                })?;
                 content = Some(text);
             }
             "audio" => {
@@ -250,10 +255,12 @@ async fn send_voice_message(
                     ));
                 }
 
-                let bytes = field
-                    .bytes()
-                    .await
-                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to read audio field: {e}")))?;
+                let bytes = field.bytes().await.map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("Failed to read audio field: {e}"),
+                    )
+                })?;
 
                 if bytes.is_empty() {
                     return Err((StatusCode::BAD_REQUEST, "Audio file is empty".to_string()));
@@ -269,11 +276,16 @@ async fn send_voice_message(
     }
 
     // Validate required fields
-    let content = content
-        .ok_or((StatusCode::BAD_REQUEST, "Missing 'content' field".to_string()))?;
+    let content = content.ok_or((
+        StatusCode::BAD_REQUEST,
+        "Missing 'content' field".to_string(),
+    ))?;
     let content = content.trim().to_string();
     if content.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "Message content cannot be empty".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Message content cannot be empty".to_string(),
+        ));
     }
     if content.len() > 500 {
         return Err((
@@ -282,16 +294,15 @@ async fn send_voice_message(
         ));
     }
 
-    let audio_data = audio_data
-        .ok_or((StatusCode::BAD_REQUEST, "Missing 'audio' field".to_string()))?;
+    let audio_data =
+        audio_data.ok_or((StatusCode::BAD_REQUEST, "Missing 'audio' field".to_string()))?;
     let audio_content_type = audio_content_type.unwrap(); // safe: set alongside audio_data
 
     // Resolve agent's instance
-    let instance_id = game::get_player_instance(&state.game_manager, agent_id, game_id)
-        .ok_or((
-            StatusCode::BAD_REQUEST,
-            "Agent is not in a game instance".to_string(),
-        ))?;
+    let instance_id = game::get_player_instance(&state.game_manager, agent_id, game_id).ok_or((
+        StatusCode::BAD_REQUEST,
+        "Agent is not in a game instance".to_string(),
+    ))?;
 
     // Determine file extension from content type
     let ext = match audio_content_type.as_str() {
@@ -367,7 +378,15 @@ async fn get_messages(
 ) -> Result<Json<GetMessagesResponse>, (StatusCode, String)> {
     let limit = query.limit.clamp(1, 100);
 
-    let messages: Vec<(Uuid, Uuid, String, String, String, Option<String>, DateTime<Utc>)> = if let Some(after) = query.after {
+    let messages: Vec<(
+        Uuid,
+        Uuid,
+        String,
+        String,
+        String,
+        Option<String>,
+        DateTime<Utc>,
+    )> = if let Some(after) = query.after {
         sqlx::query_as(
             r#"SELECT id, agent_id, agent_name, content, message_type, media_url, created_at
                FROM chat_messages
@@ -403,15 +422,19 @@ async fn get_messages(
 
     let messages = messages
         .into_iter()
-        .map(|(id, agent_id, agent_name, content, message_type, media_url, created_at)| ChatMessageResponse {
-            id,
-            agent_id,
-            agent_name,
-            content,
-            message_type,
-            media_url,
-            created_at,
-        })
+        .map(
+            |(id, agent_id, agent_name, content, message_type, media_url, created_at)| {
+                ChatMessageResponse {
+                    id,
+                    agent_id,
+                    agent_name,
+                    content,
+                    message_type,
+                    media_url,
+                    created_at,
+                }
+            },
+        )
         .collect();
 
     Ok(Json(GetMessagesResponse { messages }))

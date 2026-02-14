@@ -6,10 +6,13 @@ Supports two backend modes:
 - Hosted/API server (`/api/v1`): API-key auth (`Authorization: Bearer ...`)
 
 Examples:
+  # Default: platform mode, auto-discovers game by name
+  python test_player.py
+
   # Local clawblox run server
   python test_player.py --api-base http://localhost:8080
 
-  # Hosted/api server
+  # Hosted/api server with explicit game ID
   python test_player.py --api-base http://localhost:8080/api/v1 --game-id <uuid>
 """
 
@@ -28,6 +31,7 @@ from typing import Any
 import requests
 
 TEST_AGENT_NAME = "fps-arena-cache-check"
+GAME_NAME = "FPS Arena"
 
 
 @dataclass
@@ -82,7 +86,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Simple test player for FPS Arena")
     p.add_argument(
         "--api-base",
-        default="http://localhost:8080",
+        default="http://localhost:8080/api/v1",
         help="Base URL (local: http://localhost:8080, hosted: .../api/v1)",
     )
     p.add_argument("--game-id", default=None, help="Required for /api/v1 mode")
@@ -102,6 +106,29 @@ def normalize_base(url: str) -> str:
 
 def detect_mode(api_base: str) -> str:
     return "platform" if api_base.endswith("/api/v1") else "local"
+
+
+def discover_game_id(api_base: str, game_name: str) -> str:
+    """Query GET /games and find a running game matching *game_name*."""
+    r = requests.get(f"{api_base}/games", timeout=10)
+    r.raise_for_status()
+    games = r.json().get("games", [])
+    # Prefer a running game whose name matches
+    for g in games:
+        if g.get("name") == game_name and g.get("is_running"):
+            print(f"[discover] found running game: {g['id']} ({g['name']})")
+            return g["id"]
+    # Fall back to any game with matching name
+    for g in games:
+        if g.get("name") == game_name:
+            print(f"[discover] found game (not running): {g['id']} ({g['name']})")
+            return g["id"]
+    available = [f"{g.get('name')} ({g.get('id')})" for g in games]
+    raise RuntimeError(
+        f"No game named '{game_name}' found. "
+        f"Available: {available or 'none'}. "
+        f"Deploy first: ./scripts/deploy_local_game.sh --game games/fps-arena"
+    )
 
 
 def register_agent(api_base: str, name: str) -> str:
@@ -125,7 +152,10 @@ def register_agent(api_base: str, name: str) -> str:
 
 def create_platform_session(args: argparse.Namespace, api_base: str, agent_name: str) -> Session:
     if not args.game_id:
-        raise RuntimeError("--game-id is required when --api-base ends with /api/v1")
+        raise RuntimeError(
+            "No game ID. Pass --game-id or deploy the game first: "
+            "./scripts/deploy_local_game.sh --game games/fps-arena"
+        )
 
     api_key = args.api_key or load_cached_api_key(api_base, agent_name)
     if api_key:
@@ -360,6 +390,11 @@ def main() -> int:
     api_base = normalize_base(args.api_base)
     mode = detect_mode(api_base)
     print(f"[mode] {mode} ({api_base})")
+
+    # Auto-discover game ID in platform mode when not explicitly provided
+    if mode == "platform" and not args.game_id:
+        args.game_id = discover_game_id(api_base, GAME_NAME)
+
     sessions: list[Session] = []
 
     try:

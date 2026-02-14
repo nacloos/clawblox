@@ -25,7 +25,8 @@ pub fn build_motion_plan(
     let mut new_vertical_velocity = vertical_velocity + gravity * dt;
     if grounded {
         if let Some(jump) = jump_power {
-            let max_launch_speed = (2.0 * gravity.abs() * humanoid_consts::DEFAULT_JUMP_HEIGHT).sqrt();
+            let max_launch_speed =
+                (2.0 * gravity.abs() * humanoid_consts::DEFAULT_JUMP_HEIGHT).sqrt();
             new_vertical_velocity = jump.max(0.0).min(max_launch_speed);
         }
     }
@@ -136,9 +137,18 @@ mod tests {
             None,
         );
 
-        assert!(plan.desired[0] > 0.0, "airborne should preserve forward momentum");
-        assert!(plan.desired[2].abs() < 1e-6, "no Z drift for straight X target");
-        assert!(plan.desired[1] < 0.0, "airborne plan should still apply gravity");
+        assert!(
+            plan.desired[0] > 0.0,
+            "airborne should preserve forward momentum"
+        );
+        assert!(
+            plan.desired[2].abs() < 1e-6,
+            "no Z drift for straight X target"
+        );
+        assert!(
+            plan.desired[1] < 0.0,
+            "airborne plan should still apply gravity"
+        );
         assert!(!plan.reached_move_to, "target is still far away");
     }
 
@@ -160,7 +170,10 @@ mod tests {
         );
 
         assert!(plan.desired[0] > 0.0, "grounded MoveTo should steer X");
-        assert!(plan.desired[2].abs() < 1e-6, "no Z offset for straight X target");
+        assert!(
+            plan.desired[2].abs() < 1e-6,
+            "no Z offset for straight X target"
+        );
     }
 
     #[test]
@@ -180,8 +193,14 @@ mod tests {
             None,
         );
 
-        assert!(plan.new_horizontal_velocity[0] > 0.0, "should not instantly zero X momentum");
-        assert!(plan.new_horizontal_velocity[1] > 0.0, "should start steering toward +Z");
+        assert!(
+            plan.new_horizontal_velocity[0] > 0.0,
+            "should not instantly zero X momentum"
+        );
+        assert!(
+            plan.new_horizontal_velocity[1] > 0.0,
+            "should start steering toward +Z"
+        );
         assert!(
             plan.new_horizontal_velocity[1] < 16.0,
             "air control should not instantly reach full target speed"

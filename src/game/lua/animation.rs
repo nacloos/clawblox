@@ -184,7 +184,9 @@ impl UserData for AnimationTrack {
         fields.add_field_method_get("Stopped", |_, this| {
             Ok(this.data.lock().unwrap().stopped.clone())
         });
-        fields.add_field_method_get("Ended", |_, this| Ok(this.data.lock().unwrap().ended.clone()));
+        fields.add_field_method_get("Ended", |_, this| {
+            Ok(this.data.lock().unwrap().ended.clone())
+        });
     }
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
@@ -276,25 +278,28 @@ impl UserData for AnimationTrack {
             this.data.lock().unwrap().speed = speed.max(0.0);
             Ok(())
         });
-        methods.add_method("AdjustWeight", |_, this, (weight, fade_time): (f32, Option<f32>)| {
-            let mut data = this.data.lock().unwrap();
-            let fade = fade_time.unwrap_or(0.0).max(0.0);
-            let target = weight.max(0.0);
-            data.weight_target = target;
-            if fade > 0.0 {
-                data.fade_from = data.weight_current.max(0.0);
-                data.fade_to = target;
-                data.fade_duration = fade;
-                data.fade_elapsed = 0.0;
-            } else {
-                data.fade_duration = 0.0;
-                data.fade_elapsed = 0.0;
-                data.fade_from = target;
-                data.fade_to = target;
-                data.weight_current = target;
-            }
-            Ok(())
-        });
+        methods.add_method(
+            "AdjustWeight",
+            |_, this, (weight, fade_time): (f32, Option<f32>)| {
+                let mut data = this.data.lock().unwrap();
+                let fade = fade_time.unwrap_or(0.0).max(0.0);
+                let target = weight.max(0.0);
+                data.weight_target = target;
+                if fade > 0.0 {
+                    data.fade_from = data.weight_current.max(0.0);
+                    data.fade_to = target;
+                    data.fade_duration = fade;
+                    data.fade_elapsed = 0.0;
+                } else {
+                    data.fade_duration = 0.0;
+                    data.fade_elapsed = 0.0;
+                    data.fade_from = target;
+                    data.fade_to = target;
+                    data.weight_current = target;
+                }
+                Ok(())
+            },
+        );
     }
 }
 
@@ -333,7 +338,12 @@ impl AnimationScheduler {
         let mut ranked = Vec::new();
         for track in tracks {
             let data = track.data.lock().unwrap();
-            ranked.push((track.clone(), data.priority, data.track_id, data.weight_current.max(0.0)));
+            ranked.push((
+                track.clone(),
+                data.priority,
+                data.track_id,
+                data.weight_current.max(0.0),
+            ));
         }
 
         ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.cmp(&b.2)));

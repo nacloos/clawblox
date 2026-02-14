@@ -3,8 +3,8 @@ use mlua::{
     UserDataMethods, Value,
 };
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use uuid::Uuid;
 
 use crate::game::instance::ErrorMode;
@@ -207,9 +207,9 @@ impl UserData for Game {
                 "DataStoreService" => Ok(Value::UserData(
                     lua.create_userdata(dm.data_store_service.clone())?,
                 )),
-                "Debris" | "DebrisService" => {
-                    Ok(Value::UserData(lua.create_userdata(dm.debris_service.clone())?))
-                }
+                "Debris" | "DebrisService" => Ok(Value::UserData(
+                    lua.create_userdata(dm.debris_service.clone())?,
+                )),
                 "PhysicsService" => Ok(Value::UserData(
                     lua.create_userdata(dm.physics_service.clone())?,
                 )),
@@ -244,9 +244,9 @@ impl UserData for Game {
                 "RemoteEventService" => Ok(Value::UserData(
                     lua.create_userdata(dm.remote_event_service.clone())?,
                 )),
-                "Debris" | "DebrisService" => {
-                    Ok(Value::UserData(lua.create_userdata(dm.debris_service.clone())?))
-                }
+                "Debris" | "DebrisService" => Ok(Value::UserData(
+                    lua.create_userdata(dm.debris_service.clone())?,
+                )),
                 "ServerScriptService" => Ok(Value::UserData(
                     lua.create_userdata(dm.server_script_service.clone())?,
                 )),
@@ -404,7 +404,8 @@ impl LuaRuntime {
         lua.globals().set("workspace", game.workspace())?;
         lua.globals().set("Players", game.players())?;
         lua.globals().set("RunService", game.run_service())?;
-        lua.globals().set("PhysicsService", game.physics_service())?;
+        lua.globals()
+            .set("PhysicsService", game.physics_service())?;
         lua.globals()
             .set("ReplicatedStorage", game.replicated_storage())?;
         lua.globals()

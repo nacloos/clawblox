@@ -197,6 +197,8 @@ pub(super) fn build_map_info(instance: &GameInstance) -> MapInfo {
                     ],
                     size: [part_data.size.x, part_data.size.y, part_data.size.z],
                     rotation: Some(part_data.cframe.rotation),
+                    aabb: None,
+                    obb: None,
                     color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
                     material: Some(part_data.material.name().to_string()),
                     shape: Some(part_data.shape.name().to_string()),

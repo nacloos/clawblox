@@ -52,10 +52,19 @@ fn get_attr_string(instance: &GameInstance, name: &str, attr: &str) -> String {
 #[test]
 fn test_parity_sandbox_zone_control_smoke() {
     let game_dir = Path::new("games/parity-sandbox");
-    assert!(game_dir.exists(), "missing game dir at {}", game_dir.display());
+    assert!(
+        game_dir.exists(),
+        "missing game dir at {}",
+        game_dir.display()
+    );
 
-    let (_config, bundled_source) = load_world_and_entry_script(game_dir)
-        .unwrap_or_else(|e| panic!("failed bundling game scripts from {}: {}", game_dir.display(), e));
+    let (_config, bundled_source) = load_world_and_entry_script(game_dir).unwrap_or_else(|e| {
+        panic!(
+            "failed bundling game scripts from {}: {}",
+            game_dir.display(),
+            e
+        )
+    });
 
     let mut instance = GameInstance::new_with_script(Uuid::new_v4(), &bundled_source, None);
 
@@ -84,6 +93,12 @@ fn test_parity_sandbox_zone_control_smoke() {
         leader_score > 0.0,
         "leader score should increase in zone-control loop"
     );
-    assert!(is_finished, "round should eventually finish once points threshold is reached");
-    assert_eq!(winner_name, "ZoneTester", "joined player should win deterministic smoke run");
+    assert!(
+        is_finished,
+        "round should eventually finish once points threshold is reached"
+    );
+    assert_eq!(
+        winner_name, "ZoneTester",
+        "joined player should win deterministic smoke run"
+    );
 }

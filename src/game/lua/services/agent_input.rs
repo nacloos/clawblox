@@ -288,8 +288,14 @@ mod tests {
     fn test_multiple_users() {
         let service = AgentInputService::new();
 
-        service.queue_input(1, AgentInput::new("Fire".to_string(), serde_json::json!({})));
-        service.queue_input(2, AgentInput::new("Melee".to_string(), serde_json::json!({})));
+        service.queue_input(
+            1,
+            AgentInput::new("Fire".to_string(), serde_json::json!({})),
+        );
+        service.queue_input(
+            2,
+            AgentInput::new("Melee".to_string(), serde_json::json!({})),
+        );
 
         assert!(service.has_pending_inputs(1));
         assert!(service.has_pending_inputs(2));

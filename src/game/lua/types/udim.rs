@@ -34,11 +34,17 @@ impl UserData for UDim {
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_meta_method(MetaMethod::Add, |_, this, other: UDim| {
-            Ok(UDim::new(this.scale + other.scale, this.offset + other.offset))
+            Ok(UDim::new(
+                this.scale + other.scale,
+                this.offset + other.offset,
+            ))
         });
 
         methods.add_meta_method(MetaMethod::Sub, |_, this, other: UDim| {
-            Ok(UDim::new(this.scale - other.scale, this.offset - other.offset))
+            Ok(UDim::new(
+                this.scale - other.scale,
+                this.offset - other.offset,
+            ))
         });
 
         methods.add_meta_method(MetaMethod::Eq, |_, this, other: UDim| {

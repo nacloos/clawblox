@@ -4,10 +4,7 @@ use uuid::Uuid;
 use crate::game::GameManagerHandle;
 
 pub fn destroy_instance(state: &GameManagerHandle, instance_id: Uuid) -> bool {
-    let game_id = state
-        .instances
-        .get(&instance_id)
-        .map(|h| h.read().game_id);
+    let game_id = state.instances.get(&instance_id).map(|h| h.read().game_id);
 
     if state.instances.remove(&instance_id).is_none() {
         return false;
@@ -48,10 +45,7 @@ pub fn destroy_instance(state: &GameManagerHandle, instance_id: Uuid) -> bool {
     true
 }
 
-pub fn cleanup_empty_instances_with_timeout(
-    state: &GameManagerHandle,
-    timeout: Duration,
-) -> usize {
+pub fn cleanup_empty_instances_with_timeout(state: &GameManagerHandle, timeout: Duration) -> usize {
     let now = Instant::now();
     let mut to_destroy = Vec::new();
 

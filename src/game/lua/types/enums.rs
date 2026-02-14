@@ -197,10 +197,9 @@ impl UserData for HumanoidStateType {
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
             Ok(format!("Enum.HumanoidStateType.{}", this.name()))
         });
-        methods.add_meta_method(
-            mlua::MetaMethod::Eq,
-            |_, this, other: HumanoidStateType| Ok(*this == other),
-        );
+        methods.add_meta_method(mlua::MetaMethod::Eq, |_, this, other: HumanoidStateType| {
+            Ok(*this == other)
+        });
     }
 }
 
@@ -241,10 +240,9 @@ impl UserData for RaycastFilterType {
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
             Ok(format!("Enum.RaycastFilterType.{}", this.name()))
         });
-        methods.add_meta_method(
-            mlua::MetaMethod::Eq,
-            |_, this, other: RaycastFilterType| Ok(*this == other),
-        );
+        methods.add_meta_method(mlua::MetaMethod::Eq, |_, this, other: RaycastFilterType| {
+            Ok(*this == other)
+        });
     }
 }
 

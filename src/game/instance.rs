@@ -42,6 +42,75 @@ fn round_position(pos: [f32; 3]) -> [f32; 3] {
     [round_f32(pos[0]), round_f32(pos[1]), round_f32(pos[2])]
 }
 
+#[inline]
+fn mat_mul_vec3(rot: &[[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
+    [
+        rot[0][0] * v[0] + rot[0][1] * v[1] + rot[0][2] * v[2],
+        rot[1][0] * v[0] + rot[1][1] * v[1] + rot[1][2] * v[2],
+        rot[2][0] * v[0] + rot[2][1] * v[1] + rot[2][2] * v[2],
+    ]
+}
+
+fn compute_part_bounds(
+    center: [f32; 3],
+    size: [f32; 3],
+    rotation: [[f32; 3]; 3],
+) -> (EntityAabb, EntityObb) {
+    let half = [
+        size[0].abs() * 0.5,
+        size[1].abs() * 0.5,
+        size[2].abs() * 0.5,
+    ];
+    let local_corners = [
+        [-half[0], -half[1], -half[2]],
+        [half[0], -half[1], -half[2]],
+        [-half[0], half[1], -half[2]],
+        [half[0], half[1], -half[2]],
+        [-half[0], -half[1], half[2]],
+        [half[0], -half[1], half[2]],
+        [-half[0], half[1], half[2]],
+        [half[0], half[1], half[2]],
+    ];
+
+    let mut raw_corners = [[0.0; 3]; 8];
+    for (i, corner) in local_corners.iter().enumerate() {
+        let rotated = mat_mul_vec3(&rotation, *corner);
+        raw_corners[i] = [
+            center[0] + rotated[0],
+            center[1] + rotated[1],
+            center[2] + rotated[2],
+        ];
+    }
+
+    let mut min = raw_corners[0];
+    let mut max = raw_corners[0];
+    for corner in raw_corners.iter().skip(1) {
+        min[0] = min[0].min(corner[0]);
+        min[1] = min[1].min(corner[1]);
+        min[2] = min[2].min(corner[2]);
+        max[0] = max[0].max(corner[0]);
+        max[1] = max[1].max(corner[1]);
+        max[2] = max[2].max(corner[2]);
+    }
+
+    let mut rounded_corners = [[0.0; 3]; 8];
+    for (i, corner) in raw_corners.iter().enumerate() {
+        rounded_corners[i] = round_position(*corner);
+    }
+
+    (
+        EntityAabb {
+            min: round_position(min),
+            max: round_position(max),
+        },
+        EntityObb {
+            center: round_position(center),
+            half_extents: round_position(half),
+            corners: rounded_corners,
+        },
+    )
+}
+
 /// A game instance that runs Lua scripts with Rapier physics.
 /// This is the Roblox-like architecture where:
 /// - Lua controls game logic via Workspace, Parts, etc.
@@ -934,14 +1003,22 @@ impl GameInstance {
                 let (a_can_touch, a_group, a_signal) = {
                     let data = inst_a.data.lock().unwrap();
                     match data.part_data.as_ref() {
-                        Some(p) => (p.can_touch, p.collision_group.clone(), p.touch_ended.clone()),
+                        Some(p) => (
+                            p.can_touch,
+                            p.collision_group.clone(),
+                            p.touch_ended.clone(),
+                        ),
                         None => continue,
                     }
                 };
                 let (b_can_touch, b_group, b_signal) = {
                     let data = inst_b.data.lock().unwrap();
                     match data.part_data.as_ref() {
-                        Some(p) => (p.can_touch, p.collision_group.clone(), p.touch_ended.clone()),
+                        Some(p) => (
+                            p.can_touch,
+                            p.collision_group.clone(),
+                            p.touch_ended.clone(),
+                        ),
                         None => continue,
                     }
                 };
@@ -1120,22 +1197,24 @@ impl GameInstance {
                 if let Some(part_data) = &data.part_data {
                     // Only include parts WITHOUT "Static" tag
                     if !is_static {
+                        let raw_position = [
+                            part_data.position.x,
+                            part_data.position.y,
+                            part_data.position.z,
+                        ];
+                        let raw_size = [part_data.size.x, part_data.size.y, part_data.size.z];
+                        let (aabb, obb) =
+                            compute_part_bounds(raw_position, raw_size, part_data.cframe.rotation);
                         let attrs = attributes_to_json(&data.attributes);
                         entities.push(WorldEntity {
                             id: data.id.0,
                             name: data.name.clone(),
                             entity_type: Some("part".to_string()),
-                            position: round_position([
-                                part_data.position.x,
-                                part_data.position.y,
-                                part_data.position.z,
-                            ]),
-                            size: round_position([
-                                part_data.size.x,
-                                part_data.size.y,
-                                part_data.size.z,
-                            ]),
+                            position: round_position(raw_position),
+                            size: round_position(raw_size),
                             rotation: Some(part_data.cframe.rotation),
+                            aabb: Some(aabb),
+                            obb: Some(obb),
                             color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
                             material: Some(part_data.material.name().to_string()),
                             shape: Some(part_data.shape.name().to_string()),
@@ -1159,6 +1238,8 @@ impl GameInstance {
                             position: [0.0, 0.0, 0.0],
                             size: [0.0, 0.0, 0.0],
                             rotation: None,
+                            aabb: None,
+                            obb: None,
                             color: None,
                             material: None,
                             shape: None,
@@ -1196,6 +1277,8 @@ impl GameInstance {
                         ],
                         size: [part_data.size.x, part_data.size.y, part_data.size.z],
                         rotation: Some(part_data.cframe.rotation),
+                        aabb: None,
+                        obb: None,
                         color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
                         material: Some(part_data.material.name().to_string()),
                         shape: Some(part_data.shape.name().to_string()),
@@ -1218,6 +1301,8 @@ impl GameInstance {
                             position: [0.0, 0.0, 0.0],
                             size: [0.0, 0.0, 0.0],
                             rotation: None,
+                            aabb: None,
+                            obb: None,
                             color: None,
                             material: None,
                             shape: None,
@@ -1544,6 +1629,10 @@ pub struct WorldEntity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rotation: Option<[[f32; 3]; 3]>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub aabb: Option<EntityAabb>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub obb: Option<EntityObb>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<[f32; 3]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub material: Option<String>,
@@ -1554,6 +1643,19 @@ pub struct WorldEntity {
     pub anchored: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attributes: Option<std::collections::HashMap<String, serde_json::Value>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EntityAabb {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EntityObb {
+    pub center: [f32; 3],
+    pub half_extents: [f32; 3],
+    pub corners: [[f32; 3]; 8],
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2466,6 +2568,13 @@ mod tests {
             .unwrap();
         assert_eq!(floor.size, [100.0, 1.0, 100.0]);
         assert!(floor.anchored);
+        let aabb = floor.aabb.as_ref().expect("observe should include AABB");
+        assert_eq!(aabb.min, [-50.0, -0.5, -50.0]);
+        assert_eq!(aabb.max, [50.0, 0.5, 50.0]);
+        let obb = floor.obb.as_ref().expect("observe should include OBB");
+        assert_eq!(obb.center, [0.0, 0.0, 0.0]);
+        assert_eq!(obb.half_extents, [50.0, 0.5, 50.0]);
+        assert_eq!(obb.corners.len(), 8);
     }
 
     #[test]
@@ -3320,7 +3429,10 @@ mod tests {
             .iter()
             .find(|e| e.name == "ProbeId_Body")
             .expect("ProbeId_Body should exist");
-        let attrs = body.attributes.as_ref().expect("Body should have attributes");
+        let attrs = body
+            .attributes
+            .as_ref()
+            .expect("Body should have attributes");
         let remote_hit = attrs
             .get("RemoteHit")
             .and_then(|v| v.as_f64())

@@ -46,7 +46,9 @@ impl PlayersService {
         let instance = Instance::new(ClassName::Players, "Players");
         Self {
             instance,
-            data: Arc::new(Mutex::new(PlayersServiceData::with_max_players(max_players))),
+            data: Arc::new(Mutex::new(PlayersServiceData::with_max_players(
+                max_players,
+            ))),
         }
     }
 

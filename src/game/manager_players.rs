@@ -29,7 +29,9 @@ pub fn join_instance(
     }
 
     // Track player's instance
-    state.player_instances.insert((agent_id, game_id), instance_id);
+    state
+        .player_instances
+        .insert((agent_id, game_id), instance_id);
 
     // Initialize observation cache
     if let Some(obs) = instance.get_player_observation(agent_id) {

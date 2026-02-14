@@ -107,7 +107,10 @@ pub fn build_entry_script(game_dir: &Path, config: &WorldConfig) -> Result<Strin
     Ok(bootstrap)
 }
 
-fn load_script_tree_files(game_dir: &Path, config: &WorldConfig) -> Result<Vec<ScriptFile>, String> {
+fn load_script_tree_files(
+    game_dir: &Path,
+    config: &WorldConfig,
+) -> Result<Vec<ScriptFile>, String> {
     let Some(root_dir) = resolve_tree_root(game_dir, config)? else {
         return Ok(Vec::new());
     };
@@ -152,7 +155,8 @@ fn collect_lua_files(
         .map_err(|e| format!("Error reading {}: {}", current_dir.display(), e))?;
 
     for entry in entries {
-        let entry = entry.map_err(|e| format!("Error scanning {}: {}", current_dir.display(), e))?;
+        let entry =
+            entry.map_err(|e| format!("Error scanning {}: {}", current_dir.display(), e))?;
         let path = entry.path();
         if path.is_dir() {
             collect_lua_files(root_dir, &path, out)?;

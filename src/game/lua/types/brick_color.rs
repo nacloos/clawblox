@@ -43,7 +43,9 @@ pub fn register_brick_color(lua: &Lua) -> Result<()> {
                     if let Ok(c) = ud.borrow::<Color3>() {
                         Ok(*c)
                     } else {
-                        Err(mlua::Error::runtime("BrickColor.new expects string, number, or Color3"))
+                        Err(mlua::Error::runtime(
+                            "BrickColor.new expects string, number, or Color3",
+                        ))
                     }
                 }
                 _ => Err(mlua::Error::runtime(
@@ -61,4 +63,3 @@ pub fn register_brick_color(lua: &Lua) -> Result<()> {
     lua.globals().set("BrickColor", table)?;
     Ok(())
 }
-

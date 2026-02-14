@@ -39,7 +39,9 @@ fn test_async_function_yields() {
         .expect("Failed to create async function");
 
     // Create a thread and start it
-    let thread = lua.create_thread(async_fn).expect("Failed to create thread");
+    let thread = lua
+        .create_thread(async_fn)
+        .expect("Failed to create thread");
 
     // First resume - should yield because async work is pending
     let result = thread.resume::<Value>(());
@@ -110,8 +112,12 @@ fn test_multiple_coroutines_yield() {
         .expect("Failed to create async function 2");
 
     // Create and start both threads
-    let thread1 = lua.create_thread(async_fn1).expect("Failed to create thread 1");
-    let thread2 = lua.create_thread(async_fn2).expect("Failed to create thread 2");
+    let thread1 = lua
+        .create_thread(async_fn1)
+        .expect("Failed to create thread 1");
+    let thread2 = lua
+        .create_thread(async_fn2)
+        .expect("Failed to create thread 2");
 
     let _ = thread1.resume::<Value>(());
     let _ = thread2.resume::<Value>(());
@@ -181,14 +187,20 @@ fn test_sync_runs_while_async_yields() {
         .expect("Failed to create async function");
 
     // Start async operation
-    let async_thread = lua.create_thread(async_fn).expect("Failed to create thread");
+    let async_thread = lua
+        .create_thread(async_fn)
+        .expect("Failed to create thread");
     let _ = async_thread.resume::<Value>(());
 
     assert_eq!(async_thread.status(), ThreadStatus::Resumable);
 
     // While async is pending, run sync code
-    lua.load("increment()").exec().expect("Failed to run sync code");
-    lua.load("increment()").exec().expect("Failed to run sync code");
+    lua.load("increment()")
+        .exec()
+        .expect("Failed to run sync code");
+    lua.load("increment()")
+        .exec()
+        .expect("Failed to run sync code");
 
     // Counter should have been incremented while async was yielded
     assert_eq!(counter.load(Ordering::SeqCst), 2);
@@ -221,10 +233,14 @@ async fn test_async_thread_polling() {
         .expect("Failed to create async function");
 
     // Create thread
-    let thread = lua.create_thread(async_fn).expect("Failed to create thread");
+    let thread = lua
+        .create_thread(async_fn)
+        .expect("Failed to create thread");
 
     // Convert to AsyncThread and await it
-    let async_thread = thread.into_async::<Value>(()).expect("Failed to convert to async");
+    let async_thread = thread
+        .into_async::<Value>(())
+        .expect("Failed to convert to async");
 
     // This should complete with the value
     let result = async_thread.await;
@@ -258,21 +274,25 @@ async fn test_datastore_pattern() {
             let rx = rx_clone.clone();
             async move {
                 let mut guard = rx.lock().await;
-                let receiver = guard.take().ok_or_else(|| {
-                    mlua::Error::RuntimeError("Receiver already used".into())
-                })?;
+                let receiver = guard
+                    .take()
+                    .ok_or_else(|| mlua::Error::RuntimeError("Receiver already used".into()))?;
 
-                let value = receiver.await.map_err(|_| {
-                    mlua::Error::RuntimeError("Channel closed".into())
-                })?;
+                let value = receiver
+                    .await
+                    .map_err(|_| mlua::Error::RuntimeError("Channel closed".into()))?;
 
                 Ok(Value::Integer(value as i64))
             }
         })
         .expect("Failed to create async function");
 
-    let thread = lua.create_thread(async_fn).expect("Failed to create thread");
-    let async_thread = thread.into_async::<Value>(()).expect("Failed to convert to async");
+    let thread = lua
+        .create_thread(async_fn)
+        .expect("Failed to create thread");
+    let async_thread = thread
+        .into_async::<Value>(())
+        .expect("Failed to convert to async");
 
     // Spawn task to send value after a delay (simulating DB response)
     tokio::spawn(async move {
