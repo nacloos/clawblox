@@ -261,6 +261,90 @@ async function loadRendererModule(manifest) {
   return { createRenderer, target }
 }
 
+let audioCtx = null
+const activeStreams = new Map()
+const pendingChunks = []
+
+function ensureAudioCtx() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 })
+    console.log('[audio] AudioContext created, state=' + audioCtx.state)
+    // Flush any chunks that arrived before user gesture
+    while (pendingChunks.length) playChunk(pendingChunks.shift())
+  }
+}
+
+function onUserGesture() {
+  ensureAudioCtx()
+  document.removeEventListener('click', onUserGesture)
+  document.removeEventListener('keydown', onUserGesture)
+}
+document.addEventListener('click', onUserGesture)
+document.addEventListener('keydown', onUserGesture)
+
+function onAudioChunk(msg) {
+  if (!audioCtx) {
+    // Buffer until user gesture creates the context
+    pendingChunks.push(msg)
+    return
+  }
+  playChunk(msg)
+}
+
+function playChunk(msg) {
+  let stream = activeStreams.get(msg.stream_id)
+  if (!stream) {
+    stream = { nextPlayTime: 0, leftover: null }
+    activeStreams.set(msg.stream_id, stream)
+  }
+
+  if (msg.done) {
+    const now = audioCtx.currentTime
+    const cleanup = stream.nextPlayTime > now ? stream.nextPlayTime - now : 0
+    setTimeout(() => activeStreams.delete(msg.stream_id), cleanup * 1000 + 500)
+    return
+  }
+
+  // Decode base64 to bytes
+  const raw = atob(msg.data)
+  let bytes
+  if (stream.leftover !== null) {
+    bytes = new Uint8Array(1 + raw.length)
+    bytes[0] = stream.leftover
+    for (let i = 0; i < raw.length; i++) bytes[i + 1] = raw.charCodeAt(i)
+    stream.leftover = null
+  } else {
+    bytes = new Uint8Array(raw.length)
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i)
+  }
+
+  // Carry over odd trailing byte for next chunk
+  let usable = bytes.length
+  if (usable % 2 !== 0) {
+    stream.leftover = bytes[usable - 1]
+    usable -= 1
+  }
+  if (usable === 0) return
+
+  // Int16 -> Float32
+  const aligned = bytes.buffer.byteLength === usable ? bytes.buffer : bytes.slice(0, usable).buffer
+  const int16 = new Int16Array(aligned)
+  const float32 = new Float32Array(int16.length)
+  for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768
+
+  // Schedule gapless playback
+  const buffer = audioCtx.createBuffer(1, float32.length, 24000)
+  buffer.getChannelData(0).set(float32)
+  const source = audioCtx.createBufferSource()
+  source.buffer = buffer
+  source.connect(audioCtx.destination)
+
+  const now = audioCtx.currentTime
+  if (stream.nextPlayTime < now) stream.nextPlayTime = now
+  source.start(stream.nextPlayTime)
+  stream.nextPlayTime += buffer.duration
+}
+
 async function bootstrap() {
   let currentDpr = resizeCanvas()
   window.addEventListener('resize', () => {
@@ -350,7 +434,12 @@ async function bootstrap() {
       } else {
         text = String(event.data)
       }
-      const state = JSON.parse(text)
+      const data = JSON.parse(text)
+      if (data && data.type === 'audio_chunk') {
+        onAudioChunk(data)
+        return
+      }
+      const state = data
       if (state && state.error) {
         setStatus(state.error, 'error')
         return

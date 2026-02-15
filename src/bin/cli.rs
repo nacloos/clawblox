@@ -20,6 +20,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use tokio::sync::broadcast;
 use tokio::time::interval;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
@@ -1457,6 +1458,7 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
     // Start HTTP server
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
+        let (audio_tx, _) = broadcast::channel::<AudioChunk>(64);
         let state = LocalState {
             game_id,
             instance_id,
@@ -1465,6 +1467,7 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
             renderer_manifest,
             sessions: Arc::new(DashMap::new()),
             log_file: path.join(".clawblox.log"),
+            audio_tx,
         };
 
         let cors = CorsLayer::new()
@@ -1483,6 +1486,7 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
             .route("/input", post(local_input))
             .route("/observe", get(local_observe))
             .route("/skill.md", get(local_skill))
+            .route("/audio", post(local_audio))
             .nest_service("/renderer-files", ServeDir::new(path.join("renderer")))
             .nest_service("/assets", ServeDir::new(path.join("assets")))
             .nest_service("/static", ServeDir::new(path.join("static")))
@@ -1620,6 +1624,15 @@ fn stop_game(port: u16) {
 // Local Server State & Handlers
 // =============================================================================
 
+#[derive(Clone, Debug, Serialize)]
+struct AudioChunk {
+    speaker: String,
+    stream_id: String,
+    seq: u32,
+    data: String, // base64 PCM
+    done: bool,
+}
+
 #[derive(Clone)]
 struct LocalState {
     game_id: Uuid,
@@ -1629,6 +1642,7 @@ struct LocalState {
     renderer_manifest: LocalRendererManifest,
     sessions: Arc<DashMap<String, (Uuid, String)>>, // token -> (agent_id, name)
     log_file: PathBuf,
+    audio_tx: broadcast::Sender<AudioChunk>,
 }
 
 /// Check if the game instance is halted due to a Lua error.
@@ -1754,6 +1768,30 @@ fn get_session(
         axum::http::StatusCode::UNAUTHORIZED,
         "Invalid session".to_string(),
     ))
+}
+
+#[derive(Deserialize)]
+struct AudioChunkRequest {
+    stream_id: String,
+    seq: u32,
+    data: String,
+    done: bool,
+}
+
+async fn local_audio(
+    State(state): State<LocalState>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<AudioChunkRequest>,
+) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    let (_, name) = get_session(&state, &headers)?;
+    let _ = state.audio_tx.send(AudioChunk {
+        speaker: name,
+        stream_id: body.stream_id,
+        seq: body.seq,
+        data: body.data,
+        done: body.done,
+    });
+    Ok(axum::http::StatusCode::OK)
 }
 
 #[derive(Deserialize)]
@@ -1887,6 +1925,7 @@ async fn local_spectate_ws(
 
 async fn handle_spectate_ws(socket: WebSocket, state: LocalState) {
     let (mut sender, mut receiver) = socket.split();
+    let mut audio_rx = state.audio_tx.subscribe();
 
     let mut tick_interval = interval(Duration::from_millis(33));
     let mut last_tick: u64 = 0;
@@ -1903,6 +1942,22 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState) {
                         }
                     }
                     _ => {}
+                }
+            }
+
+            chunk = audio_rx.recv() => {
+                if let Ok(chunk) = chunk {
+                    let json = serde_json::to_string(&serde_json::json!({
+                        "type": "audio_chunk",
+                        "speaker": chunk.speaker,
+                        "stream_id": chunk.stream_id,
+                        "seq": chunk.seq,
+                        "data": chunk.data,
+                        "done": chunk.done,
+                    })).unwrap_or_default();
+                    if sender.send(Message::Text(json.into())).await.is_err() {
+                        break;
+                    }
                 }
             }
 
