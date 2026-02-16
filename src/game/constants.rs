@@ -74,3 +74,31 @@ pub mod humanoid {
     /// Lower than ground response to avoid full walk-control in freefall.
     pub const AIR_CONTROL_ACCEL: f32 = 220.0;
 }
+
+/// Streaming audio defaults and timing policy constants.
+pub mod audio {
+    /// Remove stale stream tracking entries after this many seconds.
+    pub const STREAM_TTL_SECS: u64 = 120;
+
+    /// Default PCM sample rate (Hz) for local streaming speech.
+    pub const DEFAULT_SAMPLE_RATE_HZ: u32 = 24_000;
+
+    /// Default PCM channel count (mono).
+    pub const DEFAULT_CHANNELS: u16 = 1;
+
+    /// Default bytes per sample (16-bit PCM).
+    pub const DEFAULT_BYTES_PER_SAMPLE: u16 = 2;
+
+    /// Minimum positive bounds for validated numeric metadata.
+    pub const MIN_POSITIVE_U32: u32 = 1;
+    pub const MIN_POSITIVE_U16: u16 = 1;
+
+    /// Default playback speed when metadata is omitted.
+    pub const DEFAULT_PLAYBACK_SPEED: f32 = 1.0;
+
+    /// Lower clamp for playback speed to avoid division-by-zero in duration math.
+    pub const MIN_PLAYBACK_SPEED: f32 = 0.01;
+
+    /// Reason string attached when server predicts natural playback completion.
+    pub const SERVER_PREDICTED_END_REASON: &str = "server_predicted_end";
+}

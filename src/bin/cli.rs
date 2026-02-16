@@ -35,6 +35,11 @@ use tower_http::services::ServeDir;
 use clawblox::{
     db,
     game::{
+        constants::audio::{
+            DEFAULT_BYTES_PER_SAMPLE, DEFAULT_CHANNELS, DEFAULT_PLAYBACK_SPEED,
+            DEFAULT_SAMPLE_RATE_HZ, MIN_PLAYBACK_SPEED, MIN_POSITIVE_U16, MIN_POSITIVE_U32,
+            SERVER_PREDICTED_END_REASON, STREAM_TTL_SECS,
+        },
         self,
         async_bridge::AsyncBridge,
         find_or_create_instance,
@@ -1693,16 +1698,6 @@ struct LocalState {
     audio_speech_text: Arc<Mutex<HashMap<String, String>>>,
 }
 
-const AUDIO_STREAM_TTL_SECS: u64 = 120;
-const DEFAULT_SAMPLE_RATE_HZ: u32 = 24_000;
-const DEFAULT_CHANNELS: u16 = 1;
-const DEFAULT_BYTES_PER_SAMPLE: u16 = 2;
-const MIN_POSITIVE_U32: u32 = 1;
-const MIN_POSITIVE_U16: u16 = 1;
-const DEFAULT_PLAYBACK_SPEED: f32 = 1.0;
-const MIN_PLAYBACK_SPEED: f32 = 0.01;
-const SERVER_PREDICTED_END_REASON: &str = "server_predicted_end";
-
 fn base64_decoded_len(data: &str) -> Option<usize> {
     let len = data.len();
     if len == 0 {
@@ -1829,7 +1824,7 @@ fn prune_stale_audio_streams(state: &LocalState, now: Instant) {
     {
         let mut streams = state.audio_streams.lock().unwrap();
         streams.retain(|stream_id, stream| {
-            let keep = now.duration_since(stream.last_seen) < Duration::from_secs(AUDIO_STREAM_TTL_SECS);
+            let keep = now.duration_since(stream.last_seen) < Duration::from_secs(STREAM_TTL_SECS);
             if !keep {
                 stale_stream_ids.push(stream_id.clone());
             }
