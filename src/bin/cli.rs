@@ -17,10 +17,12 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 use tokio::time::interval;
 use tower_http::cors::{Any, CorsLayer};
@@ -1466,6 +1468,7 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
     rt.block_on(async {
         let (audio_tx, _) = broadcast::channel::<AudioChunk>(64);
         let (speech_tx, _) = broadcast::channel::<SpeechEvent>(64);
+        let (speech_progress_tx, _) = broadcast::channel::<SpeechProgressEvent>(128);
         let (playback_done_tx, _) = broadcast::channel::<PlaybackDoneEvent>(64);
         let state = LocalState {
             game_id,
@@ -1477,9 +1480,11 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
             log_file: path.join(".clawblox.log"),
             audio_tx,
             speech_tx,
+            speech_progress_tx,
             playback_done_tx,
             playback_done_seq: Arc::new(Mutex::new(0)),
             speech_seq: Arc::new(Mutex::new(0)),
+            speech_progress_seq: Arc::new(Mutex::new(0)),
             audio_streams: Arc::new(Mutex::new(HashMap::new())),
             audio_speech_text: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -1655,6 +1660,14 @@ struct SpeechEvent {
 }
 
 #[derive(Clone, Debug, Serialize)]
+struct SpeechProgressEvent {
+    speaker: String,
+    stream_id: String,
+    text: String,
+    seq: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct PlaybackDoneEvent {
     speaker: String,
     stream_id: String,
@@ -1689,9 +1702,11 @@ struct LocalState {
     log_file: PathBuf,
     audio_tx: broadcast::Sender<AudioChunk>,
     speech_tx: broadcast::Sender<SpeechEvent>,
+    speech_progress_tx: broadcast::Sender<SpeechProgressEvent>,
     playback_done_tx: broadcast::Sender<PlaybackDoneEvent>,
     playback_done_seq: Arc<Mutex<u64>>,
     speech_seq: Arc<Mutex<u64>>,
+    speech_progress_seq: Arc<Mutex<u64>>,
     /// Maps stream_id -> stream state for routing and completion semantics.
     audio_streams: Arc<Mutex<HashMap<String, AudioStreamState>>>,
     /// Maps stream_id -> speech text for broadcasting on AudioEnded
@@ -1725,7 +1740,18 @@ fn compute_stream_duration_secs(stream: &AudioStreamState) -> f64 {
     (stream.total_audio_bytes as f64) / bytes_per_second / speed
 }
 
+fn append_server_log(log_file: &Path, message: &str) {
+    let ts_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_file) {
+        let _ = writeln!(file, "[{}] {}", ts_ms, message);
+    }
+}
+
 fn complete_audio_stream(state: &LocalState, stream_id: &str, reason: &str) {
+    let completed_at = Instant::now();
     let stream_state = {
         let mut streams = state.audio_streams.lock().unwrap();
         streams.remove(stream_id)
@@ -1734,6 +1760,24 @@ fn complete_audio_stream(state: &LocalState, stream_id: &str, reason: &str) {
     let Some(stream_state) = stream_state else {
         return;
     };
+
+    let expected_lag_ms = stream_state
+        .expected_end_at
+        .map(|eta| {
+            if completed_at >= eta {
+                completed_at.duration_since(eta).as_millis() as i128
+            } else {
+                -(eta.duration_since(completed_at).as_millis() as i128)
+            }
+        })
+        .unwrap_or(0);
+    append_server_log(
+        &state.log_file,
+        &format!(
+            "[audio] complete stream={} speaker={} reason={} lag_vs_estimate_ms={} total_bytes={}",
+            stream_id, stream_state.speaker, reason, expected_lag_ms, stream_state.total_audio_bytes
+        ),
+    );
 
     push_playback_done_event(
         state,
@@ -1799,6 +1843,22 @@ fn push_speech_event(state: &LocalState, speaker: String, text: String) {
     };
     let event = SpeechEvent { speaker, text, seq };
     let _ = state.speech_tx.send(event);
+}
+
+fn push_speech_progress_event(state: &LocalState, speaker: String, stream_id: String, text: String) {
+    let seq = {
+        let mut seq = state.speech_progress_seq.lock().unwrap();
+        let next = *seq;
+        *seq += 1;
+        next
+    };
+    let event = SpeechProgressEvent {
+        speaker,
+        stream_id,
+        text,
+        seq,
+    };
+    let _ = state.speech_progress_tx.send(event);
 }
 
 fn push_playback_done_event(state: &LocalState, speaker: String, stream_id: String) {
@@ -2052,6 +2112,32 @@ async fn local_audio(
     }
 
     if let Some(expected_end_at) = schedule {
+        let now = Instant::now();
+        let eta_ms = if expected_end_at > now {
+            expected_end_at.duration_since(now).as_millis() as u64
+        } else {
+            0
+        };
+        let expected_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+            .saturating_add(eta_ms);
+        append_server_log(
+            &state.log_file,
+            &format!(
+                "[audio] estimate stream={} speaker={} done_chunk_seq={} eta_in_ms={} eta_unix_ms={} sample_rate={} channels={} bytes_per_sample={} speed={}",
+                stream_id,
+                name,
+                body.seq,
+                eta_ms,
+                expected_unix_ms,
+                sample_rate_hz,
+                channels,
+                bytes_per_sample,
+                playback_speed
+            ),
+        );
         schedule_audio_stream_completion(state.clone(), stream_id.clone(), expected_end_at);
     }
 
@@ -2092,7 +2178,9 @@ async fn local_input(
         return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
     }
 
-    let (agent_id, _) = get_session(&state, &headers)?;
+    let (agent_id, agent_name) = get_session(&state, &headers)?;
+
+    let speech_progress = extract_speech_progress_event(&input.input_type, &input.data);
 
     game::queue_input(
         &state.game_handle,
@@ -2108,7 +2196,93 @@ async fn local_input(
         .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
     resolve_local_player_assets(&mut observation);
 
+    if let Some(progress) = speech_progress {
+        maybe_publish_speech_progress(&state, &observation, &agent_name, progress);
+    }
+
     Ok(Json(observation))
+}
+
+#[derive(Clone, Debug)]
+struct SpeechProgressInput {
+    stream_id: String,
+    text: String,
+}
+
+fn extract_speech_progress_event(
+    input_type: &str,
+    data: &serde_json::Value,
+) -> Option<SpeechProgressInput> {
+    if input_type != "RemoteEvent" {
+        return None;
+    }
+    let name = data.get("name")?.as_str()?;
+    if name != "SpeechBus" {
+        return None;
+    }
+    let args = data.get("args")?.as_array()?;
+    let payload = args.first()?.as_object()?;
+    let op = payload.get("op")?.as_str()?;
+    if op != "Progress" {
+        return None;
+    }
+
+    let stream_id = payload.get("stream_id")?.as_str()?.trim().to_string();
+    if stream_id.is_empty() {
+        return None;
+    }
+    let text = payload
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Some(SpeechProgressInput { stream_id, text })
+}
+
+fn maybe_publish_speech_progress(
+    state: &LocalState,
+    observation: &PlayerObservation,
+    speaker_name: &str,
+    progress: SpeechProgressInput,
+) {
+    if progress.text.is_empty() {
+        return;
+    }
+
+    let attrs = &observation.player.attributes;
+    let is_speaking = attrs
+        .get("IsSpeaking")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !is_speaking {
+        return;
+    }
+
+    let observed_stream_id = attrs
+        .get("SpeechStreamId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    if observed_stream_id != progress.stream_id {
+        return;
+    }
+
+    let has_lease = attrs
+        .get("SpeechLeaseId")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if !has_lease {
+        return;
+    }
+
+    push_speech_progress_event(
+        state,
+        speaker_name.to_string(),
+        progress.stream_id,
+        progress.text,
+    );
 }
 
 async fn local_observe(
@@ -2199,15 +2373,38 @@ async fn local_renderer_manifest(State(state): State<LocalState>) -> Json<LocalR
 
 async fn local_spectate_ws(
     State(state): State<LocalState>,
+    Query(params): Query<SpectateWsQuery>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_spectate_ws(socket, state))
+    let role = SpectateRole::from_param(params.role.as_deref());
+    ws.on_upgrade(move |socket| handle_spectate_ws(socket, state, role))
 }
 
-async fn handle_spectate_ws(socket: WebSocket, state: LocalState) {
+#[derive(Debug, Deserialize)]
+struct SpectateWsQuery {
+    role: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SpectateRole {
+    Actor,
+    Spectator,
+}
+
+impl SpectateRole {
+    fn from_param(role: Option<&str>) -> Self {
+        match role.map(|s| s.trim().to_ascii_lowercase()) {
+            Some(s) if s == "actor" => Self::Actor,
+            _ => Self::Spectator,
+        }
+    }
+}
+
+async fn handle_spectate_ws(socket: WebSocket, state: LocalState, role: SpectateRole) {
     let (mut sender, mut receiver) = socket.split();
     let mut audio_rx = state.audio_tx.subscribe();
     let mut speech_rx = state.speech_tx.subscribe();
+    let mut speech_progress_rx = state.speech_progress_tx.subscribe();
     let mut playback_done_rx = state.playback_done_tx.subscribe();
 
     let mut tick_interval = interval(Duration::from_millis(33));
@@ -2255,6 +2452,23 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState) {
                     })).unwrap_or_default();
                     if sender.send(Message::Text(json.into())).await.is_err() {
                         break;
+                    }
+                }
+            }
+
+            speech_progress = speech_progress_rx.recv() => {
+                if let Ok(progress) = speech_progress {
+                    if role == SpectateRole::Spectator {
+                        let json = serde_json::to_string(&serde_json::json!({
+                            "type": "speech_progress",
+                            "speaker": progress.speaker,
+                            "stream_id": progress.stream_id,
+                            "text": progress.text,
+                            "seq": progress.seq,
+                        })).unwrap_or_default();
+                        if sender.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
                     }
                 }
             }
