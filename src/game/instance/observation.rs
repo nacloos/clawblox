@@ -220,11 +220,24 @@ pub(super) fn build_map_info(instance: &GameInstance) -> MapInfo {
 pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorObservation {
     let mut entities = Vec::new();
     let mut players = Vec::new();
+    let mut sounds = Vec::new();
 
     if let Some(runtime) = &instance.lua_runtime {
-        // Collect all parts from Workspace
+        // Collect all parts and sounds from Workspace
         for part in runtime.workspace().get_descendants() {
             let data = part.data.lock().unwrap();
+
+            // Collect playing Sound instances
+            if let Some(sound_data) = &data.sound_data {
+                if sound_data.is_playing {
+                    sounds.push(SpectatorSound {
+                        id: data.id.0 as u32,
+                        stream_id: sound_data.stream_id.clone(),
+                        volume: sound_data.volume,
+                        is_playing: true,
+                    });
+                }
+            }
 
             if let Some(part_data) = &data.part_data {
                 // Only include rotation if it's not identity
@@ -450,6 +463,7 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
         },
         players,
         entities,
+        sounds,
         recent_events: instance.recent_replicated_events(),
     }
 }

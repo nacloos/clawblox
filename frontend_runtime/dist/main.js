@@ -264,6 +264,7 @@ async function loadRendererModule(manifest) {
 let audioCtx = null
 const activeStreams = new Map()
 const pendingChunks = []
+let spectateWs = null
 
 function ensureAudioCtx() {
   if (!audioCtx) {
@@ -312,12 +313,37 @@ function playChunk(msg) {
   stream.chunkCount++
 
   if (msg.done) {
-    const now = audioCtx.currentTime
-    const buffered = stream.nextPlayTime > now ? stream.nextPlayTime - now : 0
-    const wallElapsed = ((performance.now() - stream.firstChunkWall) / 1000).toFixed(2)
-    console.log(`[audio] stream ${msg.stream_id} done: ${stream.chunkCount} chunks, buffered=${buffered.toFixed(2)}s ahead, wall=${wallElapsed}s`)
-    const cleanup = buffered
-    setTimeout(() => activeStreams.delete(msg.stream_id), cleanup * 1000 + 500)
+    const streamId = msg.stream_id
+    const sendAudioDone = () => {
+      const now = audioCtx.currentTime
+      const buffered = stream.nextPlayTime > now ? stream.nextPlayTime - now : 0
+      const delayMs = buffered * 1000 + 50
+      const wallElapsed = ((performance.now() - stream.firstChunkWall) / 1000).toFixed(2)
+      console.log(`[audio] stream ${streamId} done: ${stream.chunkCount} chunks, ` +
+        `buffered=${buffered.toFixed(2)}s ahead, wall=${wallElapsed}s, sending audio_done in ${delayMs.toFixed(0)}ms`)
+      setTimeout(() => {
+        if (spectateWs && spectateWs.readyState === WebSocket.OPEN) {
+          spectateWs.send(JSON.stringify({ type: 'audio_done', stream_id: streamId }))
+          console.log(`[audio] sent audio_done for stream ${streamId}`)
+        } else {
+          console.warn(`[audio] cannot send audio_done for stream ${streamId}: WebSocket not open`)
+        }
+        activeStreams.delete(streamId)
+      }, delayMs)
+    }
+
+    if (audioCtx.state === 'running') {
+      sendAudioDone()
+    } else {
+      console.log(`[audio] stream ${streamId} done but AudioContext suspended, waiting for resume`)
+      const onResume = () => {
+        if (audioCtx.state === 'running') {
+          audioCtx.removeEventListener('statechange', onResume)
+          sendAudioDone()
+        }
+      }
+      audioCtx.addEventListener('statechange', onResume)
+    }
     return
   }
 
@@ -444,6 +470,7 @@ async function bootstrap() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const ws = new WebSocket(`${protocol}//${window.location.host}/spectate/ws`)
   ws.binaryType = 'arraybuffer'
+  spectateWs = ws
 
   ws.onopen = () => setStatus(`Connected | ${rendererTarget}`, 'ok')
   ws.onerror = () => setStatus('WebSocket error', 'error')

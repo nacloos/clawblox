@@ -40,6 +40,7 @@ pub enum ClassName {
     ImageLabel,
     ImageButton,
     UICorner,
+    Sound,
 }
 
 impl ClassName {
@@ -83,6 +84,7 @@ impl ClassName {
             ClassName::ImageLabel => "ImageLabel",
             ClassName::ImageButton => "ImageButton",
             ClassName::UICorner => "UICorner",
+            ClassName::Sound => "Sound",
         }
     }
 
@@ -165,6 +167,7 @@ impl ClassName {
             "ImageButton" => matches!(self, ClassName::ImageButton),
             "UICorner" => matches!(self, ClassName::UICorner),
             "UIComponent" => matches!(self, ClassName::UICorner),
+            "Sound" => matches!(self, ClassName::Sound),
             _ => self.as_str() == class_name,
         }
     }

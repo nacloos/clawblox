@@ -1715,7 +1715,17 @@ pub struct SpectatorObservation {
     pub game_status: String,
     pub players: Vec<SpectatorPlayerInfo>,
     pub entities: Vec<SpectatorEntity>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sounds: Vec<SpectatorSound>,
     pub recent_events: Vec<SpectatorReplicatedEvent>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SpectatorSound {
+    pub id: u32,
+    pub stream_id: String,
+    pub volume: f32,
+    pub is_playing: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

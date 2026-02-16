@@ -17,10 +17,11 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio::time::interval;
 use tower_http::cors::{Any, CorsLayer};
@@ -1472,6 +1473,9 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
             audio_tx,
             speech_tx,
             speech_log: Arc::new(Mutex::new((0, VecDeque::new()))),
+            audio_streams: Arc::new(Mutex::new(HashMap::new())),
+            audio_speech_text: Arc::new(Mutex::new(HashMap::new())),
+            spectate_ws_count: Arc::new(AtomicU32::new(0)),
         };
 
         let cors = CorsLayer::new()
@@ -1657,6 +1661,12 @@ struct LocalState {
     audio_tx: broadcast::Sender<AudioChunk>,
     speech_tx: broadcast::Sender<SpeechEvent>,
     speech_log: Arc<Mutex<(u64, VecDeque<SpeechEvent>)>>, // (next_seq, ring buffer)
+    /// Maps stream_id -> (agent_id, last_seen_time) for routing audio_done back to game
+    audio_streams: Arc<Mutex<HashMap<String, (Uuid, Instant)>>>,
+    /// Maps stream_id -> speech text for broadcasting on AudioEnded
+    audio_speech_text: Arc<Mutex<HashMap<String, String>>>,
+    /// Number of active spectate WebSocket connections
+    spectate_ws_count: Arc<AtomicU32>,
 }
 
 /// Check if the game instance is halted due to a Lua error.
@@ -1790,6 +1800,8 @@ struct AudioChunkRequest {
     seq: u32,
     data: String,
     done: bool,
+    #[serde(default)]
+    speech_text: Option<String>,
 }
 
 async fn local_audio(
@@ -1797,14 +1809,76 @@ async fn local_audio(
     headers: axum::http::HeaderMap,
     Json(body): Json<AudioChunkRequest>,
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
-    let (_, name) = get_session(&state, &headers)?;
+    let (agent_id, name) = get_session(&state, &headers)?;
+    let stream_id = body.stream_id.clone();
+
+    // Track stream_id -> agent_id mapping (prune entries older than 120s)
+    {
+        let mut streams = state.audio_streams.lock().unwrap();
+        let now = Instant::now();
+        streams.retain(|_, (_, ts)| now.duration_since(*ts) < Duration::from_secs(120));
+        streams.insert(stream_id.clone(), (agent_id, now));
+    }
+
+    // Store speech text if provided (typically on the done=true chunk)
+    if let Some(text) = &body.speech_text {
+        state
+            .audio_speech_text
+            .lock()
+            .unwrap()
+            .insert(stream_id.clone(), text.clone());
+    }
+
+    let is_done = body.done;
     let _ = state.audio_tx.send(AudioChunk {
-        speaker: name,
-        stream_id: body.stream_id,
+        speaker: name.clone(),
+        stream_id: stream_id.clone(),
         seq: body.seq,
         data: body.data,
         done: body.done,
     });
+
+    // Zero-frontends fast-path: if done and no spectate WS connections,
+    // auto-complete the AudioEnded since no frontend will send audio_done
+    if is_done && state.spectate_ws_count.load(Ordering::Relaxed) == 0 {
+        eprintln!(
+            "[audio] No frontends connected, auto-completing stream {}",
+            stream_id
+        );
+        // Broadcast speech text if available
+        if let Some(text) = state.audio_speech_text.lock().unwrap().remove(&stream_id) {
+            let seq = {
+                let mut log = state.speech_log.lock().unwrap();
+                let seq = log.0;
+                log.0 += 1;
+                let event = SpeechEvent {
+                    speaker: name.clone(),
+                    text,
+                    seq,
+                };
+                log.1.push_back(event.clone());
+                while log.1.len() > 100 {
+                    log.1.pop_front();
+                }
+                let _ = state.speech_tx.send(event);
+                seq
+            };
+            let _ = seq;
+        }
+        if let Err(e) = game::queue_input(
+            &state.game_handle,
+            state.game_id,
+            agent_id,
+            "AudioEnded".to_string(),
+            serde_json::json!({ "stream_id": stream_id }),
+        ) {
+            eprintln!(
+                "[audio] Failed to queue AudioEnded for stream {}: {}",
+                stream_id, e
+            );
+        }
+    }
+
     Ok(axum::http::StatusCode::OK)
 }
 
@@ -2023,7 +2097,17 @@ async fn local_spectate_ws(
     ws.on_upgrade(move |socket| handle_spectate_ws(socket, state))
 }
 
+struct WsCountGuard(Arc<AtomicU32>);
+impl Drop for WsCountGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 async fn handle_spectate_ws(socket: WebSocket, state: LocalState) {
+    state.spectate_ws_count.fetch_add(1, Ordering::Relaxed);
+    let _guard = WsCountGuard(state.spectate_ws_count.clone());
+
     let (mut sender, mut receiver) = socket.split();
     let mut audio_rx = state.audio_tx.subscribe();
     let mut speech_rx = state.speech_tx.subscribe();
@@ -2040,6 +2124,49 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState) {
                     Some(Ok(Message::Ping(data))) => {
                         if sender.send(Message::Pong(data)).await.is_err() {
                             break;
+                        }
+                    }
+                    Some(Ok(Message::Text(text))) => {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if parsed.get("type").and_then(|v| v.as_str()) == Some("audio_done") {
+                                if let Some(stream_id) = parsed.get("stream_id").and_then(|v| v.as_str()) {
+                                    let agent_id = state.audio_streams.lock().unwrap()
+                                        .get(stream_id).map(|(id, _)| *id);
+                                    if let Some(agent_id) = agent_id {
+                                        // Broadcast speech text if available
+                                        if let Some(speech_text) = state.audio_speech_text.lock().unwrap().remove(stream_id) {
+                                            let speaker = state.sessions.iter()
+                                                .find(|r| r.value().0 == agent_id)
+                                                .map(|r| r.value().1.clone())
+                                                .unwrap_or_default();
+                                            let mut log = state.speech_log.lock().unwrap();
+                                            let seq = log.0;
+                                            log.0 += 1;
+                                            let event = SpeechEvent {
+                                                speaker,
+                                                text: speech_text,
+                                                seq,
+                                            };
+                                            log.1.push_back(event.clone());
+                                            while log.1.len() > 100 {
+                                                log.1.pop_front();
+                                            }
+                                            let _ = state.speech_tx.send(event);
+                                        }
+                                        if let Err(e) = game::queue_input(
+                                            &state.game_handle,
+                                            state.game_id,
+                                            agent_id,
+                                            "AudioEnded".to_string(),
+                                            serde_json::json!({ "stream_id": stream_id }),
+                                        ) {
+                                            eprintln!("[audio_done] Failed to queue AudioEnded for stream {}: {}", stream_id, e);
+                                        }
+                                    } else {
+                                        eprintln!("[audio_done] Unknown stream_id: {}, no agent mapping found", stream_id);
+                                    }
+                                }
+                            }
                         }
                     }
                     _ => {}

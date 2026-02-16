@@ -74,6 +74,7 @@ pub struct InstanceData {
     pub body_angular_velocity_data: Option<BodyAngularVelocityData>,
     pub attachment_data: Option<AttachmentData>,
     pub align_orientation_data: Option<AlignOrientationData>,
+    pub sound_data: Option<SoundData>,
     pub property_changed_signals: HashMap<String, RBXScriptSignal>,
     pub attribute_changed_signals: HashMap<String, RBXScriptSignal>,
 
@@ -379,6 +380,29 @@ impl Default for ObjectValueData {
         Self {
             value: None,
             changed: create_signal("Changed"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SoundData {
+    pub stream_id: String,
+    pub volume: f32,
+    pub playback_speed: f32,
+    pub is_playing: bool,
+    pub ended: RBXScriptSignal,
+    pub stopped: RBXScriptSignal,
+}
+
+impl Default for SoundData {
+    fn default() -> Self {
+        Self {
+            stream_id: String::new(),
+            volume: 0.5,
+            playback_speed: 1.0,
+            is_playing: false,
+            ended: create_signal("Ended"),
+            stopped: create_signal("Stopped"),
         }
     }
 }
@@ -736,6 +760,7 @@ impl InstanceData {
             body_angular_velocity_data: None,
             attachment_data: None,
             align_orientation_data: None,
+            sound_data: None,
             property_changed_signals: HashMap::new(),
             attribute_changed_signals: HashMap::new(),
             destroyed: false,
@@ -919,6 +944,12 @@ impl InstanceData {
     pub fn new_image_button(name: &str) -> Self {
         let mut inst = Self::new(ClassName::ImageButton, name);
         inst.gui_data = Some(GuiObjectData::new_image_button());
+        inst
+    }
+
+    pub fn new_sound(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::Sound, name);
+        inst.sound_data = Some(SoundData::default());
         inst
     }
 
@@ -2294,6 +2325,53 @@ impl UserData for Instance {
             Ok(())
         });
 
+        // Sound properties
+        fields.add_field_method_get("StreamId", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.sound_data.as_ref().map(|s| s.stream_id.clone()))
+        });
+        fields.add_field_method_set("StreamId", |_, this, stream_id: String| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(sound) = &mut data.sound_data {
+                sound.stream_id = stream_id;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("Volume", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.sound_data.as_ref().map(|s| s.volume))
+        });
+        fields.add_field_method_set("Volume", |_, this, volume: f32| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(sound) = &mut data.sound_data {
+                sound.volume = volume.clamp(0.0, 1.0);
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("PlaybackSpeed", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.sound_data.as_ref().map(|s| s.playback_speed))
+        });
+        fields.add_field_method_set("PlaybackSpeed", |_, this, speed: f32| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(sound) = &mut data.sound_data {
+                sound.playback_speed = speed;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("IsPlaying", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.sound_data.as_ref().map(|s| s.is_playing))
+        });
+        fields.add_field_method_get("Ended", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.sound_data.as_ref().map(|s| s.ended.clone()))
+        });
+        fields.add_field_method_get("Stopped", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.sound_data.as_ref().map(|s| s.stopped.clone()))
+        });
+
         fields.add_field_method_get("CharacterAdded", |_, this| {
             let data = this.data.lock().unwrap();
             Ok(data.player_data.as_ref().map(|p| p.character_added.clone()))
@@ -3253,6 +3331,76 @@ impl UserData for Instance {
             lua.create_sequence_from(tracks)
         });
 
+        // Sound methods
+        methods.add_method("Play", |_, this, ()| {
+            let class_name = this.class_name();
+            if class_name != ClassName::Sound {
+                return Err(mlua::Error::runtime("Play is only supported on Sound"));
+            }
+            let mut data = this.data.lock().unwrap();
+            if let Some(sound) = &mut data.sound_data {
+                if sound.stream_id.is_empty() {
+                    return Err(mlua::Error::runtime(
+                        "Sound.Play: StreamId must be set before calling Play()",
+                    ));
+                }
+                sound.is_playing = true;
+            }
+            Ok(())
+        });
+
+        methods.add_method("Stop", |lua, this, ()| {
+            let class_name = this.class_name();
+            if class_name != ClassName::Sound {
+                return Err(mlua::Error::runtime("Stop is only supported on Sound"));
+            }
+            let stopped_signal = {
+                let mut data = this.data.lock().unwrap();
+                if let Some(sound) = &mut data.sound_data {
+                    if !sound.is_playing {
+                        eprintln!("[Sound] Stop called on already-stopped Sound");
+                        return Ok(());
+                    }
+                    sound.is_playing = false;
+                    Some(sound.stopped.clone())
+                } else {
+                    None
+                }
+            };
+            if let Some(stopped) = stopped_signal {
+                let threads = stopped.fire_as_coroutines(lua, mlua::MultiValue::new())?;
+                track_yielded_threads(lua, threads)?;
+            }
+            Ok(())
+        });
+
+        methods.add_method("MarkEnded", |lua, this, ()| {
+            let class_name = this.class_name();
+            if class_name != ClassName::Sound {
+                return Err(mlua::Error::runtime("MarkEnded is only supported on Sound"));
+            }
+            let signals = {
+                let mut data = this.data.lock().unwrap();
+                if let Some(sound) = &mut data.sound_data {
+                    if !sound.is_playing {
+                        eprintln!("[Sound] MarkEnded called on already-stopped Sound");
+                        return Ok(());
+                    }
+                    sound.is_playing = false;
+                    Some((sound.ended.clone(), sound.stopped.clone()))
+                } else {
+                    None
+                }
+            };
+            if let Some((ended, stopped)) = signals {
+                let threads = ended.fire_as_coroutines(lua, mlua::MultiValue::new())?;
+                track_yielded_threads(lua, threads)?;
+                let threads = stopped.fire_as_coroutines(lua, mlua::MultiValue::new())?;
+                track_yielded_threads(lua, threads)?;
+            }
+            Ok(())
+        });
+
         methods.add_method("GetPrimaryPartCFrame", |_, this, ()| {
             let data = this.data.lock().unwrap();
             if let Some(model) = &data.model_data {
@@ -3554,6 +3702,7 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
                         Instance::from_data(InstanceData::new_image_button("ImageButton"))
                     }
                     "UICorner" => Instance::from_data(InstanceData::new_uicorner("UICorner")),
+                    "Sound" => Instance::from_data(InstanceData::new_sound("Sound")),
                     _ => {
                         return Err(mlua::Error::runtime(format!(
                             "Unknown class '{}'",
