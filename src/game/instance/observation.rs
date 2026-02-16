@@ -464,6 +464,7 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
         players,
         entities,
         sounds,
-        recent_events: instance.recent_replicated_events(),
+        // Spectator feed is public-only: client-targeted FireClient events are excluded.
+        recent_events: instance.recent_public_replicated_events(),
     }
 }

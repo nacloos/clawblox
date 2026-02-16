@@ -499,8 +499,21 @@ impl GameInstance {
         }
     }
 
-    fn recent_replicated_events(&self) -> Vec<SpectatorReplicatedEvent> {
-        self.recent_replicated_events_filtered(None)
+    fn recent_public_replicated_events(&self) -> Vec<SpectatorReplicatedEvent> {
+        let count = self
+            .replicated_events
+            .len()
+            .min(MAX_RECENT_EVENTS_PER_OBSERVATION);
+        self.replicated_events
+            .iter()
+            .filter(|evt| evt.target_user_id.is_none())
+            .rev()
+            .take(count)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
     }
 
     fn recent_replicated_events_for_user(&self, user_id: u64) -> Vec<SpectatorReplicatedEvent> {

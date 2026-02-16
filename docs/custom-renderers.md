@@ -88,6 +88,8 @@ export function createRenderer(ctx) {
 
 - `createLocalInputClient({ baseUrl, playerName })`
   - Uses local `/join`, `/input`, `/observe`
+- `inputClient.sendRemoteEvent(name, args?)`
+  - Sends `type: "RemoteEvent"` with `{ name, args }` payload
 - `bindKeyboardActions(inputClient, bindings, options?)`
   - Key-to-action mapping with tap/hold modes
 
@@ -99,6 +101,7 @@ ctx.runtime.input.bindKeyboardActions(input, {
   KeyW: { mode: 'hold', type: 'MoveForward', data: {} },
   Space: { mode: 'tap', type: 'Jump', data: {} },
 })
+await input.sendRemoteEvent('PlayerInput', [{ x: 1, y: 0, z: 0 }])
 ```
 
 ## Runtime endpoints

@@ -2,6 +2,8 @@ use mlua::{Lua, Result, UserData, UserDataFields, UserDataMethods, Value};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+const MAX_QUEUED_UNRELIABLE_EVENTS: usize = 128;
+
 #[derive(Debug, Clone)]
 pub struct ReplicatedEvent {
     pub name: String,
@@ -42,6 +44,18 @@ impl RemoteEventService {
         target_user_id: Option<u64>,
     ) {
         let mut data = self.data.lock().unwrap();
+        if !reliable {
+            let unreliable_count = data.queued_events.iter().filter(|evt| !evt.reliable).count();
+            if unreliable_count >= MAX_QUEUED_UNRELIABLE_EVENTS {
+                if let Some(idx) = data.queued_events.iter().position(|evt| !evt.reliable) {
+                    data.queued_events.remove(idx);
+                } else {
+                    // Fallback safety: if we somehow fail to locate an unreliable event,
+                    // drop the new unreliable event rather than risking reliable ordering.
+                    return;
+                }
+            }
+        }
         data.queued_events.push(ReplicatedEvent {
             name,
             payload,
@@ -67,6 +81,43 @@ impl RemoteEventService {
     pub fn drain_events(&self) -> Vec<ReplicatedEvent> {
         let mut data = self.data.lock().unwrap();
         std::mem::take(&mut data.queued_events)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unreliable_queue_is_bounded() {
+        let svc = RemoteEventService::new();
+        for i in 0..(MAX_QUEUED_UNRELIABLE_EVENTS + 32) {
+            svc.fire_event(
+                format!("u{}", i),
+                serde_json::json!({ "i": i }),
+                false,
+                None,
+            );
+        }
+        let drained = svc.drain_events();
+        let unreliable = drained.iter().filter(|evt| !evt.reliable).count();
+        assert_eq!(unreliable, MAX_QUEUED_UNRELIABLE_EVENTS);
+    }
+
+    #[test]
+    fn reliable_events_are_not_dropped_by_unreliable_pressure() {
+        let svc = RemoteEventService::new();
+        svc.fire_event("reliable".to_string(), serde_json::json!({}), true, None);
+        for i in 0..(MAX_QUEUED_UNRELIABLE_EVENTS + 64) {
+            svc.fire_event(
+                format!("u{}", i),
+                serde_json::json!({ "i": i }),
+                false,
+                None,
+            );
+        }
+        let drained = svc.drain_events();
+        assert!(drained.iter().any(|evt| evt.reliable && evt.name == "reliable"));
     }
 }
 
