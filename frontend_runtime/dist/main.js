@@ -265,6 +265,7 @@ let audioCtx = null
 const activeStreams = new Map()
 const pendingChunks = []
 let spectateWs = null
+const AUDIO_FINALIZE_GRACE_MS = 50
 
 function ensureAudioCtx() {
   if (!audioCtx) {
@@ -314,32 +315,27 @@ function playChunk(msg) {
 
   if (msg.done) {
     const streamId = msg.stream_id
-    const sendAudioDone = () => {
+    const finalizePlayback = () => {
       const now = audioCtx.currentTime
       const buffered = stream.nextPlayTime > now ? stream.nextPlayTime - now : 0
-      const delayMs = buffered * 1000 + 50
+      const delayMs = buffered * 1000 + AUDIO_FINALIZE_GRACE_MS
       const wallElapsed = ((performance.now() - stream.firstChunkWall) / 1000).toFixed(2)
       console.log(`[audio] stream ${streamId} done: ${stream.chunkCount} chunks, ` +
-        `buffered=${buffered.toFixed(2)}s ahead, wall=${wallElapsed}s, sending audio_done in ${delayMs.toFixed(0)}ms`)
+        `buffered=${buffered.toFixed(2)}s ahead, wall=${wallElapsed}s, finalizing stream in ${delayMs.toFixed(0)}ms`)
       setTimeout(() => {
-        if (spectateWs && spectateWs.readyState === WebSocket.OPEN) {
-          spectateWs.send(JSON.stringify({ type: 'audio_done', stream_id: streamId }))
-          console.log(`[audio] sent audio_done for stream ${streamId}`)
-        } else {
-          console.warn(`[audio] cannot send audio_done for stream ${streamId}: WebSocket not open`)
-        }
+        console.log(`[audio] finalized stream ${streamId}`)
         activeStreams.delete(streamId)
       }, delayMs)
     }
 
     if (audioCtx.state === 'running') {
-      sendAudioDone()
+      finalizePlayback()
     } else {
       console.log(`[audio] stream ${streamId} done but AudioContext suspended, waiting for resume`)
       const onResume = () => {
         if (audioCtx.state === 'running') {
           audioCtx.removeEventListener('statechange', onResume)
-          sendAudioDone()
+          finalizePlayback()
         }
       }
       audioCtx.addEventListener('statechange', onResume)

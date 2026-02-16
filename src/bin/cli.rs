@@ -1697,6 +1697,11 @@ const AUDIO_STREAM_TTL_SECS: u64 = 120;
 const DEFAULT_SAMPLE_RATE_HZ: u32 = 24_000;
 const DEFAULT_CHANNELS: u16 = 1;
 const DEFAULT_BYTES_PER_SAMPLE: u16 = 2;
+const MIN_POSITIVE_U32: u32 = 1;
+const MIN_POSITIVE_U16: u16 = 1;
+const DEFAULT_PLAYBACK_SPEED: f32 = 1.0;
+const MIN_PLAYBACK_SPEED: f32 = 0.01;
+const SERVER_PREDICTED_END_REASON: &str = "server_predicted_end";
 
 fn base64_decoded_len(data: &str) -> Option<usize> {
     let len = data.len();
@@ -1721,7 +1726,7 @@ fn compute_stream_duration_secs(stream: &AudioStreamState) -> f64 {
     if bytes_per_second <= 0.0 {
         return 0.0;
     }
-    let speed = (stream.playback_speed as f64).max(0.01);
+    let speed = (stream.playback_speed as f64).max(MIN_PLAYBACK_SPEED as f64);
     (stream.total_audio_bytes as f64) / bytes_per_second / speed
 }
 
@@ -1786,7 +1791,7 @@ fn complete_audio_stream(state: &LocalState, stream_id: &str, reason: &str) {
 fn schedule_audio_stream_completion(state: LocalState, stream_id: String, expected_end_at: Instant) {
     tokio::spawn(async move {
         tokio::time::sleep_until(tokio::time::Instant::from_std(expected_end_at)).await;
-        complete_audio_stream(&state, &stream_id, "server_predicted_end");
+        complete_audio_stream(&state, &stream_id, SERVER_PREDICTED_END_REASON);
     });
 }
 
@@ -1995,13 +2000,19 @@ async fn local_audio(
         "Invalid base64 PCM chunk".to_string(),
     ))? as u64;
 
-    let sample_rate_hz = body.sample_rate_hz.unwrap_or(DEFAULT_SAMPLE_RATE_HZ).max(1);
-    let channels = body.channels.unwrap_or(DEFAULT_CHANNELS).max(1);
+    let sample_rate_hz = body
+        .sample_rate_hz
+        .unwrap_or(DEFAULT_SAMPLE_RATE_HZ)
+        .max(MIN_POSITIVE_U32);
+    let channels = body.channels.unwrap_or(DEFAULT_CHANNELS).max(MIN_POSITIVE_U16);
     let bytes_per_sample = body
         .bytes_per_sample
         .unwrap_or(DEFAULT_BYTES_PER_SAMPLE)
-        .max(1);
-    let playback_speed = body.playback_speed.unwrap_or(1.0).max(0.01);
+        .max(MIN_POSITIVE_U16);
+    let playback_speed = body
+        .playback_speed
+        .unwrap_or(DEFAULT_PLAYBACK_SPEED)
+        .max(MIN_PLAYBACK_SPEED);
     let mut schedule: Option<Instant> = None;
 
     // Track stream lifecycle metadata and prune stale entries.
