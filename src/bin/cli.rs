@@ -1666,6 +1666,7 @@ struct PlaybackDoneEvent {
 struct AudioStreamState {
     agent_id: Uuid,
     speaker: String,
+    first_seen: Instant,
     last_seen: Instant,
     total_audio_bytes: u64,
     done_received: bool,
@@ -2021,6 +2022,7 @@ async fn local_audio(
             .or_insert_with(|| AudioStreamState {
                 agent_id,
                 speaker: name.clone(),
+                first_seen: now,
                 last_seen: now,
                 total_audio_bytes: 0,
                 done_received: false,
@@ -2044,7 +2046,7 @@ async fn local_audio(
             stream.done_at = Some(now);
             let duration_secs = compute_stream_duration_secs(stream);
             let duration = Duration::from_secs_f64(duration_secs.max(0.0));
-            let expected_end_at = now + duration;
+            let expected_end_at = stream.first_seen + duration;
             stream.expected_end_at = Some(expected_end_at);
 
             if !stream.completion_scheduled {
