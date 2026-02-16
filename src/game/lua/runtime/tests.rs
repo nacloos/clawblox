@@ -2202,3 +2202,275 @@ fn test_debris_add_item_destroys_after_lifetime() {
         "Debris victim should be destroyed after lifetime elapsed"
     );
 }
+
+#[test]
+fn test_sound_instance_new_and_properties() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local sound = Instance.new("Sound")
+            _G.streamId = sound.StreamId
+            _G.volume = sound.Volume
+            _G.speed = sound.PlaybackSpeed
+            _G.playing = sound.IsPlaying
+
+            sound.StreamId = "test_stream_123"
+            sound.Volume = 0.8
+            sound.PlaybackSpeed = 1.5
+
+            _G.streamId2 = sound.StreamId
+            _G.volume2 = sound.Volume
+            _G.speed2 = sound.PlaybackSpeed
+
+            -- Volume clamping
+            sound.Volume = 2.0
+            _G.volumeHigh = sound.Volume
+            sound.Volume = -1.0
+            _G.volumeLow = sound.Volume
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let stream_id: String = globals.get("streamId").unwrap();
+    let volume: f32 = globals.get("volume").unwrap();
+    let speed: f32 = globals.get("speed").unwrap();
+    let playing: bool = globals.get("playing").unwrap();
+    assert_eq!(stream_id, "");
+    assert!((volume - 0.5).abs() < 1e-6);
+    assert!((speed - 1.0).abs() < 1e-6);
+    assert!(!playing);
+
+    let stream_id2: String = globals.get("streamId2").unwrap();
+    let volume2: f32 = globals.get("volume2").unwrap();
+    let speed2: f32 = globals.get("speed2").unwrap();
+    assert_eq!(stream_id2, "test_stream_123");
+    assert!((volume2 - 0.8).abs() < 1e-6);
+    assert!((speed2 - 1.5).abs() < 1e-6);
+
+    let volume_high: f32 = globals.get("volumeHigh").unwrap();
+    let volume_low: f32 = globals.get("volumeLow").unwrap();
+    assert!((volume_high - 1.0).abs() < 1e-6, "Volume should clamp to 1.0");
+    assert!((volume_low - 0.0).abs() < 1e-6, "Volume should clamp to 0.0");
+}
+
+#[test]
+fn test_sound_play_errors_without_stream_id() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local sound = Instance.new("Sound")
+            local ok, err = pcall(function()
+                sound:Play()
+            end)
+            _G.ok = ok
+            _G.err = tostring(err)
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let ok: bool = globals.get("ok").unwrap();
+    let err: String = globals.get("err").unwrap();
+    assert!(!ok, "Play() with empty StreamId should error");
+    assert!(
+        err.contains("StreamId"),
+        "Error should mention StreamId, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_sound_play_and_is_playing() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local sound = Instance.new("Sound")
+            sound.StreamId = "test_stream"
+            _G.beforePlay = sound.IsPlaying
+            sound:Play()
+            _G.afterPlay = sound.IsPlaying
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let before: bool = globals.get("beforePlay").unwrap();
+    let after: bool = globals.get("afterPlay").unwrap();
+    assert!(!before);
+    assert!(after);
+}
+
+#[test]
+fn test_sound_stop_fires_stopped() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local sound = Instance.new("Sound")
+            sound.StreamId = "test_stream"
+            sound:Play()
+
+            _G.stoppedFired = false
+            sound.Stopped:Connect(function()
+                _G.stoppedFired = true
+            end)
+
+            sound:Stop()
+            _G.isPlaying = sound.IsPlaying
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let is_playing: bool = globals.get("isPlaying").unwrap();
+    let stopped_fired: bool = globals.get("stoppedFired").unwrap();
+    assert!(!is_playing, "IsPlaying should be false after Stop()");
+    assert!(stopped_fired, "Stopped signal should fire on Stop()");
+}
+
+#[test]
+fn test_sound_mark_ended_fires_ended_and_stopped() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local sound = Instance.new("Sound")
+            sound.StreamId = "test_stream"
+            sound:Play()
+
+            _G.order = {}
+            sound.Ended:Connect(function()
+                table.insert(_G.order, "Ended")
+            end)
+            sound.Stopped:Connect(function()
+                table.insert(_G.order, "Stopped")
+            end)
+
+            sound:MarkEnded()
+            _G.isPlaying = sound.IsPlaying
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let is_playing: bool = globals.get("isPlaying").unwrap();
+    assert!(!is_playing, "IsPlaying should be false after MarkEnded()");
+
+    let order: mlua::Table = globals.get("order").unwrap();
+    let first: String = order.get(1).unwrap();
+    let second: String = order.get(2).unwrap();
+    assert_eq!(first, "Ended", "Ended should fire first");
+    assert_eq!(second, "Stopped", "Stopped should fire second");
+}
+
+#[test]
+fn test_sound_stop_noop_when_not_playing() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local sound = Instance.new("Sound")
+            sound.StreamId = "test_stream"
+
+            _G.stoppedFired = false
+            sound.Stopped:Connect(function()
+                _G.stoppedFired = true
+            end)
+
+            sound:Stop()
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let stopped_fired: bool = globals.get("stoppedFired").unwrap();
+    assert!(
+        !stopped_fired,
+        "Stopped signal should NOT fire when sound is not playing"
+    );
+}
+
+#[test]
+fn test_sound_mark_ended_noop_when_not_playing() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local sound = Instance.new("Sound")
+            sound.StreamId = "test_stream"
+
+            _G.endedFired = false
+            _G.stoppedFired = false
+            sound.Ended:Connect(function()
+                _G.endedFired = true
+            end)
+            sound.Stopped:Connect(function()
+                _G.stoppedFired = true
+            end)
+
+            sound:MarkEnded()
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let ended_fired: bool = globals.get("endedFired").unwrap();
+    let stopped_fired: bool = globals.get("stoppedFired").unwrap();
+    assert!(
+        !ended_fired,
+        "Ended signal should NOT fire when sound is not playing"
+    );
+    assert!(
+        !stopped_fired,
+        "Stopped signal should NOT fire when sound is not playing"
+    );
+}
+
+#[test]
+fn test_sound_ended_via_agent_input() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local sound = Instance.new("Sound")
+            sound.StreamId = "stream_abc"
+            sound:Play()
+
+            _G.turnReleased = false
+            sound.Ended:Connect(function()
+                _G.turnReleased = true
+            end)
+
+            local AgentInputService = game:GetService("AgentInputService")
+            AgentInputService.InputReceived:Connect(function(player, inputType, data)
+                if inputType == "AudioEnded" and data.stream_id == "stream_abc" then
+                    sound:MarkEnded()
+                end
+            end)
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let (_player, _hrp_id) = runtime.add_player(123, "Tester");
+    runtime.queue_agent_input(
+        123,
+        AgentInput::new(
+            "AudioEnded".to_string(),
+            serde_json::json!({ "stream_id": "stream_abc" }),
+        ),
+    );
+    runtime
+        .process_agent_inputs()
+        .expect("Failed to process agent inputs");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let turn_released: bool = globals.get("turnReleased").unwrap();
+    assert!(
+        turn_released,
+        "Ended signal should fire after AudioEnded agent input triggers MarkEnded"
+    );
+}
