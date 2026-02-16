@@ -269,38 +269,54 @@ function ensureAudioCtx() {
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 })
     console.log('[audio] AudioContext created, state=' + audioCtx.state)
-    // Flush any chunks that arrived before user gesture
+  }
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume().then(() => {
+      console.log('[audio] AudioContext resumed, flushing ' + pendingChunks.length + ' buffered chunks')
+      while (pendingChunks.length) playChunk(pendingChunks.shift())
+    })
+  } else if (audioCtx.state === 'running') {
     while (pendingChunks.length) playChunk(pendingChunks.shift())
   }
 }
 
 function onUserGesture() {
   ensureAudioCtx()
-  document.removeEventListener('click', onUserGesture)
-  document.removeEventListener('keydown', onUserGesture)
+  // Only stop listening once context is actually running
+  if (audioCtx && audioCtx.state === 'running') {
+    document.removeEventListener('click', onUserGesture)
+    document.removeEventListener('keydown', onUserGesture)
+  }
 }
 document.addEventListener('click', onUserGesture)
 document.addEventListener('keydown', onUserGesture)
 
 function onAudioChunk(msg) {
-  if (!audioCtx) {
-    // Buffer until user gesture creates the context
+  if (!audioCtx || audioCtx.state !== 'running') {
+    // Buffer until user gesture resumes the context
     pendingChunks.push(msg)
     return
   }
   playChunk(msg)
 }
 
+let audioDebugCount = 0
+
 function playChunk(msg) {
   let stream = activeStreams.get(msg.stream_id)
   if (!stream) {
-    stream = { nextPlayTime: 0, leftover: null }
+    stream = { nextPlayTime: 0, leftover: null, firstChunkWall: performance.now(), chunkCount: 0 }
     activeStreams.set(msg.stream_id, stream)
+    console.log(`[audio] new stream ${msg.stream_id}`)
   }
+  stream.chunkCount++
 
   if (msg.done) {
     const now = audioCtx.currentTime
-    const cleanup = stream.nextPlayTime > now ? stream.nextPlayTime - now : 0
+    const buffered = stream.nextPlayTime > now ? stream.nextPlayTime - now : 0
+    const wallElapsed = ((performance.now() - stream.firstChunkWall) / 1000).toFixed(2)
+    console.log(`[audio] stream ${msg.stream_id} done: ${stream.chunkCount} chunks, buffered=${buffered.toFixed(2)}s ahead, wall=${wallElapsed}s`)
+    const cleanup = buffered
     setTimeout(() => activeStreams.delete(msg.stream_id), cleanup * 1000 + 500)
     return
   }
@@ -343,6 +359,13 @@ function playChunk(msg) {
   if (stream.nextPlayTime < now) stream.nextPlayTime = now
   source.start(stream.nextPlayTime)
   stream.nextPlayTime += buffer.duration
+
+  // Log every 10th chunk: how far ahead the buffer is scheduled
+  if (stream.chunkCount % 10 === 1) {
+    const ahead = (stream.nextPlayTime - now).toFixed(2)
+    const wallMs = (performance.now() - stream.firstChunkWall).toFixed(0)
+    console.log(`[audio] chunk #${stream.chunkCount} stream=${msg.stream_id.slice(-8)} dur=${buffer.duration.toFixed(3)}s ahead=${ahead}s wall=${wallMs}ms`)
+  }
 }
 
 async function bootstrap() {

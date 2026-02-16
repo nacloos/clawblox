@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -1459,6 +1460,7 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let (audio_tx, _) = broadcast::channel::<AudioChunk>(64);
+        let (speech_tx, _) = broadcast::channel::<SpeechEvent>(64);
         let state = LocalState {
             game_id,
             instance_id,
@@ -1468,6 +1470,8 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
             sessions: Arc::new(DashMap::new()),
             log_file: path.join(".clawblox.log"),
             audio_tx,
+            speech_tx,
+            speech_log: Arc::new(Mutex::new((0, VecDeque::new()))),
         };
 
         let cors = CorsLayer::new()
@@ -1487,6 +1491,7 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
             .route("/observe", get(local_observe))
             .route("/skill.md", get(local_skill))
             .route("/audio", post(local_audio))
+            .route("/speech", get(local_speech_poll).post(local_speech_post))
             .nest_service("/renderer-files", ServeDir::new(path.join("renderer")))
             .nest_service("/assets", ServeDir::new(path.join("assets")))
             .nest_service("/static", ServeDir::new(path.join("static")))
@@ -1633,6 +1638,13 @@ struct AudioChunk {
     done: bool,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct SpeechEvent {
+    speaker: String,
+    text: String,
+    seq: u64,
+}
+
 #[derive(Clone)]
 struct LocalState {
     game_id: Uuid,
@@ -1643,6 +1655,8 @@ struct LocalState {
     sessions: Arc<DashMap<String, (Uuid, String)>>, // token -> (agent_id, name)
     log_file: PathBuf,
     audio_tx: broadcast::Sender<AudioChunk>,
+    speech_tx: broadcast::Sender<SpeechEvent>,
+    speech_log: Arc<Mutex<(u64, VecDeque<SpeechEvent>)>>, // (next_seq, ring buffer)
 }
 
 /// Check if the game instance is halted due to a Lua error.
@@ -1795,6 +1809,92 @@ async fn local_audio(
 }
 
 #[derive(Deserialize)]
+struct SpeechPostRequest {
+    text: String,
+}
+
+#[derive(Serialize)]
+struct SpeechPostResponse {
+    seq: u64,
+}
+
+async fn local_speech_post(
+    State(state): State<LocalState>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<SpeechPostRequest>,
+) -> Result<Json<SpeechPostResponse>, (axum::http::StatusCode, String)> {
+    let (_, name) = get_session(&state, &headers)?;
+    let seq = {
+        let mut log = state.speech_log.lock().unwrap();
+        let seq = log.0;
+        log.0 += 1;
+        let event = SpeechEvent {
+            speaker: name,
+            text: body.text,
+            seq,
+        };
+        log.1.push_back(event.clone());
+        while log.1.len() > 100 {
+            log.1.pop_front();
+        }
+        let _ = state.speech_tx.send(event);
+        seq
+    };
+    Ok(Json(SpeechPostResponse { seq }))
+}
+
+#[derive(Deserialize)]
+struct SpeechPollQuery {
+    #[serde(default)]
+    after: u64,
+    #[serde(default)]
+    wait: bool,
+}
+
+#[derive(Serialize)]
+struct SpeechPollResponse {
+    events: Vec<SpeechEvent>,
+    last_seq: u64,
+}
+
+async fn local_speech_poll(
+    State(state): State<LocalState>,
+    headers: axum::http::HeaderMap,
+    Query(params): Query<SpeechPollQuery>,
+) -> Result<Json<SpeechPollResponse>, (axum::http::StatusCode, String)> {
+    let _ = get_session(&state, &headers)?;
+
+    // Check for existing events first
+    {
+        let log = state.speech_log.lock().unwrap();
+        let events: Vec<SpeechEvent> = log.1.iter().filter(|e| e.seq > params.after).cloned().collect();
+        if !events.is_empty() {
+            let last_seq = events.last().map(|e| e.seq).unwrap_or(params.after);
+            return Ok(Json(SpeechPollResponse { events, last_seq }));
+        }
+    }
+
+    // If wait=true, block until a new event arrives or timeout
+    if params.wait {
+        let mut rx = state.speech_tx.subscribe();
+        let result = tokio::time::timeout(Duration::from_secs(30), rx.recv()).await;
+        if let Ok(Ok(event)) = result {
+            if event.seq > params.after {
+                return Ok(Json(SpeechPollResponse {
+                    last_seq: event.seq,
+                    events: vec![event],
+                }));
+            }
+        }
+    }
+
+    Ok(Json(SpeechPollResponse {
+        events: vec![],
+        last_seq: params.after,
+    }))
+}
+
+#[derive(Deserialize)]
 struct InputRequest {
     #[serde(rename = "type")]
     input_type: String,
@@ -1926,6 +2026,7 @@ async fn local_spectate_ws(
 async fn handle_spectate_ws(socket: WebSocket, state: LocalState) {
     let (mut sender, mut receiver) = socket.split();
     let mut audio_rx = state.audio_tx.subscribe();
+    let mut speech_rx = state.speech_tx.subscribe();
 
     let mut tick_interval = interval(Duration::from_millis(33));
     let mut last_tick: u64 = 0;
@@ -1954,6 +2055,20 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState) {
                         "seq": chunk.seq,
                         "data": chunk.data,
                         "done": chunk.done,
+                    })).unwrap_or_default();
+                    if sender.send(Message::Text(json.into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+
+            speech = speech_rx.recv() => {
+                if let Ok(speech) = speech {
+                    let json = serde_json::to_string(&serde_json::json!({
+                        "type": "speech",
+                        "speaker": speech.speaker,
+                        "text": speech.text,
+                        "seq": speech.seq,
                     })).unwrap_or_default();
                     if sender.send(Message::Text(json.into())).await.is_err() {
                         break;

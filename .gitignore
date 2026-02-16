@@ -5,6 +5,7 @@
 # Frontend
 **/node_modules/
 **/dist/
+!frontend_runtime/dist/
 
 **/__pycache__/
 .venv/
