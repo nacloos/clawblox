@@ -1485,6 +1485,7 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
             playback_done_seq: Arc::new(Mutex::new(0)),
             speech_seq: Arc::new(Mutex::new(0)),
             speech_progress_seq: Arc::new(Mutex::new(0)),
+            authoritative_speech_event_cursor: Arc::new(Mutex::new(0)),
             audio_streams: Arc::new(Mutex::new(HashMap::new())),
             audio_speech_text: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -1707,6 +1708,7 @@ struct LocalState {
     playback_done_seq: Arc<Mutex<u64>>,
     speech_seq: Arc<Mutex<u64>>,
     speech_progress_seq: Arc<Mutex<u64>>,
+    authoritative_speech_event_cursor: Arc<Mutex<u64>>,
     /// Maps stream_id -> stream state for routing and completion semantics.
     audio_streams: Arc<Mutex<HashMap<String, AudioStreamState>>>,
     /// Maps stream_id -> speech text for broadcasting on AudioEnded
@@ -1786,9 +1788,6 @@ fn complete_audio_stream(state: &LocalState, stream_id: &str, reason: &str) {
     );
 
     let speech_text = state.audio_speech_text.lock().unwrap().remove(stream_id);
-    if let Some(text) = &speech_text {
-        push_speech_event(state, stream_state.speaker.clone(), text.clone());
-    }
 
     let speech_finished_data = serde_json::json!({
         "stream_id": stream_id,
@@ -1843,6 +1842,43 @@ fn push_speech_event(state: &LocalState, speaker: String, text: String) {
     };
     let event = SpeechEvent { speaker, text, seq };
     let _ = state.speech_tx.send(event);
+}
+
+fn maybe_publish_authoritative_speech_events(
+    state: &LocalState,
+    recent_events: &[clawblox::game::instance::SpectatorReplicatedEvent],
+) {
+    if recent_events.is_empty() {
+        return;
+    }
+
+    let mut cursor = state.authoritative_speech_event_cursor.lock().unwrap();
+    for event in recent_events {
+        if event.id <= *cursor {
+            continue;
+        }
+        if event.name == "SpeechBus" {
+            let payload = &event.payload;
+            let op = payload.get("op").and_then(|v| v.as_str()).unwrap_or("");
+            if op == "SpeechText" {
+                let speaker = payload
+                    .get("speaker")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let text = payload
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !speaker.is_empty() && !text.is_empty() {
+                    push_speech_event(state, speaker, text);
+                }
+            }
+        }
+        *cursor = event.id;
+    }
 }
 
 fn push_speech_progress_event(state: &LocalState, speaker: String, stream_id: String, text: String) {
@@ -2195,6 +2231,7 @@ async fn local_input(
     let mut observation = game::get_observation(&state.game_handle, state.game_id, agent_id)
         .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
     resolve_local_player_assets(&mut observation);
+    maybe_publish_authoritative_speech_events(&state, &observation.recent_events);
 
     if let Some(progress) = speech_progress {
         maybe_publish_speech_progress(&state, &observation, &agent_name, progress);
@@ -2298,6 +2335,7 @@ async fn local_observe(
     let mut observation = game::get_observation(&state.game_handle, state.game_id, agent_id)
         .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
     resolve_local_player_assets(&mut observation);
+    maybe_publish_authoritative_speech_events(&state, &observation.recent_events);
 
     Ok(Json(observation))
 }
@@ -2495,6 +2533,7 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState, role: Spectate
                     Ok(obs) => {
                         let mut obs = obs;
                         resolve_local_spectator_assets(&mut obs);
+                        maybe_publish_authoritative_speech_events(&state, &obs.recent_events);
 
                         if obs.tick != last_tick {
                             last_tick = obs.tick;

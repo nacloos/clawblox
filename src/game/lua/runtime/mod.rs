@@ -477,6 +477,8 @@ impl LuaRuntime {
                         "UDim"
                     } else if ud.borrow::<super::types::UDim2>().is_ok() {
                         "UDim2"
+                    } else if ud.borrow::<super::types::DateTime>().is_ok() {
+                        "DateTime"
                     } else {
                         "userdata"
                     }
@@ -562,6 +564,11 @@ impl LuaRuntime {
                     __clawblox_warned_legacy_tick = true
                 end
                 return __clawblox_tick_impl()
+            end
+
+            -- Roblox parity: time() returns runtime seconds without legacy warning.
+            function time()
+                return __clawblox_now()
             end
 
             function task.spawn(func_or_thread, ...)

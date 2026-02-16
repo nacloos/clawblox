@@ -1,6 +1,7 @@
 pub mod brick_color;
 pub mod cframe;
 pub mod color3;
+pub mod datetime;
 pub mod enums;
 pub mod physical_properties;
 pub mod ray;
@@ -11,6 +12,7 @@ pub mod vector3;
 
 pub use cframe::CFrame;
 pub use color3::Color3;
+pub use datetime::DateTime;
 pub use enums::{HumanoidStateType, Material, PartType, RaycastFilterType};
 pub use physical_properties::PhysicalProperties;
 pub use ray::Ray;
@@ -26,6 +28,7 @@ pub fn register_all_types(lua: &Lua) -> Result<()> {
     vector2::register_vector2(lua)?;
     cframe::register_cframe(lua)?;
     color3::register_color3(lua)?;
+    datetime::register_datetime(lua)?;
     brick_color::register_brick_color(lua)?;
     enums::register_enums(lua)?;
     physical_properties::register_physical_properties(lua)?;

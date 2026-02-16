@@ -307,7 +307,16 @@ let audioDebugCount = 0
 function playChunk(msg) {
   let stream = activeStreams.get(msg.stream_id)
   if (!stream) {
-    stream = { nextPlayTime: 0, leftover: null, firstChunkWall: performance.now(), chunkCount: 0 }
+    stream = {
+      nextPlayTime: 0,
+      leftover: null,
+      firstChunkWall: performance.now(),
+      chunkCount: 0,
+      done: false,
+      finalized: false,
+      finalizeTimer: null,
+      lastSource: null,
+    }
     activeStreams.set(msg.stream_id, stream)
     console.log(`[audio] new stream ${msg.stream_id}`)
   }
@@ -315,31 +324,48 @@ function playChunk(msg) {
 
   if (msg.done) {
     const streamId = msg.stream_id
-    const finalizePlayback = () => {
+    stream.done = true
+
+    const finalizeNow = (reason) => {
+      if (stream.finalized) return
+      stream.finalized = true
+      if (stream.finalizeTimer) {
+        clearTimeout(stream.finalizeTimer)
+        stream.finalizeTimer = null
+      }
+      console.log(`[audio] finalized stream ${streamId} reason=${reason}`)
+      activeStreams.delete(streamId)
+    }
+
+    const armFinalizeGuard = () => {
       const now = audioCtx.currentTime
       const buffered = stream.nextPlayTime > now ? stream.nextPlayTime - now : 0
       const delayMs = buffered * 1000 + AUDIO_FINALIZE_GRACE_MS
       const wallElapsed = ((performance.now() - stream.firstChunkWall) / 1000).toFixed(2)
       console.log(`[audio] stream ${streamId} done: ${stream.chunkCount} chunks, ` +
-        `buffered=${buffered.toFixed(2)}s ahead, wall=${wallElapsed}s, finalizing stream in ${delayMs.toFixed(0)}ms`)
-      setTimeout(() => {
-        console.log(`[audio] finalized stream ${streamId}`)
-        activeStreams.delete(streamId)
-      }, delayMs)
+        `buffered=${buffered.toFixed(2)}s ahead, wall=${wallElapsed}s, guard in ${delayMs.toFixed(0)}ms`)
+      stream.finalizeTimer = setTimeout(() => finalizeNow("guard_timeout"), delayMs)
     }
 
-    if (audioCtx.state === 'running') {
-      finalizePlayback()
-    } else {
+    if (audioCtx.state !== 'running') {
       console.log(`[audio] stream ${streamId} done but AudioContext suspended, waiting for resume`)
       const onResume = () => {
         if (audioCtx.state === 'running') {
           audioCtx.removeEventListener('statechange', onResume)
-          finalizePlayback()
+          armFinalizeGuard()
         }
       }
       audioCtx.addEventListener('statechange', onResume)
+      return
     }
+
+    if (!stream.lastSource) {
+      // No scheduled source exists; finalize immediately.
+      finalizeNow("done_no_source")
+      return
+    }
+
+    armFinalizeGuard()
     return
   }
 
@@ -376,6 +402,20 @@ function playChunk(msg) {
   const source = audioCtx.createBufferSource()
   source.buffer = buffer
   source.connect(audioCtx.destination)
+  stream.lastSource = source
+  source.onended = () => {
+    // Authoritative completion path: stream is done and this is the last scheduled source.
+    if (!stream.done) return
+    if (stream.finalized) return
+    if (stream.lastSource !== source) return
+    if (stream.finalizeTimer) {
+      clearTimeout(stream.finalizeTimer)
+      stream.finalizeTimer = null
+    }
+    console.log(`[audio] finalized stream ${msg.stream_id} reason=last_source_onended`)
+    stream.finalized = true
+    activeStreams.delete(msg.stream_id)
+  }
 
   const now = audioCtx.currentTime
   if (stream.nextPlayTime < now) stream.nextPlayTime = now

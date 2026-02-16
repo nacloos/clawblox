@@ -297,6 +297,51 @@ fn test_tick_function() {
 }
 
 #[test]
+fn test_time_function() {
+    let runtime = test_runtime();
+    let result: f64 = runtime.lua().load("return time()").eval().unwrap();
+    assert!(result >= 0.0);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let result2: f64 = runtime.lua().load("return time()").eval().unwrap();
+    assert!(result2 > result);
+}
+
+#[test]
+fn test_datetime_now_parity() {
+    let runtime = test_runtime();
+    let (type_name, unix_ms): (String, i64) = runtime
+        .lua()
+        .load(
+            r#"
+            local dt = DateTime.now()
+            return typeof(dt), dt.UnixTimestampMillis
+        "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(type_name, "DateTime");
+    assert!(unix_ms > 0);
+}
+
+#[test]
+fn test_datetime_from_unix_timestamp_millis_roundtrip() {
+    let runtime = test_runtime();
+    let (unix_ms, unix_s, iso): (i64, i64, String) = runtime
+        .lua()
+        .load(
+            r#"
+            local dt = DateTime.fromUnixTimestampMillis(1700000000123)
+            return dt.UnixTimestampMillis, dt.UnixTimestamp, dt:ToIsoDate()
+        "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(unix_ms, 1700000000123);
+    assert_eq!(unix_s, 1700000000);
+    assert!(!iso.is_empty());
+}
+
+#[test]
 fn test_workspace_raycast_hits_rotated_thin_part() {
     let mut runtime = test_runtime();
     runtime
