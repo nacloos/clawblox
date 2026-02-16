@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -1479,7 +1479,7 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
             speech_tx,
             playback_done_tx,
             playback_done_seq: Arc::new(Mutex::new(0)),
-            speech_log: Arc::new(Mutex::new((0, VecDeque::new()))),
+            speech_seq: Arc::new(Mutex::new(0)),
             audio_streams: Arc::new(Mutex::new(HashMap::new())),
             audio_speech_text: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -1501,7 +1501,6 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
             .route("/observe", get(local_observe))
             .route("/skill.md", get(local_skill))
             .route("/audio", post(local_audio))
-            .route("/speech", get(local_speech_poll).post(local_speech_post))
             .nest_service("/renderer-files", ServeDir::new(path.join("renderer")))
             .nest_service("/assets", ServeDir::new(path.join("assets")))
             .nest_service("/static", ServeDir::new(path.join("static")))
@@ -1692,7 +1691,7 @@ struct LocalState {
     speech_tx: broadcast::Sender<SpeechEvent>,
     playback_done_tx: broadcast::Sender<PlaybackDoneEvent>,
     playback_done_seq: Arc<Mutex<u64>>,
-    speech_log: Arc<Mutex<(u64, VecDeque<SpeechEvent>)>>, // (next_seq, ring buffer)
+    speech_seq: Arc<Mutex<u64>>,
     /// Maps stream_id -> stream state for routing and completion semantics.
     audio_streams: Arc<Mutex<HashMap<String, AudioStreamState>>>,
     /// Maps stream_id -> speech text for broadcasting on AudioEnded
@@ -1792,17 +1791,13 @@ fn schedule_audio_stream_completion(state: LocalState, stream_id: String, expect
 }
 
 fn push_speech_event(state: &LocalState, speaker: String, text: String) {
-    let event = {
-        let mut log = state.speech_log.lock().unwrap();
-        let seq = log.0;
-        log.0 += 1;
-        let event = SpeechEvent { speaker, text, seq };
-        log.1.push_back(event.clone());
-        while log.1.len() > 100 {
-            log.1.pop_front();
-        }
-        event
+    let seq = {
+        let mut seq = state.speech_seq.lock().unwrap();
+        let next = *seq;
+        *seq += 1;
+        next
     };
+    let event = SpeechEvent { speaker, text, seq };
     let _ = state.speech_tx.send(event);
 }
 
@@ -2078,92 +2073,6 @@ async fn local_audio(
     });
 
     Ok(axum::http::StatusCode::OK)
-}
-
-#[derive(Deserialize)]
-struct SpeechPostRequest {
-    text: String,
-}
-
-#[derive(Serialize)]
-struct SpeechPostResponse {
-    seq: u64,
-}
-
-async fn local_speech_post(
-    State(state): State<LocalState>,
-    headers: axum::http::HeaderMap,
-    Json(body): Json<SpeechPostRequest>,
-) -> Result<Json<SpeechPostResponse>, (axum::http::StatusCode, String)> {
-    let (_, name) = get_session(&state, &headers)?;
-    let seq = {
-        let mut log = state.speech_log.lock().unwrap();
-        let seq = log.0;
-        log.0 += 1;
-        let event = SpeechEvent {
-            speaker: name,
-            text: body.text,
-            seq,
-        };
-        log.1.push_back(event.clone());
-        while log.1.len() > 100 {
-            log.1.pop_front();
-        }
-        let _ = state.speech_tx.send(event);
-        seq
-    };
-    Ok(Json(SpeechPostResponse { seq }))
-}
-
-#[derive(Deserialize)]
-struct SpeechPollQuery {
-    #[serde(default)]
-    after: u64,
-    #[serde(default)]
-    wait: bool,
-}
-
-#[derive(Serialize)]
-struct SpeechPollResponse {
-    events: Vec<SpeechEvent>,
-    last_seq: u64,
-}
-
-async fn local_speech_poll(
-    State(state): State<LocalState>,
-    headers: axum::http::HeaderMap,
-    Query(params): Query<SpeechPollQuery>,
-) -> Result<Json<SpeechPollResponse>, (axum::http::StatusCode, String)> {
-    let _ = get_session(&state, &headers)?;
-
-    // Check for existing events first
-    {
-        let log = state.speech_log.lock().unwrap();
-        let events: Vec<SpeechEvent> = log.1.iter().filter(|e| e.seq > params.after).cloned().collect();
-        if !events.is_empty() {
-            let last_seq = events.last().map(|e| e.seq).unwrap_or(params.after);
-            return Ok(Json(SpeechPollResponse { events, last_seq }));
-        }
-    }
-
-    // If wait=true, block until a new event arrives or timeout
-    if params.wait {
-        let mut rx = state.speech_tx.subscribe();
-        let result = tokio::time::timeout(Duration::from_secs(30), rx.recv()).await;
-        if let Ok(Ok(event)) = result {
-            if event.seq > params.after {
-                return Ok(Json(SpeechPollResponse {
-                    last_seq: event.seq,
-                    events: vec![event],
-                }));
-            }
-        }
-    }
-
-    Ok(Json(SpeechPollResponse {
-        events: vec![],
-        last_seq: params.after,
-    }))
 }
 
 #[derive(Deserialize)]
