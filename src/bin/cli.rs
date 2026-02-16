@@ -18,7 +18,6 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -1462,6 +1461,7 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
     rt.block_on(async {
         let (audio_tx, _) = broadcast::channel::<AudioChunk>(64);
         let (speech_tx, _) = broadcast::channel::<SpeechEvent>(64);
+        let (playback_done_tx, _) = broadcast::channel::<PlaybackDoneEvent>(64);
         let state = LocalState {
             game_id,
             instance_id,
@@ -1472,10 +1472,11 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
             log_file: path.join(".clawblox.log"),
             audio_tx,
             speech_tx,
+            playback_done_tx,
+            playback_done_seq: Arc::new(Mutex::new(0)),
             speech_log: Arc::new(Mutex::new((0, VecDeque::new()))),
             audio_streams: Arc::new(Mutex::new(HashMap::new())),
             audio_speech_text: Arc::new(Mutex::new(HashMap::new())),
-            spectate_ws_count: Arc::new(AtomicU32::new(0)),
         };
 
         let cors = CorsLayer::new()
@@ -1649,6 +1650,29 @@ struct SpeechEvent {
     seq: u64,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct PlaybackDoneEvent {
+    speaker: String,
+    stream_id: String,
+    seq: u64,
+}
+
+#[derive(Clone, Debug)]
+struct AudioStreamState {
+    agent_id: Uuid,
+    speaker: String,
+    last_seen: Instant,
+    total_audio_bytes: u64,
+    done_received: bool,
+    done_at: Option<Instant>,
+    expected_end_at: Option<Instant>,
+    completion_scheduled: bool,
+    sample_rate_hz: u32,
+    channels: u16,
+    bytes_per_sample: u16,
+    playback_speed: f32,
+}
+
 #[derive(Clone)]
 struct LocalState {
     game_id: Uuid,
@@ -1660,13 +1684,160 @@ struct LocalState {
     log_file: PathBuf,
     audio_tx: broadcast::Sender<AudioChunk>,
     speech_tx: broadcast::Sender<SpeechEvent>,
+    playback_done_tx: broadcast::Sender<PlaybackDoneEvent>,
+    playback_done_seq: Arc<Mutex<u64>>,
     speech_log: Arc<Mutex<(u64, VecDeque<SpeechEvent>)>>, // (next_seq, ring buffer)
-    /// Maps stream_id -> (agent_id, last_seen_time) for routing audio_done back to game
-    audio_streams: Arc<Mutex<HashMap<String, (Uuid, Instant)>>>,
+    /// Maps stream_id -> stream state for routing and completion semantics.
+    audio_streams: Arc<Mutex<HashMap<String, AudioStreamState>>>,
     /// Maps stream_id -> speech text for broadcasting on AudioEnded
     audio_speech_text: Arc<Mutex<HashMap<String, String>>>,
-    /// Number of active spectate WebSocket connections
-    spectate_ws_count: Arc<AtomicU32>,
+}
+
+const AUDIO_STREAM_TTL_SECS: u64 = 120;
+const DEFAULT_SAMPLE_RATE_HZ: u32 = 24_000;
+const DEFAULT_CHANNELS: u16 = 1;
+const DEFAULT_BYTES_PER_SAMPLE: u16 = 2;
+
+fn base64_decoded_len(data: &str) -> Option<usize> {
+    let len = data.len();
+    if len == 0 {
+        return Some(0);
+    }
+    if len % 4 != 0 {
+        return None;
+    }
+
+    let pad = data.as_bytes().iter().rev().take_while(|b| **b == b'=').count();
+    if pad > 2 {
+        return None;
+    }
+    Some((len / 4) * 3 - pad)
+}
+
+fn compute_stream_duration_secs(stream: &AudioStreamState) -> f64 {
+    let bytes_per_second = (stream.sample_rate_hz as f64)
+        * (stream.channels as f64)
+        * (stream.bytes_per_sample as f64);
+    if bytes_per_second <= 0.0 {
+        return 0.0;
+    }
+    let speed = (stream.playback_speed as f64).max(0.01);
+    (stream.total_audio_bytes as f64) / bytes_per_second / speed
+}
+
+fn complete_audio_stream(state: &LocalState, stream_id: &str, reason: &str) {
+    let stream_state = {
+        let mut streams = state.audio_streams.lock().unwrap();
+        streams.remove(stream_id)
+    };
+
+    let Some(stream_state) = stream_state else {
+        return;
+    };
+
+    push_playback_done_event(
+        state,
+        stream_state.speaker.clone(),
+        stream_id.to_string(),
+    );
+
+    let speech_text = state.audio_speech_text.lock().unwrap().remove(stream_id);
+    if let Some(text) = &speech_text {
+        push_speech_event(state, stream_state.speaker.clone(), text.clone());
+    }
+
+    let speech_finished_data = serde_json::json!({
+        "stream_id": stream_id,
+        "reason": reason,
+        "speaker": stream_state.speaker,
+        "speech_text": speech_text,
+    });
+
+    if let Err(e) = game::queue_input(
+        &state.game_handle,
+        state.game_id,
+        stream_state.agent_id,
+        "SpeechFinished".to_string(),
+        speech_finished_data,
+    ) {
+        eprintln!(
+            "[audio] Failed to queue SpeechFinished for stream {}: {}",
+            stream_id, e
+        );
+    }
+
+    if let Err(e) = game::queue_input(
+        &state.game_handle,
+        state.game_id,
+        stream_state.agent_id,
+        "AudioEnded".to_string(),
+        serde_json::json!({
+            "stream_id": stream_id,
+            "reason": reason
+        }),
+    ) {
+        eprintln!(
+            "[audio] Failed to queue AudioEnded for stream {}: {}",
+            stream_id, e
+        );
+    }
+}
+
+fn schedule_audio_stream_completion(state: LocalState, stream_id: String, expected_end_at: Instant) {
+    tokio::spawn(async move {
+        tokio::time::sleep_until(tokio::time::Instant::from_std(expected_end_at)).await;
+        complete_audio_stream(&state, &stream_id, "server_predicted_end");
+    });
+}
+
+fn push_speech_event(state: &LocalState, speaker: String, text: String) {
+    let event = {
+        let mut log = state.speech_log.lock().unwrap();
+        let seq = log.0;
+        log.0 += 1;
+        let event = SpeechEvent { speaker, text, seq };
+        log.1.push_back(event.clone());
+        while log.1.len() > 100 {
+            log.1.pop_front();
+        }
+        event
+    };
+    let _ = state.speech_tx.send(event);
+}
+
+fn push_playback_done_event(state: &LocalState, speaker: String, stream_id: String) {
+    let seq = {
+        let mut seq = state.playback_done_seq.lock().unwrap();
+        let next = *seq;
+        *seq += 1;
+        next
+    };
+    let _ = state.playback_done_tx.send(PlaybackDoneEvent {
+        speaker,
+        stream_id,
+        seq,
+    });
+}
+
+fn prune_stale_audio_streams(state: &LocalState, now: Instant) {
+    let mut stale_stream_ids = Vec::new();
+    {
+        let mut streams = state.audio_streams.lock().unwrap();
+        streams.retain(|stream_id, stream| {
+            let keep = now.duration_since(stream.last_seen) < Duration::from_secs(AUDIO_STREAM_TTL_SECS);
+            if !keep {
+                stale_stream_ids.push(stream_id.clone());
+            }
+            keep
+        });
+    }
+
+    if !stale_stream_ids.is_empty() {
+        let mut speech_texts = state.audio_speech_text.lock().unwrap();
+        for stream_id in stale_stream_ids {
+            speech_texts.remove(&stream_id);
+        }
+    }
 }
 
 /// Check if the game instance is halted due to a Lua error.
@@ -1802,6 +1973,14 @@ struct AudioChunkRequest {
     done: bool,
     #[serde(default)]
     speech_text: Option<String>,
+    #[serde(default)]
+    sample_rate_hz: Option<u32>,
+    #[serde(default)]
+    channels: Option<u16>,
+    #[serde(default)]
+    bytes_per_sample: Option<u16>,
+    #[serde(default)]
+    playback_speed: Option<f32>,
 }
 
 async fn local_audio(
@@ -1811,13 +1990,66 @@ async fn local_audio(
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
     let (agent_id, name) = get_session(&state, &headers)?;
     let stream_id = body.stream_id.clone();
+    let chunk_bytes = base64_decoded_len(&body.data).ok_or((
+        axum::http::StatusCode::BAD_REQUEST,
+        "Invalid base64 PCM chunk".to_string(),
+    ))? as u64;
 
-    // Track stream_id -> agent_id mapping (prune entries older than 120s)
+    let sample_rate_hz = body.sample_rate_hz.unwrap_or(DEFAULT_SAMPLE_RATE_HZ).max(1);
+    let channels = body.channels.unwrap_or(DEFAULT_CHANNELS).max(1);
+    let bytes_per_sample = body
+        .bytes_per_sample
+        .unwrap_or(DEFAULT_BYTES_PER_SAMPLE)
+        .max(1);
+    let playback_speed = body.playback_speed.unwrap_or(1.0).max(0.01);
+    let mut schedule: Option<Instant> = None;
+
+    // Track stream lifecycle metadata and prune stale entries.
     {
-        let mut streams = state.audio_streams.lock().unwrap();
         let now = Instant::now();
-        streams.retain(|_, (_, ts)| now.duration_since(*ts) < Duration::from_secs(120));
-        streams.insert(stream_id.clone(), (agent_id, now));
+        prune_stale_audio_streams(&state, now);
+
+        let mut streams = state.audio_streams.lock().unwrap();
+        let stream = streams
+            .entry(stream_id.clone())
+            .or_insert_with(|| AudioStreamState {
+                agent_id,
+                speaker: name.clone(),
+                last_seen: now,
+                total_audio_bytes: 0,
+                done_received: false,
+                done_at: None,
+                expected_end_at: None,
+                completion_scheduled: false,
+                sample_rate_hz,
+                channels,
+                bytes_per_sample,
+                playback_speed,
+            });
+        stream.last_seen = now;
+        stream.total_audio_bytes = stream.total_audio_bytes.saturating_add(chunk_bytes);
+        stream.sample_rate_hz = sample_rate_hz;
+        stream.channels = channels;
+        stream.bytes_per_sample = bytes_per_sample;
+        stream.playback_speed = playback_speed;
+
+        if body.done && !stream.done_received {
+            stream.done_received = true;
+            stream.done_at = Some(now);
+            let duration_secs = compute_stream_duration_secs(stream);
+            let duration = Duration::from_secs_f64(duration_secs.max(0.0));
+            let expected_end_at = now + duration;
+            stream.expected_end_at = Some(expected_end_at);
+
+            if !stream.completion_scheduled {
+                stream.completion_scheduled = true;
+                schedule = Some(expected_end_at);
+            }
+        }
+    }
+
+    if let Some(expected_end_at) = schedule {
+        schedule_audio_stream_completion(state.clone(), stream_id.clone(), expected_end_at);
     }
 
     // Store speech text if provided (typically on the done=true chunk)
@@ -1829,55 +2061,13 @@ async fn local_audio(
             .insert(stream_id.clone(), text.clone());
     }
 
-    let is_done = body.done;
     let _ = state.audio_tx.send(AudioChunk {
-        speaker: name.clone(),
+        speaker: name,
         stream_id: stream_id.clone(),
         seq: body.seq,
         data: body.data,
         done: body.done,
     });
-
-    // Zero-frontends fast-path: if done and no spectate WS connections,
-    // auto-complete the AudioEnded since no frontend will send audio_done
-    if is_done && state.spectate_ws_count.load(Ordering::Relaxed) == 0 {
-        eprintln!(
-            "[audio] No frontends connected, auto-completing stream {}",
-            stream_id
-        );
-        // Broadcast speech text if available
-        if let Some(text) = state.audio_speech_text.lock().unwrap().remove(&stream_id) {
-            let seq = {
-                let mut log = state.speech_log.lock().unwrap();
-                let seq = log.0;
-                log.0 += 1;
-                let event = SpeechEvent {
-                    speaker: name.clone(),
-                    text,
-                    seq,
-                };
-                log.1.push_back(event.clone());
-                while log.1.len() > 100 {
-                    log.1.pop_front();
-                }
-                let _ = state.speech_tx.send(event);
-                seq
-            };
-            let _ = seq;
-        }
-        if let Err(e) = game::queue_input(
-            &state.game_handle,
-            state.game_id,
-            agent_id,
-            "AudioEnded".to_string(),
-            serde_json::json!({ "stream_id": stream_id }),
-        ) {
-            eprintln!(
-                "[audio] Failed to queue AudioEnded for stream {}: {}",
-                stream_id, e
-            );
-        }
-    }
 
     Ok(axum::http::StatusCode::OK)
 }
@@ -2097,20 +2287,11 @@ async fn local_spectate_ws(
     ws.on_upgrade(move |socket| handle_spectate_ws(socket, state))
 }
 
-struct WsCountGuard(Arc<AtomicU32>);
-impl Drop for WsCountGuard {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
-    }
-}
-
 async fn handle_spectate_ws(socket: WebSocket, state: LocalState) {
-    state.spectate_ws_count.fetch_add(1, Ordering::Relaxed);
-    let _guard = WsCountGuard(state.spectate_ws_count.clone());
-
     let (mut sender, mut receiver) = socket.split();
     let mut audio_rx = state.audio_tx.subscribe();
     let mut speech_rx = state.speech_tx.subscribe();
+    let mut playback_done_rx = state.playback_done_tx.subscribe();
 
     let mut tick_interval = interval(Duration::from_millis(33));
     let mut last_tick: u64 = 0;
@@ -2126,49 +2307,7 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState) {
                             break;
                         }
                     }
-                    Some(Ok(Message::Text(text))) => {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-                            if parsed.get("type").and_then(|v| v.as_str()) == Some("audio_done") {
-                                if let Some(stream_id) = parsed.get("stream_id").and_then(|v| v.as_str()) {
-                                    let agent_id = state.audio_streams.lock().unwrap()
-                                        .get(stream_id).map(|(id, _)| *id);
-                                    if let Some(agent_id) = agent_id {
-                                        // Broadcast speech text if available
-                                        if let Some(speech_text) = state.audio_speech_text.lock().unwrap().remove(stream_id) {
-                                            let speaker = state.sessions.iter()
-                                                .find(|r| r.value().0 == agent_id)
-                                                .map(|r| r.value().1.clone())
-                                                .unwrap_or_default();
-                                            let mut log = state.speech_log.lock().unwrap();
-                                            let seq = log.0;
-                                            log.0 += 1;
-                                            let event = SpeechEvent {
-                                                speaker,
-                                                text: speech_text,
-                                                seq,
-                                            };
-                                            log.1.push_back(event.clone());
-                                            while log.1.len() > 100 {
-                                                log.1.pop_front();
-                                            }
-                                            let _ = state.speech_tx.send(event);
-                                        }
-                                        if let Err(e) = game::queue_input(
-                                            &state.game_handle,
-                                            state.game_id,
-                                            agent_id,
-                                            "AudioEnded".to_string(),
-                                            serde_json::json!({ "stream_id": stream_id }),
-                                        ) {
-                                            eprintln!("[audio_done] Failed to queue AudioEnded for stream {}: {}", stream_id, e);
-                                        }
-                                    } else {
-                                        eprintln!("[audio_done] Unknown stream_id: {}, no agent mapping found", stream_id);
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    Some(Ok(Message::Text(_))) => {}
                     _ => {}
                 }
             }
@@ -2196,6 +2335,20 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState) {
                         "speaker": speech.speaker,
                         "text": speech.text,
                         "seq": speech.seq,
+                    })).unwrap_or_default();
+                    if sender.send(Message::Text(json.into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+
+            playback_done = playback_done_rx.recv() => {
+                if let Ok(event) = playback_done {
+                    let json = serde_json::to_string(&serde_json::json!({
+                        "type": "playback_done",
+                        "speaker": event.speaker,
+                        "stream_id": event.stream_id,
+                        "seq": event.seq,
                     })).unwrap_or_default();
                     if sender.send(Message::Text(json.into())).await.is_err() {
                         break;
