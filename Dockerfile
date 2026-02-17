@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y pkg-config libssl-dev g++ && rm -rf /va
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY docs ./docs
+COPY frontend_runtime ./frontend_runtime
 RUN cargo build --release
 
 FROM debian:trixie-slim
