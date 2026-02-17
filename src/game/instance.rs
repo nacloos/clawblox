@@ -714,7 +714,7 @@ impl GameInstance {
                         part_data.anchored,
                         part_data.can_collide,
                         part_data.shape,
-                        Some(part_data.current_physical_properties()),
+                        Some(part_data.effective_physical_properties()),
                     );
 
                     // Apply initial velocity for dynamic parts
@@ -801,7 +801,7 @@ impl GameInstance {
                     if part_data.custom_physical_properties_dirty {
                         self.physics.set_physical_properties(
                             lua_id,
-                            Some(part_data.current_physical_properties()),
+                            Some(part_data.effective_physical_properties()),
                         );
                         part_data.custom_physical_properties_dirty = false;
                     }

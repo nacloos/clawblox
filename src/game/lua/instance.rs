@@ -140,6 +140,7 @@ pub struct PartData {
     pub bottom_surface: String,
     pub velocity: Vector3,
     pub angular_velocity: Vector3,
+    pub massless: bool,
     pub custom_physical_properties: Option<PhysicalProperties>,
     pub custom_physical_properties_dirty: bool,
     pub shape: PartType,
@@ -173,6 +174,7 @@ impl Default for PartData {
             bottom_surface: "Smooth".to_string(),
             velocity: Vector3::zero(),
             angular_velocity: Vector3::zero(),
+            massless: false,
             custom_physical_properties: None,
             custom_physical_properties_dirty: false,
             shape: PartType::Block,
@@ -221,6 +223,14 @@ impl PartData {
                 1.0,
             )
         })
+    }
+
+    pub fn effective_physical_properties(&self) -> PhysicalProperties {
+        let mut props = self.current_physical_properties();
+        if self.massless {
+            props.density = 0.0;
+        }
+        props
     }
 }
 
@@ -1677,6 +1687,18 @@ impl UserData for Instance {
             if let Some(part) = &mut data.part_data {
                 part.can_collide = can_collide;
                 part.can_collide_dirty = true;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("Massless", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.part_data.as_ref().map(|p| p.massless))
+        });
+        fields.add_field_method_set("Massless", |_, this, massless: bool| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(part) = &mut data.part_data {
+                part.massless = massless;
+                part.custom_physical_properties_dirty = true;
             }
             Ok(())
         });
@@ -3637,7 +3659,7 @@ impl UserData for Instance {
                 ));
             };
 
-            let density = part.current_physical_properties().density;
+            let density = part.effective_physical_properties().density;
 
             let sx = part.size.x.max(0.0);
             let sy = part.size.y.max(0.0);

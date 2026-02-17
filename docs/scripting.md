@@ -188,6 +188,7 @@ Base class for all physical parts. Inherits from Instance.
 | `Velocity` | Vector3 | (0,0,0) | Linear velocity |
 | `AssemblyLinearVelocity` | Vector3 | (0,0,0) | Assembly velocity |
 | `AssemblyAngularVelocity` | Vector3 | (0,0,0) | Assembly angular velocity |
+| `Massless` | bool | false | If true, part contributes zero mass |
 | `CustomPhysicalProperties` | PhysicalProperties? | nil | Optional override for density/friction/elasticity |
 
 #### Events

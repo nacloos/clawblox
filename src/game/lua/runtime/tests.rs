@@ -2103,6 +2103,45 @@ fn test_part_get_mass_exists_and_returns_positive_for_nonzero_part() {
 }
 
 #[test]
+fn test_part_massless_property_and_get_mass_parity() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local p = Instance.new("Part")
+            p.Size = Vector3.new(4, 2, 6)
+
+            _G.massDefault = p:GetMass()
+            _G.masslessDefault = p.Massless
+
+            p.Massless = true
+            _G.masslessAfterTrue = p.Massless
+            _G.massWhenMassless = p:GetMass()
+
+            p.Massless = false
+            _G.masslessAfterFalse = p.Massless
+            _G.massAfterFalse = p:GetMass()
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let mass_default: f64 = globals.get("massDefault").unwrap();
+    let massless_default: bool = globals.get("masslessDefault").unwrap();
+    let massless_after_true: bool = globals.get("masslessAfterTrue").unwrap();
+    let mass_when_massless: f64 = globals.get("massWhenMassless").unwrap();
+    let massless_after_false: bool = globals.get("masslessAfterFalse").unwrap();
+    let mass_after_false: f64 = globals.get("massAfterFalse").unwrap();
+
+    assert!(!massless_default, "Massless should default to false");
+    assert!(mass_default > 0.0);
+    assert!(massless_after_true);
+    assert!(mass_when_massless.abs() < 1e-6);
+    assert!(!massless_after_false);
+    assert!(mass_after_false > 0.0);
+}
+
+#[test]
 fn test_brickcolor_and_surfacetype_parity_basics() {
     let mut runtime = test_runtime();
     runtime
