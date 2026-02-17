@@ -3,23 +3,27 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Query, State,
+        Path as AxumPath, Query, State,
     },
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use dashmap::DashMap;
 use flate2::{write::GzEncoder, Compression};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::process::Command;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::broadcast;
 use tokio::time::interval;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
@@ -30,14 +34,43 @@ use libc;
 use include_dir::{include_dir, Dir};
 use tower_http::services::ServeDir;
 
-use clawblox::config::WorldConfig;
-use clawblox::game::{
-    self, find_or_create_instance,
-    instance::{ErrorMode, PlayerObservation, SpectatorObservation},
-    GameManager, GameManagerHandle,
+use clawblox::{
+    db,
+    game::{
+        constants::audio::{
+            DEFAULT_BYTES_PER_SAMPLE, DEFAULT_CHANNELS, DEFAULT_PLAYBACK_SPEED,
+            DEFAULT_SAMPLE_RATE_HZ, MIN_PLAYBACK_SPEED, MIN_POSITIVE_U16, MIN_POSITIVE_U32,
+            SERVER_PREDICTED_END_REASON, STREAM_TTL_SECS,
+        },
+        self,
+        async_bridge::AsyncBridge,
+        find_or_create_instance,
+        instance::{ErrorMode, PlayerObservation, SpectatorObservation},
+        script_bundle::load_world_and_entry_script,
+        GameManager, GameManagerHandle,
+    },
 };
 
 static DOCS_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/docs");
+static LOCAL_RUNTIME_UI_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/frontend_runtime/dist");
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum LocalDatastore {
+    Sqlite,
+    Postgres,
+    #[value(name = "none")]
+    NoDb,
+}
+
+impl LocalDatastore {
+    fn as_arg(self) -> &'static str {
+        match self {
+            Self::Sqlite => "sqlite",
+            Self::Postgres => "postgres",
+            Self::NoDb => "none",
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "clawblox")]
@@ -54,7 +87,7 @@ enum Commands {
         /// Name for the new project (creates subdirectory). Omit to init in current directory.
         name: Option<String>,
     },
-    /// Run a game locally without database
+    /// Run a game locally
     Run {
         /// Path to game directory (default: current directory)
         #[arg(default_value = ".")]
@@ -65,6 +98,27 @@ enum Commands {
         /// Run as daemon (internal use only)
         #[arg(long, hide = true)]
         daemon: bool,
+        /// Datastore backend for local DataStoreService
+        #[arg(long, value_enum, default_value_t = LocalDatastore::Sqlite)]
+        datastore: LocalDatastore,
+    },
+    /// Start a game locally in background (daemon mode)
+    Start {
+        /// Path to game directory (default: current directory)
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Port to run the server on
+        #[arg(short, long, default_value = "8080")]
+        port: u16,
+        /// Datastore backend for local DataStoreService
+        #[arg(long, value_enum, default_value_t = LocalDatastore::Sqlite)]
+        datastore: LocalDatastore,
+    },
+    /// Stop a background game server started with `clawblox start`
+    Stop {
+        /// Port of the server to stop
+        #[arg(short, long, default_value = "8080")]
+        port: u16,
     },
     /// Log in or register an account on clawblox.com
     Login {
@@ -96,7 +150,11 @@ enum Commands {
         target: String,
     },
     /// Fetch latest engine docs from GitHub into ./docs/
-    Docs,
+    Docs {
+        /// Use only bundled local docs (skip GitHub fetch)
+        #[arg(long)]
+        local: bool,
+    },
 }
 
 fn main() {
@@ -104,7 +162,18 @@ fn main() {
 
     match cli.command {
         Commands::Init { name } => init_project(name),
-        Commands::Run { path, port, daemon } => run_game(path, port, daemon),
+        Commands::Run {
+            path,
+            port,
+            daemon,
+            datastore,
+        } => run_game(path, port, daemon, datastore),
+        Commands::Start {
+            path,
+            port,
+            datastore,
+        } => start_game(path, port, datastore),
+        Commands::Stop { port } => stop_game(port),
         Commands::Login {
             name,
             api_key,
@@ -116,7 +185,7 @@ fn main() {
             server,
         } => deploy_game(path, api_key, server),
         Commands::Install { target: _ } => install_cli(),
-        Commands::Docs => fetch_docs(),
+        Commands::Docs { local } => fetch_docs(local),
     }
 }
 
@@ -168,7 +237,11 @@ fn install_cli() {
         let home = home::home_dir().expect("Failed to get home directory");
 
         // Install to ~/.local/share/clawblox/versions/X.X.X
-        let versions_dir = home.join(".local").join("share").join("clawblox").join("versions");
+        let versions_dir = home
+            .join(".local")
+            .join("share")
+            .join("clawblox")
+            .join("versions");
         std::fs::create_dir_all(&versions_dir).expect("Failed to create versions directory");
         let version_path = versions_dir.join(format!("{}.exe", version));
         std::fs::copy(&current_exe, &version_path).expect("Failed to copy binary");
@@ -205,10 +278,19 @@ fn install_cli() {
 // Docs Command
 // =============================================================================
 
-fn fetch_docs() {
+fn fetch_docs(local: bool) {
     let docs_dir = std::env::current_dir()
         .expect("Failed to get current directory")
         .join("docs");
+
+    if local {
+        write_embedded_dir(&DOCS_DIR, &docs_dir);
+        println!(
+            "Docs written from bundled local copy to {}",
+            docs_dir.display()
+        );
+        return;
+    }
 
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
     match rt.block_on(fetch_docs_from_github(&docs_dir)) {
@@ -236,8 +318,7 @@ fn write_embedded_dir(dir: &Dir, target: &Path) {
     }
 }
 
-const GITHUB_DOCS_API_URL: &str =
-    "https://api.github.com/repos/nacloos/clawblox/contents/docs";
+const GITHUB_DOCS_API_URL: &str = "https://api.github.com/repos/nacloos/clawblox/contents/docs";
 
 /// Fetch docs from GitHub and write them to `target_dir`.
 /// Returns Ok(()) on success, Err with description on any failure.
@@ -342,10 +423,21 @@ game_type = "lua"
 [scripts]
 main = "main.lua"
 skill = "SKILL.md"
+
+[renderer]
+name = "Default Game Renderer"
+mode = "module"
+api_version = 1
+entry = "index.js"
+capabilities = []
+
+[observation]
+radius = 100
 "#,
         project_name, project_name
     );
-    std::fs::write(project_dir.join("world.toml"), world_toml).expect("Failed to create world.toml");
+    std::fs::write(project_dir.join("world.toml"), world_toml)
+        .expect("Failed to create world.toml");
 
     // Create main.lua
     let main_lua = r#"-- Game entry point
@@ -487,15 +579,122 @@ Move to a position on the map.
         match rt.block_on(fetch_docs_from_github(&docs_dir)) {
             Ok(()) => {}
             Err(e) => {
-                eprintln!("Warning: Could not fetch docs from GitHub ({}), using bundled copy", e);
+                eprintln!(
+                    "Warning: Could not fetch docs from GitHub ({}), using bundled copy",
+                    e
+                );
                 write_embedded_dir(&DOCS_DIR, &docs_dir);
             }
         }
     }
 
     // Create assets/ directory for game assets (GLB models, images, audio)
-    std::fs::create_dir_all(project_dir.join("assets"))
-        .expect("Failed to create assets directory");
+    std::fs::create_dir_all(project_dir.join("assets")).expect("Failed to create assets directory");
+
+    // Create renderer/ directory for game-specific frontend modules
+    let renderer_dir = project_dir.join("renderer");
+    std::fs::create_dir_all(&renderer_dir).expect("Failed to create renderer directory");
+    let renderer_js = r#"import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js'
+
+export function createRenderer(ctx) {
+  const scene = new THREE.Scene()
+  scene.background = new THREE.Color(0x0b1020)
+
+  const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 500)
+  const webgl = new THREE.WebGLRenderer({ canvas: ctx.canvas, antialias: true })
+  webgl.shadowMap.enabled = true
+  webgl.shadowMap.type = THREE.PCFSoftShadowMap
+
+  const ambient = new THREE.AmbientLight(0xffffff, 0.7)
+  const dir = new THREE.DirectionalLight(0xffffff, 0.9)
+  dir.position.set(20, 30, 10)
+  dir.castShadow = true
+  scene.add(ambient, dir)
+
+  const stateBuffer = ctx.runtime.state.createSnapshotBuffer({
+    maxSnapshots: 12,
+    interpolationDelayMs: 90,
+  })
+  const cameraModes = ctx.runtime.three.createCameraModeController(THREE, camera, {
+    follow: { followDistance: 9, followHeight: 2, shoulderOffset: 1.0 },
+    firstPersonHeight: 1.7,
+  })
+
+  const presetLib = ctx.runtime.three.createPresetMaterialLibrary({
+    'example/floor': { roughness: 0.85, metalness: 0.1 },
+    'example/wall': { roughness: 0.7, metalness: 0.2 },
+    'example/spawn': { roughness: 0.2, metalness: 0.25, emissiveIntensity: 0.5 },
+  })
+
+  const entities = ctx.runtime.three.createEntityStore(scene)
+  const tmpForward = new THREE.Vector3(0, 0, 1)
+  let inputBinding = null
+  let inputClient = null
+  let localControlPlayer = null
+
+  return {
+    mount() {
+      // Optional local control bridge for quick prototyping:
+      // W -> MoveTo ahead, Space -> Jump
+      inputClient = ctx.runtime.input.createLocalInputClient({ playerName: 'renderer-local' })
+      inputBinding = ctx.runtime.input.bindKeyboardActions(inputClient, {
+        Space: { mode: 'tap', type: 'Jump', data: {} },
+      })
+    },
+
+    onResize({ width, height }) {
+      camera.aspect = width / Math.max(1, height)
+      camera.updateProjectionMatrix()
+      webgl.setSize(width, height, false)
+    },
+
+    onState(state) {
+      stateBuffer.push(state)
+      const obs = stateBuffer.interpolated() || state
+      const activeIds = new Set()
+
+      for (const entity of obs.entities || []) {
+        activeIds.add(entity.id)
+        entities.upsert(
+          entity,
+          (next) => ctx.runtime.three.buildEntityMesh(THREE, next, presetLib),
+          (mesh, next) => ctx.runtime.three.applyEntityTransform(THREE, mesh, next),
+        )
+      }
+      entities.prune(activeIds)
+
+      // Follow first available player for now.
+      const target = (obs.players || [])[0]
+      if (target && Array.isArray(target.position)) {
+        const trackState = ctx.runtime.three.classifyAnimationTracks(target)
+        const mode = trackState.reload ? 'spectator' : 'follow'
+        cameraModes.update({
+          mode,
+          targetPosition: new THREE.Vector3(...target.position),
+          targetForward: tmpForward,
+          dt: 1 / 60,
+        })
+
+        // Move local bound player a bit ahead when holding W.
+        // This is intentionally simplistic as a scaffold example.
+        if (inputClient && localControlPlayer !== target.id && inputClient.session()) {
+          localControlPlayer = target.id
+        }
+      }
+
+      webgl.render(scene, camera)
+    },
+
+    unmount() {
+      if (inputBinding) inputBinding.dispose()
+      entities.clear()
+      webgl.dispose()
+    },
+  }
+}
+"#;
+    std::fs::write(renderer_dir.join("index.js"), renderer_js)
+        .expect("Failed to create renderer/index.js");
 
     // Create .gitignore
     let gitignore = ".clawblox/\n.clawblox.log\n";
@@ -584,6 +783,46 @@ fn login(name: Option<String>, api_key: Option<String>, server: String) {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
+
+            // Idempotent login behavior: if name already exists, reuse existing credentials
+            // for this server when possible.
+            if status == reqwest::StatusCode::CONFLICT {
+                if let Some(stored) = load_credentials() {
+                    if stored.server == server {
+                        let me_url = format!("{}/api/v1/agents/me", server);
+                        let me_resp = client
+                            .get(&me_url)
+                            .header("Authorization", format!("Bearer {}", stored.api_key))
+                            .send()
+                            .await;
+
+                        if let Ok(me_resp) = me_resp {
+                            if me_resp.status().is_success() {
+                                let me_body: serde_json::Value =
+                                    me_resp.json().await.unwrap_or_default();
+                                let stored_name =
+                                    me_body["name"].as_str().unwrap_or_default().to_string();
+                                if stored_name == name {
+                                    println!("Already registered as: {}", name);
+                                    println!(
+                                        "Using existing API key from {}",
+                                        credentials_path().display()
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                eprintln!("Registration failed ({}): {}", status, body);
+                eprintln!(
+                    "Name '{}' already exists. Re-run with --api-key or use a different name.",
+                    name
+                );
+                std::process::exit(1);
+            }
+
             eprintln!("Registration failed ({}): {}", status, body);
             std::process::exit(1);
         }
@@ -637,34 +876,23 @@ fn deploy_game(path: PathBuf, api_key_override: Option<String>, server_override:
         .or_else(|| stored.as_ref().map(|c| c.server.clone()))
         .unwrap_or_else(|| "https://clawblox.com".to_string());
 
-    // Load world config
-    let config = WorldConfig::from_game_dir(&path).unwrap_or_else(|e| {
-        eprintln!("Error loading world.toml: {}", e);
-        std::process::exit(1);
-    });
-
-    // Read Lua script
-    let script_path = path.join(&config.scripts.main);
-    let script_code = std::fs::read_to_string(&script_path).unwrap_or_else(|e| {
-        eprintln!("Error reading {}: {}", script_path.display(), e);
+    // Load world config + bundled runtime script (main.lua + optional scripts/ tree)
+    let (config, script_code) = load_world_and_entry_script(&path).unwrap_or_else(|e| {
+        eprintln!("{}", e);
         std::process::exit(1);
     });
 
     // Read SKILL.md if configured
-    let skill_md = config
-        .scripts
-        .skill
-        .as_ref()
-        .and_then(|skill_file| {
-            let p = path.join(skill_file);
-            match std::fs::read_to_string(&p) {
-                Ok(content) => Some(content),
-                Err(e) => {
-                    eprintln!("Warning: Could not read {}: {}", p.display(), e);
-                    None
-                }
+    let skill_md = config.scripts.skill.as_ref().and_then(|skill_file| {
+        let p = path.join(skill_file);
+        match std::fs::read_to_string(&p) {
+            Ok(content) => Some(content),
+            Err(e) => {
+                eprintln!("Warning: Could not read {}: {}", p.display(), e);
+                None
             }
-        });
+        }
+    });
 
     // Check for existing game_id
     let game_id_path = path.join(".clawblox/game_id");
@@ -690,6 +918,7 @@ fn deploy_game(path: PathBuf, api_key_override: Option<String>, server_override:
                     "script_code": script_code,
                     "skill_md": skill_md,
                     "max_players": config.max_players as i32,
+                    "observation_radius": config.observation.radius,
                 }))
                 .send()
                 .await
@@ -720,6 +949,7 @@ fn deploy_game(path: PathBuf, api_key_override: Option<String>, server_override:
                     "script_code": script_code,
                     "skill_md": skill_md,
                     "max_players": config.max_players as i32,
+                    "observation_radius": config.observation.radius,
                 }))
                 .send()
                 .await
@@ -763,10 +993,12 @@ fn deploy_game(path: PathBuf, api_key_override: Option<String>, server_override:
 
                 let enc = GzEncoder::new(Vec::new(), Compression::default());
                 let mut tar_builder = tar::Builder::new(enc);
-                tar_builder.append_dir_all(".", &assets_dir).unwrap_or_else(|e| {
-                    eprintln!("Error creating asset archive: {}", e);
-                    std::process::exit(1);
-                });
+                tar_builder
+                    .append_dir_all(".", &assets_dir)
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error creating asset archive: {}", e);
+                        std::process::exit(1);
+                    });
                 let enc = tar_builder.into_inner().unwrap_or_else(|e| {
                     eprintln!("Error finalizing tar: {}", e);
                     std::process::exit(1);
@@ -926,59 +1158,221 @@ fn write_pid_file_for(path: &Path, pid: u32) {
     let _ = std::fs::write(path, pid.to_string());
 }
 
-fn run_game(path: PathBuf, port: u16, daemon: bool) {
+#[derive(Debug, Clone, Serialize)]
+struct LocalRendererManifest {
+    schema_version: u32,
+    api_version: u32,
+    name: String,
+    mode: String,
+    entry_url: Option<String>,
+    capabilities: Vec<String>,
+}
+
+fn sanitize_renderer_entry(raw: &str) -> Option<String> {
+    let normalized = raw.replace('\\', "/");
+    if normalized.is_empty() || normalized.starts_with('/') {
+        return None;
+    }
+    if normalized
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return None;
+    }
+    Some(normalized)
+}
+
+fn build_local_renderer_manifest(
+    game_dir: &Path,
+    config: &clawblox::config::RendererConfig,
+    entry_override: Option<&str>,
+) -> LocalRendererManifest {
+    let entry_candidate = entry_override.or(config.entry.as_deref());
+    let entry_url = entry_candidate
+        .and_then(sanitize_renderer_entry)
+        .and_then(|entry| {
+            let local_path = game_dir.join("renderer").join(&entry);
+            if local_path.is_file() {
+                Some(format!("/renderer-files/{}", entry))
+            } else {
+                eprintln!(
+                    "Warning: renderer entry '{}' not found at {}. Falling back to embedded default renderer.",
+                    entry,
+                    local_path.display()
+                );
+                None
+            }
+        });
+
+    LocalRendererManifest {
+        schema_version: 1,
+        api_version: config.api_version,
+        name: config.name.clone(),
+        mode: config.mode.clone(),
+        entry_url,
+        capabilities: config.capabilities.clone(),
+    }
+}
+
+fn is_renderer_source_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".ts")
+        || lower.ends_with(".tsx")
+        || lower.ends_with(".js")
+        || lower.ends_with(".jsx")
+        || lower.ends_with(".mjs")
+        || lower.ends_with(".cjs")
+}
+
+fn detect_renderer_source_entry(game_dir: &Path) -> Option<String> {
+    let candidates = [
+        "src/index.ts",
+        "src/index.tsx",
+        "src/index.js",
+        "src/index.jsx",
+        "index.ts",
+        "index.tsx",
+        "index.js",
+        "index.jsx",
+    ];
+    for c in candidates {
+        let p = game_dir.join("renderer").join(c);
+        if p.is_file() {
+            return Some(c.to_string());
+        }
+    }
+    None
+}
+
+fn command_exists(bin: &str) -> bool {
+    Command::new(bin).arg("--version").output().is_ok()
+}
+
+fn bundle_renderer_with_esbuild(
+    game_dir: &Path,
+    source_rel: &str,
+    out_rel: &str,
+) -> Result<(), String> {
+    let renderer_dir = game_dir.join("renderer");
+    let source = renderer_dir.join(source_rel);
+    let out = renderer_dir.join(out_rel);
+
+    let out_parent = out
+        .parent()
+        .ok_or_else(|| format!("Invalid renderer bundle output path: {}", out.display()))?;
+    std::fs::create_dir_all(out_parent).map_err(|e| {
+        format!(
+            "Failed to create renderer build dir {}: {}",
+            out_parent.display(),
+            e
+        )
+    })?;
+
+    let mut cmd = if command_exists("esbuild") {
+        let mut c = Command::new("esbuild");
+        c.arg(source.as_os_str());
+        c
+    } else if command_exists("npx") {
+        let mut c = Command::new("npx");
+        c.args(["--yes", "esbuild"]);
+        c.arg(source.as_os_str());
+        c
+    } else {
+        return Err(
+            "Could not find esbuild or npx in PATH. Install esbuild (npm i -D esbuild) or Node.js."
+                .to_string(),
+        );
+    };
+
+    let output = cmd
+        .current_dir(game_dir)
+        .args([
+            "--bundle",
+            "--format=esm",
+            "--platform=browser",
+            "--target=es2020",
+            "--sourcemap",
+            "--log-level=warning",
+        ])
+        .arg(format!("--outfile={}", out.display()))
+        .output()
+        .map_err(|e| format!("Failed to spawn esbuild: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!(
+            "esbuild failed bundling {} -> {}.\nstdout:\n{}\nstderr:\n{}",
+            source.display(),
+            out.display(),
+            stdout,
+            stderr
+        ));
+    }
+
+    Ok(())
+}
+
+fn maybe_bundle_renderer_entry(
+    game_dir: &Path,
+    config: &clawblox::config::RendererConfig,
+) -> Option<String> {
+    if config.mode != "module" {
+        return None;
+    }
+
+    let source_rel = config
+        .source
+        .as_deref()
+        .and_then(sanitize_renderer_entry)
+        .or_else(|| {
+            config
+                .entry
+                .as_deref()
+                .and_then(sanitize_renderer_entry)
+                .filter(|entry| is_renderer_source_path(entry))
+        })
+        .or_else(|| detect_renderer_source_entry(game_dir));
+
+    let Some(source_rel) = source_rel else {
+        return None;
+    };
+
+    let source_path = game_dir.join("renderer").join(&source_rel);
+    if !source_path.is_file() {
+        return None;
+    }
+
+    let bundle_rel = "dist/renderer.bundle.js";
+    match bundle_renderer_with_esbuild(game_dir, &source_rel, bundle_rel) {
+        Ok(()) => {
+            println!(
+                "Renderer bundle: renderer/{} -> renderer/{}",
+                source_rel, bundle_rel
+            );
+            Some(bundle_rel.to_string())
+        }
+        Err(e) => {
+            eprintln!("Warning: renderer bundle skipped: {}", e);
+            None
+        }
+    }
+}
+
+fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
     let path = std::fs::canonicalize(&path).unwrap_or_else(|_| {
         eprintln!("Error: Path '{}' does not exist", path.display());
         std::process::exit(1);
     });
 
-    if !daemon {
-        // Non-daemon mode: kill old instance, spawn child daemon, return immediately
-        kill_previous_instance(port);
-
-        let log_file_path = path.join(".clawblox.log");
-        let log_file = std::fs::File::create(&log_file_path).unwrap_or_else(|e| {
-            eprintln!("Error creating log file {}: {}", log_file_path.display(), e);
-            std::process::exit(1);
-        });
-        let log_file_stderr = log_file.try_clone().unwrap_or_else(|e| {
-            eprintln!("Error cloning log file handle: {}", e);
-            std::process::exit(1);
-        });
-
-        let exe = std::env::current_exe().expect("Failed to get current executable path");
-        let child = std::process::Command::new(exe)
-            .args(["run", &path.to_string_lossy(), "--port", &port.to_string(), "--daemon"])
-            .stdout(log_file)
-            .stderr(log_file_stderr)
-            .stdin(std::process::Stdio::null())
-            .spawn()
-            .unwrap_or_else(|e| {
-                eprintln!("Error spawning daemon: {}", e);
-                std::process::exit(1);
-            });
-
-        // Write the child PID to the PID file
+    if daemon {
         let pid_file = pid_path(port);
-        write_pid_file_for(&pid_file, child.id());
-
-        println!("Server starting on http://localhost:{}", port);
-        println!("Logs: {}", log_file_path.display());
-        return;
+        write_pid_file_for(&pid_file, std::process::id());
     }
 
-    // Daemon mode: run the server (parent already killed old instance and wrote PID file)
-
-    // Load world config
-    let config = WorldConfig::from_game_dir(&path).unwrap_or_else(|e| {
-        eprintln!("Error loading world.toml: {}", e);
-        std::process::exit(1);
-    });
-
-    // Load the Lua script
-    let script_path = path.join(&config.scripts.main);
-    let script = std::fs::read_to_string(&script_path).unwrap_or_else(|e| {
-        eprintln!("Error loading {}: {}", script_path.display(), e);
+    // Load world config + bundled runtime script (main.lua + optional scripts/ tree)
+    let (config, script) = load_world_and_entry_script(&path).unwrap_or_else(|e| {
+        eprintln!("{}", e);
         std::process::exit(1);
     });
 
@@ -988,20 +1382,79 @@ fn run_game(path: PathBuf, port: u16, daemon: bool) {
         .skill
         .as_ref()
         .and_then(|skill_file| std::fs::read_to_string(path.join(skill_file)).ok());
+    let bundled_entry = maybe_bundle_renderer_entry(&path, &config.renderer);
+    let renderer_manifest =
+        build_local_renderer_manifest(&path, &config.renderer, bundled_entry.as_deref());
 
     let pid_file = pid_path(port);
 
-    println!("Starting {} (max {} players)", config.name, config.max_players);
+    println!(
+        "Starting {} (max {} players)",
+        config.name, config.max_players
+    );
     println!("Script: {}", config.scripts.main);
+    if let Some(tree) = &config.scripts.tree {
+        println!("Script tree: {}", tree);
+    } else if path.join("scripts").is_dir() {
+        println!("Script tree: scripts (auto-detected)");
+    }
 
-    // Create game manager without database (Halt mode: stop on first Lua error)
-    let (game_manager, game_handle) = GameManager::new_without_db(60, ErrorMode::Halt);
+    // Create game manager with selected datastore backend.
+    // Local run keeps GC disabled regardless of datastore mode.
+    let (game_manager, game_handle) = match datastore {
+        LocalDatastore::NoDb => {
+            println!("Datastore: none (DataStoreService disabled)");
+            GameManager::new_without_db(60, ErrorMode::Halt)
+        }
+        LocalDatastore::Postgres => {
+            println!("Datastore: postgres (via DATABASE_URL)");
+            let pool = tokio::runtime::Runtime::new()
+                .expect("Failed to create tokio runtime")
+                .block_on(async { db::create_pool().await })
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: failed to connect to postgres: {}", e);
+                    eprintln!("Hint: set DATABASE_URL or use --datastore sqlite");
+                    std::process::exit(1);
+                });
+            let bridge = Arc::new(AsyncBridge::from_postgres(Arc::new(pool)));
+            GameManager::new_with_bridge(60, Some(bridge), ErrorMode::Halt, true)
+        }
+        LocalDatastore::Sqlite => {
+            let db_path = path.join(".clawblox").join("local.db");
+            if let Some(parent) = db_path.parent() {
+                std::fs::create_dir_all(parent).unwrap_or_else(|e| {
+                    eprintln!("Error: failed to create local datastore directory: {}", e);
+                    std::process::exit(1);
+                });
+            }
+            println!("Datastore: sqlite ({})", db_path.display());
+            let pool = tokio::runtime::Runtime::new()
+                .expect("Failed to create tokio runtime")
+                .block_on(async {
+                    let pool = db::create_sqlite_pool(&db_path).await?;
+                    db::ensure_local_datastore_schema(&pool).await?;
+                    Ok::<_, sqlx::Error>(pool)
+                })
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: failed to initialize sqlite datastore: {}", e);
+                    std::process::exit(1);
+                });
+            let bridge = Arc::new(AsyncBridge::from_sqlite(Arc::new(pool)));
+            GameManager::new_with_bridge(60, Some(bridge), ErrorMode::Halt, true)
+        }
+    };
 
     // Use a random game_id for this session
     let game_id = Uuid::new_v4();
 
     // Create the instance
-    let result = find_or_create_instance(&game_handle, game_id, config.max_players, Some(&script));
+    let result = find_or_create_instance(
+        &game_handle,
+        game_id,
+        config.max_players,
+        config.observation.radius,
+        Some(&script),
+    );
     let instance_id = result.instance_id;
     println!("Instance: {}", instance_id);
 
@@ -1013,13 +1466,28 @@ fn run_game(path: PathBuf, port: u16, daemon: bool) {
     // Start HTTP server
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
+        let (audio_tx, _) = broadcast::channel::<AudioChunk>(64);
+        let (speech_tx, _) = broadcast::channel::<SpeechEvent>(64);
+        let (speech_progress_tx, _) = broadcast::channel::<SpeechProgressEvent>(128);
+        let (playback_done_tx, _) = broadcast::channel::<PlaybackDoneEvent>(64);
         let state = LocalState {
             game_id,
             instance_id,
             game_handle,
             skill_md,
+            renderer_manifest,
             sessions: Arc::new(DashMap::new()),
             log_file: path.join(".clawblox.log"),
+            audio_tx,
+            speech_tx,
+            speech_progress_tx,
+            playback_done_tx,
+            playback_done_seq: Arc::new(Mutex::new(0)),
+            speech_seq: Arc::new(Mutex::new(0)),
+            speech_progress_seq: Arc::new(Mutex::new(0)),
+            authoritative_speech_event_cursor: Arc::new(Mutex::new(0)),
+            audio_streams: Arc::new(Mutex::new(HashMap::new())),
+            audio_speech_text: Arc::new(Mutex::new(HashMap::new())),
         };
 
         let cors = CorsLayer::new()
@@ -1028,12 +1496,18 @@ fn run_game(path: PathBuf, port: u16, daemon: bool) {
             .allow_headers(Any);
 
         let app = Router::new()
+            .route("/", get(local_ui_index))
+            .route("/ui", get(local_ui_index))
+            .route("/ui/{*path}", get(local_ui_file))
             .route("/spectate", get(local_spectate))
             .route("/spectate/ws", get(local_spectate_ws))
+            .route("/renderer/manifest", get(local_renderer_manifest))
             .route("/join", post(local_join))
             .route("/input", post(local_input))
             .route("/observe", get(local_observe))
             .route("/skill.md", get(local_skill))
+            .route("/audio", post(local_audio))
+            .nest_service("/renderer-files", ServeDir::new(path.join("renderer")))
             .nest_service("/assets", ServeDir::new(path.join("assets")))
             .nest_service("/static", ServeDir::new(path.join("static")))
             .with_state(state)
@@ -1042,22 +1516,26 @@ fn run_game(path: PathBuf, port: u16, daemon: bool) {
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
         println!();
         println!("Server running on http://localhost:{}", port);
+        println!("Local frontend: http://localhost:{}/", port);
+        if !daemon {
+            println!("Mode: foreground (press Ctrl+C to stop)");
+        }
         println!();
         println!("Endpoints:");
+        println!("  GET  /              - Embedded local frontend");
         println!("  POST /join?name=X  - Join game, returns session token");
         println!("  POST /input        - Send input (requires X-Session header)");
         println!("  GET  /observe      - Player observation (requires X-Session header)");
         println!("  GET  /skill.md     - Game skill definition");
 
-        let listener = tokio::net::TcpListener::bind(addr).await.unwrap_or_else(|e| {
-            delete_pid_file(&pid_file);
-            eprintln!(
-                "Error: Port {} is already in use. Try --port <PORT>",
-                port
-            );
-            eprintln!("Details: {}", e);
-            std::process::exit(1);
-        });
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .unwrap_or_else(|e| {
+                delete_pid_file(&pid_file);
+                eprintln!("Error: Port {} is already in use. Try --port <PORT>", port);
+                eprintln!("Details: {}", e);
+                std::process::exit(1);
+            });
 
         let pid_file_clone = pid_file.clone();
         axum::serve(listener, app)
@@ -1076,9 +1554,143 @@ fn run_game(path: PathBuf, port: u16, daemon: bool) {
     });
 }
 
+fn start_game(path: PathBuf, port: u16, datastore: LocalDatastore) {
+    let path = std::fs::canonicalize(&path).unwrap_or_else(|_| {
+        eprintln!("Error: Path '{}' does not exist", path.display());
+        std::process::exit(1);
+    });
+
+    kill_previous_instance(port);
+
+    let log_file_path = path.join(".clawblox.log");
+    let log_file = std::fs::File::create(&log_file_path).unwrap_or_else(|e| {
+        eprintln!("Error creating log file {}: {}", log_file_path.display(), e);
+        std::process::exit(1);
+    });
+    let log_file_stderr = log_file.try_clone().unwrap_or_else(|e| {
+        eprintln!("Error cloning log file handle: {}", e);
+        std::process::exit(1);
+    });
+
+    let exe = std::env::current_exe().expect("Failed to get current executable path");
+    let child = std::process::Command::new(exe)
+        .args([
+            "run",
+            &path.to_string_lossy(),
+            "--port",
+            &port.to_string(),
+            "--datastore",
+            datastore.as_arg(),
+            "--daemon",
+        ])
+        .stdout(log_file)
+        .stderr(log_file_stderr)
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .unwrap_or_else(|e| {
+            eprintln!("Error spawning daemon: {}", e);
+            std::process::exit(1);
+        });
+
+    // Write the child PID to the PID file
+    let pid_file = pid_path(port);
+    write_pid_file_for(&pid_file, child.id());
+
+    println!("Server starting in background on http://localhost:{}", port);
+    println!("Logs: {}", log_file_path.display());
+}
+
+fn stop_game(port: u16) {
+    let path = pid_path(port);
+
+    let Some(pid) = read_pid_file(&path) else {
+        println!("No running clawblox instance found on port {}", port);
+        return;
+    };
+
+    if !is_process_alive(pid) {
+        delete_pid_file(&path);
+        println!(
+            "No running clawblox instance found on port {} (cleaned stale PID file)",
+            port
+        );
+        return;
+    }
+
+    println!(
+        "Stopping clawblox instance (PID {}) on port {}...",
+        pid, port
+    );
+    kill_process(pid);
+
+    for _ in 0..20 {
+        if !is_process_alive(pid) {
+            delete_pid_file(&path);
+            println!("Stopped.");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    if is_process_alive(pid) {
+        eprintln!("Warning: process {} did not exit in time", pid);
+    } else {
+        delete_pid_file(&path);
+        println!("Stopped.");
+    }
+}
+
 // =============================================================================
 // Local Server State & Handlers
 // =============================================================================
+
+#[derive(Clone, Debug, Serialize)]
+struct AudioChunk {
+    speaker: String,
+    stream_id: String,
+    seq: u32,
+    data: String, // base64 PCM
+    done: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SpeechEvent {
+    speaker: String,
+    text: String,
+    seq: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SpeechProgressEvent {
+    speaker: String,
+    stream_id: String,
+    text: String,
+    seq: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct PlaybackDoneEvent {
+    speaker: String,
+    stream_id: String,
+    seq: u64,
+}
+
+#[derive(Clone, Debug)]
+struct AudioStreamState {
+    agent_id: Uuid,
+    speaker: String,
+    first_seen: Instant,
+    last_seen: Instant,
+    total_audio_bytes: u64,
+    done_received: bool,
+    done_at: Option<Instant>,
+    expected_end_at: Option<Instant>,
+    completion_scheduled: bool,
+    sample_rate_hz: u32,
+    channels: u16,
+    bytes_per_sample: u16,
+    playback_speed: f32,
+}
 
 #[derive(Clone)]
 struct LocalState {
@@ -1086,8 +1698,238 @@ struct LocalState {
     instance_id: Uuid,
     game_handle: GameManagerHandle,
     skill_md: Option<String>,
+    renderer_manifest: LocalRendererManifest,
     sessions: Arc<DashMap<String, (Uuid, String)>>, // token -> (agent_id, name)
     log_file: PathBuf,
+    audio_tx: broadcast::Sender<AudioChunk>,
+    speech_tx: broadcast::Sender<SpeechEvent>,
+    speech_progress_tx: broadcast::Sender<SpeechProgressEvent>,
+    playback_done_tx: broadcast::Sender<PlaybackDoneEvent>,
+    playback_done_seq: Arc<Mutex<u64>>,
+    speech_seq: Arc<Mutex<u64>>,
+    speech_progress_seq: Arc<Mutex<u64>>,
+    authoritative_speech_event_cursor: Arc<Mutex<u64>>,
+    /// Maps stream_id -> stream state for routing and completion semantics.
+    audio_streams: Arc<Mutex<HashMap<String, AudioStreamState>>>,
+    /// Maps stream_id -> speech text for broadcasting on AudioEnded
+    audio_speech_text: Arc<Mutex<HashMap<String, String>>>,
+}
+
+fn base64_decoded_len(data: &str) -> Option<usize> {
+    let len = data.len();
+    if len == 0 {
+        return Some(0);
+    }
+    if len % 4 != 0 {
+        return None;
+    }
+
+    let pad = data.as_bytes().iter().rev().take_while(|b| **b == b'=').count();
+    if pad > 2 {
+        return None;
+    }
+    Some((len / 4) * 3 - pad)
+}
+
+fn compute_stream_duration_secs(stream: &AudioStreamState) -> f64 {
+    let bytes_per_second = (stream.sample_rate_hz as f64)
+        * (stream.channels as f64)
+        * (stream.bytes_per_sample as f64);
+    if bytes_per_second <= 0.0 {
+        return 0.0;
+    }
+    let speed = (stream.playback_speed as f64).max(MIN_PLAYBACK_SPEED as f64);
+    (stream.total_audio_bytes as f64) / bytes_per_second / speed
+}
+
+fn append_server_log(log_file: &Path, message: &str) {
+    let ts_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_file) {
+        let _ = writeln!(file, "[{}] {}", ts_ms, message);
+    }
+}
+
+fn complete_audio_stream(state: &LocalState, stream_id: &str, reason: &str) {
+    let completed_at = Instant::now();
+    let stream_state = {
+        let mut streams = state.audio_streams.lock().unwrap();
+        streams.remove(stream_id)
+    };
+
+    let Some(stream_state) = stream_state else {
+        return;
+    };
+
+    let expected_lag_ms = stream_state
+        .expected_end_at
+        .map(|eta| {
+            if completed_at >= eta {
+                completed_at.duration_since(eta).as_millis() as i128
+            } else {
+                -(eta.duration_since(completed_at).as_millis() as i128)
+            }
+        })
+        .unwrap_or(0);
+    append_server_log(
+        &state.log_file,
+        &format!(
+            "[audio] complete stream={} speaker={} reason={} lag_vs_estimate_ms={} total_bytes={}",
+            stream_id, stream_state.speaker, reason, expected_lag_ms, stream_state.total_audio_bytes
+        ),
+    );
+
+    push_playback_done_event(
+        state,
+        stream_state.speaker.clone(),
+        stream_id.to_string(),
+    );
+
+    let speech_text = state.audio_speech_text.lock().unwrap().remove(stream_id);
+
+    let speech_finished_data = serde_json::json!({
+        "stream_id": stream_id,
+        "reason": reason,
+        "speaker": stream_state.speaker,
+        "speech_text": speech_text,
+    });
+
+    if let Err(e) = game::queue_input(
+        &state.game_handle,
+        state.game_id,
+        stream_state.agent_id,
+        "SpeechFinished".to_string(),
+        speech_finished_data,
+    ) {
+        eprintln!(
+            "[audio] Failed to queue SpeechFinished for stream {}: {}",
+            stream_id, e
+        );
+    }
+
+    if let Err(e) = game::queue_input(
+        &state.game_handle,
+        state.game_id,
+        stream_state.agent_id,
+        "AudioEnded".to_string(),
+        serde_json::json!({
+            "stream_id": stream_id,
+            "reason": reason
+        }),
+    ) {
+        eprintln!(
+            "[audio] Failed to queue AudioEnded for stream {}: {}",
+            stream_id, e
+        );
+    }
+}
+
+fn schedule_audio_stream_completion(state: LocalState, stream_id: String, expected_end_at: Instant) {
+    tokio::spawn(async move {
+        tokio::time::sleep_until(tokio::time::Instant::from_std(expected_end_at)).await;
+        complete_audio_stream(&state, &stream_id, SERVER_PREDICTED_END_REASON);
+    });
+}
+
+fn push_speech_event(state: &LocalState, speaker: String, text: String) {
+    let seq = {
+        let mut seq = state.speech_seq.lock().unwrap();
+        let next = *seq;
+        *seq += 1;
+        next
+    };
+    let event = SpeechEvent { speaker, text, seq };
+    let _ = state.speech_tx.send(event);
+}
+
+fn maybe_publish_authoritative_speech_events(
+    state: &LocalState,
+    recent_events: &[clawblox::game::instance::SpectatorReplicatedEvent],
+) {
+    if recent_events.is_empty() {
+        return;
+    }
+
+    let mut cursor = state.authoritative_speech_event_cursor.lock().unwrap();
+    for event in recent_events {
+        if event.id <= *cursor {
+            continue;
+        }
+        if event.name == "SpeechBus" {
+            let payload = &event.payload;
+            let op = payload.get("op").and_then(|v| v.as_str()).unwrap_or("");
+            if op == "SpeechText" {
+                let speaker = payload
+                    .get("speaker")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let text = payload
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !speaker.is_empty() && !text.is_empty() {
+                    push_speech_event(state, speaker, text);
+                }
+            }
+        }
+        *cursor = event.id;
+    }
+}
+
+fn push_speech_progress_event(state: &LocalState, speaker: String, stream_id: String, text: String) {
+    let seq = {
+        let mut seq = state.speech_progress_seq.lock().unwrap();
+        let next = *seq;
+        *seq += 1;
+        next
+    };
+    let event = SpeechProgressEvent {
+        speaker,
+        stream_id,
+        text,
+        seq,
+    };
+    let _ = state.speech_progress_tx.send(event);
+}
+
+fn push_playback_done_event(state: &LocalState, speaker: String, stream_id: String) {
+    let seq = {
+        let mut seq = state.playback_done_seq.lock().unwrap();
+        let next = *seq;
+        *seq += 1;
+        next
+    };
+    let _ = state.playback_done_tx.send(PlaybackDoneEvent {
+        speaker,
+        stream_id,
+        seq,
+    });
+}
+
+fn prune_stale_audio_streams(state: &LocalState, now: Instant) {
+    let mut stale_stream_ids = Vec::new();
+    {
+        let mut streams = state.audio_streams.lock().unwrap();
+        streams.retain(|stream_id, stream| {
+            let keep = now.duration_since(stream.last_seen) < Duration::from_secs(STREAM_TTL_SECS);
+            if !keep {
+                stale_stream_ids.push(stream_id.clone());
+            }
+            keep
+        });
+    }
+
+    if !stale_stream_ids.is_empty() {
+        let mut speech_texts = state.audio_speech_text.lock().unwrap();
+        for stream_id in stale_stream_ids {
+            speech_texts.remove(&stream_id);
+        }
+    }
 }
 
 /// Check if the game instance is halted due to a Lua error.
@@ -1102,6 +1944,56 @@ fn check_halted(state: &LocalState) -> Option<String> {
             state.log_file.display()
         )
     })
+}
+
+fn content_type_for_path(path: &str) -> &'static str {
+    if path.ends_with(".html") {
+        "text/html; charset=utf-8"
+    } else if path.ends_with(".js") {
+        "application/javascript; charset=utf-8"
+    } else if path.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if path.ends_with(".json") {
+        "application/json; charset=utf-8"
+    } else if path.ends_with(".svg") {
+        "image/svg+xml"
+    } else if path.ends_with(".png") {
+        "image/png"
+    } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        "image/jpeg"
+    } else {
+        "application/octet-stream"
+    }
+}
+
+fn embedded_ui_file_response(path: &str) -> impl IntoResponse {
+    if let Some(file) = LOCAL_RUNTIME_UI_DIR.get_file(path) {
+        let content_type = content_type_for_path(path);
+        return (
+            axum::http::StatusCode::OK,
+            [("content-type", content_type)],
+            file.contents().to_vec(),
+        )
+            .into_response();
+    }
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        [("content-type", "text/plain; charset=utf-8")],
+        b"Not found".to_vec(),
+    )
+        .into_response()
+}
+
+async fn local_ui_index() -> impl IntoResponse {
+    embedded_ui_file_response("index.html")
+}
+
+async fn local_ui_file(AxumPath(path): AxumPath<String>) -> impl IntoResponse {
+    let req_path = path.trim_start_matches('/');
+    if req_path.is_empty() {
+        return embedded_ui_file_response("index.html");
+    }
+    embedded_ui_file_response(req_path)
 }
 
 #[derive(Deserialize)]
@@ -1137,7 +2029,9 @@ async fn local_join(
     .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
 
     // Store session
-    state.sessions.insert(session_token.clone(), (agent_id, query.name));
+    state
+        .sessions
+        .insert(session_token.clone(), (agent_id, query.name));
 
     Ok(Json(JoinResponse {
         session: session_token,
@@ -1157,14 +2051,150 @@ fn get_session(
             "Missing X-Session header".to_string(),
         ))?;
 
-    state
-        .sessions
-        .get(token)
-        .map(|r| r.clone())
-        .ok_or((
-            axum::http::StatusCode::UNAUTHORIZED,
-            "Invalid session".to_string(),
-        ))
+    state.sessions.get(token).map(|r| r.clone()).ok_or((
+        axum::http::StatusCode::UNAUTHORIZED,
+        "Invalid session".to_string(),
+    ))
+}
+
+#[derive(Deserialize)]
+struct AudioChunkRequest {
+    stream_id: String,
+    seq: u32,
+    data: String,
+    done: bool,
+    #[serde(default)]
+    speech_text: Option<String>,
+    #[serde(default)]
+    sample_rate_hz: Option<u32>,
+    #[serde(default)]
+    channels: Option<u16>,
+    #[serde(default)]
+    bytes_per_sample: Option<u16>,
+    #[serde(default)]
+    playback_speed: Option<f32>,
+}
+
+async fn local_audio(
+    State(state): State<LocalState>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<AudioChunkRequest>,
+) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    let (agent_id, name) = get_session(&state, &headers)?;
+    let stream_id = body.stream_id.clone();
+    let chunk_bytes = base64_decoded_len(&body.data).ok_or((
+        axum::http::StatusCode::BAD_REQUEST,
+        "Invalid base64 PCM chunk".to_string(),
+    ))? as u64;
+
+    let sample_rate_hz = body
+        .sample_rate_hz
+        .unwrap_or(DEFAULT_SAMPLE_RATE_HZ)
+        .max(MIN_POSITIVE_U32);
+    let channels = body.channels.unwrap_or(DEFAULT_CHANNELS).max(MIN_POSITIVE_U16);
+    let bytes_per_sample = body
+        .bytes_per_sample
+        .unwrap_or(DEFAULT_BYTES_PER_SAMPLE)
+        .max(MIN_POSITIVE_U16);
+    let playback_speed = body
+        .playback_speed
+        .unwrap_or(DEFAULT_PLAYBACK_SPEED)
+        .max(MIN_PLAYBACK_SPEED);
+    let mut schedule: Option<Instant> = None;
+
+    // Track stream lifecycle metadata and prune stale entries.
+    {
+        let now = Instant::now();
+        prune_stale_audio_streams(&state, now);
+
+        let mut streams = state.audio_streams.lock().unwrap();
+        let stream = streams
+            .entry(stream_id.clone())
+            .or_insert_with(|| AudioStreamState {
+                agent_id,
+                speaker: name.clone(),
+                first_seen: now,
+                last_seen: now,
+                total_audio_bytes: 0,
+                done_received: false,
+                done_at: None,
+                expected_end_at: None,
+                completion_scheduled: false,
+                sample_rate_hz,
+                channels,
+                bytes_per_sample,
+                playback_speed,
+            });
+        stream.last_seen = now;
+        stream.total_audio_bytes = stream.total_audio_bytes.saturating_add(chunk_bytes);
+        stream.sample_rate_hz = sample_rate_hz;
+        stream.channels = channels;
+        stream.bytes_per_sample = bytes_per_sample;
+        stream.playback_speed = playback_speed;
+
+        if body.done && !stream.done_received {
+            stream.done_received = true;
+            stream.done_at = Some(now);
+            let duration_secs = compute_stream_duration_secs(stream);
+            let duration = Duration::from_secs_f64(duration_secs.max(0.0));
+            let expected_end_at = stream.first_seen + duration;
+            stream.expected_end_at = Some(expected_end_at);
+
+            if !stream.completion_scheduled {
+                stream.completion_scheduled = true;
+                schedule = Some(expected_end_at);
+            }
+        }
+    }
+
+    if let Some(expected_end_at) = schedule {
+        let now = Instant::now();
+        let eta_ms = if expected_end_at > now {
+            expected_end_at.duration_since(now).as_millis() as u64
+        } else {
+            0
+        };
+        let expected_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+            .saturating_add(eta_ms);
+        append_server_log(
+            &state.log_file,
+            &format!(
+                "[audio] estimate stream={} speaker={} done_chunk_seq={} eta_in_ms={} eta_unix_ms={} sample_rate={} channels={} bytes_per_sample={} speed={}",
+                stream_id,
+                name,
+                body.seq,
+                eta_ms,
+                expected_unix_ms,
+                sample_rate_hz,
+                channels,
+                bytes_per_sample,
+                playback_speed
+            ),
+        );
+        schedule_audio_stream_completion(state.clone(), stream_id.clone(), expected_end_at);
+    }
+
+    // Store speech text if provided (typically on the done=true chunk)
+    if let Some(text) = &body.speech_text {
+        state
+            .audio_speech_text
+            .lock()
+            .unwrap()
+            .insert(stream_id.clone(), text.clone());
+    }
+
+    let _ = state.audio_tx.send(AudioChunk {
+        speaker: name,
+        stream_id: stream_id.clone(),
+        seq: body.seq,
+        data: body.data,
+        done: body.done,
+    });
+
+    Ok(axum::http::StatusCode::OK)
 }
 
 #[derive(Deserialize)]
@@ -1184,7 +2214,9 @@ async fn local_input(
         return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
     }
 
-    let (agent_id, _) = get_session(&state, &headers)?;
+    let (agent_id, agent_name) = get_session(&state, &headers)?;
+
+    let speech_progress = extract_speech_progress_event(&input.input_type, &input.data);
 
     game::queue_input(
         &state.game_handle,
@@ -1196,10 +2228,98 @@ async fn local_input(
     .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
 
     // Return observation
-    let observation = game::get_observation(&state.game_handle, state.game_id, agent_id)
+    let mut observation = game::get_observation(&state.game_handle, state.game_id, agent_id)
         .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
+    resolve_local_player_assets(&mut observation);
+    maybe_publish_authoritative_speech_events(&state, &observation.recent_events);
+
+    if let Some(progress) = speech_progress {
+        maybe_publish_speech_progress(&state, &observation, &agent_name, progress);
+    }
 
     Ok(Json(observation))
+}
+
+#[derive(Clone, Debug)]
+struct SpeechProgressInput {
+    stream_id: String,
+    text: String,
+}
+
+fn extract_speech_progress_event(
+    input_type: &str,
+    data: &serde_json::Value,
+) -> Option<SpeechProgressInput> {
+    if input_type != "RemoteEvent" {
+        return None;
+    }
+    let name = data.get("name")?.as_str()?;
+    if name != "SpeechBus" {
+        return None;
+    }
+    let args = data.get("args")?.as_array()?;
+    let payload = args.first()?.as_object()?;
+    let op = payload.get("op")?.as_str()?;
+    if op != "Progress" {
+        return None;
+    }
+
+    let stream_id = payload.get("stream_id")?.as_str()?.trim().to_string();
+    if stream_id.is_empty() {
+        return None;
+    }
+    let text = payload
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Some(SpeechProgressInput { stream_id, text })
+}
+
+fn maybe_publish_speech_progress(
+    state: &LocalState,
+    observation: &PlayerObservation,
+    speaker_name: &str,
+    progress: SpeechProgressInput,
+) {
+    if progress.text.is_empty() {
+        return;
+    }
+
+    let attrs = &observation.player.attributes;
+    let is_speaking = attrs
+        .get("IsSpeaking")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !is_speaking {
+        return;
+    }
+
+    let observed_stream_id = attrs
+        .get("SpeechStreamId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    if observed_stream_id != progress.stream_id {
+        return;
+    }
+
+    let has_lease = attrs
+        .get("SpeechLeaseId")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if !has_lease {
+        return;
+    }
+
+    push_speech_progress_event(
+        state,
+        speaker_name.to_string(),
+        progress.stream_id,
+        progress.text,
+    );
 }
 
 async fn local_observe(
@@ -1212,19 +2332,44 @@ async fn local_observe(
 
     let (agent_id, _) = get_session(&state, &headers)?;
 
-    let observation = game::get_observation(&state.game_handle, state.game_id, agent_id)
+    let mut observation = game::get_observation(&state.game_handle, state.game_id, agent_id)
         .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
+    resolve_local_player_assets(&mut observation);
+    maybe_publish_authoritative_speech_events(&state, &observation.recent_events);
 
     Ok(Json(observation))
 }
 
-/// Resolve asset:// URLs to local /assets/ paths for local development.
-fn resolve_local_assets(obs: &mut SpectatorObservation) {
+fn resolve_local_asset_url(url: &mut String) {
+    if let Some(path) = url.strip_prefix("asset://") {
+        *url = format!("/assets/{}", path);
+    }
+}
+
+fn resolve_local_model_url_attr(attrs: &mut std::collections::HashMap<String, serde_json::Value>) {
+    for key in ["ModelUrl", "model_url"] {
+        if let Some(value) = attrs.get_mut(key) {
+            if let Some(path) = value.as_str().and_then(|url| url.strip_prefix("asset://")) {
+                *value = serde_json::Value::String(format!("/assets/{}", path));
+            }
+        }
+    }
+}
+
+/// Resolve asset:// URLs to local /assets/ paths for local spectator observations.
+fn resolve_local_spectator_assets(obs: &mut SpectatorObservation) {
     for entity in &mut obs.entities {
         if let Some(ref mut url) = entity.model_url {
-            if let Some(path) = url.strip_prefix("asset://") {
-                *url = format!("/assets/{}", path);
-            }
+            resolve_local_asset_url(url);
+        }
+    }
+}
+
+/// Resolve asset:// URLs to local /assets/ paths for local player observations.
+fn resolve_local_player_assets(obs: &mut PlayerObservation) {
+    for entity in &mut obs.world.entities {
+        if let Some(attrs) = entity.attributes.as_mut() {
+            resolve_local_model_url_attr(attrs);
         }
     }
 }
@@ -1240,7 +2385,7 @@ async fn local_spectate(
         game::get_spectator_observation_for_instance(&state.game_handle, state.instance_id)
             .map_err(|e| (axum::http::StatusCode::NOT_FOUND, e))?;
 
-    resolve_local_assets(&mut observation);
+    resolve_local_spectator_assets(&mut observation);
 
     Ok(Json(observation))
 }
@@ -1260,25 +2405,45 @@ async fn local_skill(State(state): State<LocalState>) -> impl IntoResponse {
     }
 }
 
+async fn local_renderer_manifest(State(state): State<LocalState>) -> Json<LocalRendererManifest> {
+    Json(state.renderer_manifest)
+}
+
 async fn local_spectate_ws(
     State(state): State<LocalState>,
+    Query(params): Query<SpectateWsQuery>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_spectate_ws(socket, state))
+    let role = SpectateRole::from_param(params.role.as_deref());
+    ws.on_upgrade(move |socket| handle_spectate_ws(socket, state, role))
 }
 
-fn gzip_compress(data: &[u8]) -> Option<Vec<u8>> {
-    const MIN_SIZE_FOR_COMPRESSION: usize = 1024;
-    if data.len() < MIN_SIZE_FOR_COMPRESSION {
-        return None;
+#[derive(Debug, Deserialize)]
+struct SpectateWsQuery {
+    role: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SpectateRole {
+    Actor,
+    Spectator,
+}
+
+impl SpectateRole {
+    fn from_param(role: Option<&str>) -> Self {
+        match role.map(|s| s.trim().to_ascii_lowercase()) {
+            Some(s) if s == "actor" => Self::Actor,
+            _ => Self::Spectator,
+        }
     }
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
-    encoder.write_all(data).ok()?;
-    encoder.finish().ok()
 }
 
-async fn handle_spectate_ws(socket: WebSocket, state: LocalState) {
+async fn handle_spectate_ws(socket: WebSocket, state: LocalState, role: SpectateRole) {
     let (mut sender, mut receiver) = socket.split();
+    let mut audio_rx = state.audio_tx.subscribe();
+    let mut speech_rx = state.speech_tx.subscribe();
+    let mut speech_progress_rx = state.speech_progress_tx.subscribe();
+    let mut playback_done_rx = state.playback_done_tx.subscribe();
 
     let mut tick_interval = interval(Duration::from_millis(33));
     let mut last_tick: u64 = 0;
@@ -1294,7 +2459,69 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState) {
                             break;
                         }
                     }
+                    Some(Ok(Message::Text(_))) => {}
                     _ => {}
+                }
+            }
+
+            chunk = audio_rx.recv() => {
+                if let Ok(chunk) = chunk {
+                    let json = serde_json::to_string(&serde_json::json!({
+                        "type": "audio_chunk",
+                        "speaker": chunk.speaker,
+                        "stream_id": chunk.stream_id,
+                        "seq": chunk.seq,
+                        "data": chunk.data,
+                        "done": chunk.done,
+                    })).unwrap_or_default();
+                    if sender.send(Message::Text(json.into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+
+            speech = speech_rx.recv() => {
+                if let Ok(speech) = speech {
+                    let json = serde_json::to_string(&serde_json::json!({
+                        "type": "speech",
+                        "speaker": speech.speaker,
+                        "text": speech.text,
+                        "seq": speech.seq,
+                    })).unwrap_or_default();
+                    if sender.send(Message::Text(json.into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+
+            speech_progress = speech_progress_rx.recv() => {
+                if let Ok(progress) = speech_progress {
+                    if role == SpectateRole::Spectator {
+                        let json = serde_json::to_string(&serde_json::json!({
+                            "type": "speech_progress",
+                            "speaker": progress.speaker,
+                            "stream_id": progress.stream_id,
+                            "text": progress.text,
+                            "seq": progress.seq,
+                        })).unwrap_or_default();
+                        if sender.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            playback_done = playback_done_rx.recv() => {
+                if let Ok(event) = playback_done {
+                    let json = serde_json::to_string(&serde_json::json!({
+                        "type": "playback_done",
+                        "speaker": event.speaker,
+                        "stream_id": event.stream_id,
+                        "seq": event.seq,
+                    })).unwrap_or_default();
+                    if sender.send(Message::Text(json.into())).await.is_err() {
+                        break;
+                    }
                 }
             }
 
@@ -1305,17 +2532,15 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState) {
                 match observation {
                     Ok(obs) => {
                         let mut obs = obs;
-                        resolve_local_assets(&mut obs);
+                        resolve_local_spectator_assets(&mut obs);
+                        maybe_publish_authoritative_speech_events(&state, &obs.recent_events);
 
                         if obs.tick != last_tick {
                             last_tick = obs.tick;
                             same_tick_count = 0;
                             if let Ok(json) = serde_json::to_vec(&obs) {
-                                let msg = if let Some(compressed) = gzip_compress(&json) {
-                                    Message::Binary(compressed.into())
-                                } else {
-                                    Message::Text(String::from_utf8_lossy(&json).into_owned().into())
-                                };
+                                let msg =
+                                    Message::Text(String::from_utf8_lossy(&json).into_owned().into());
                                 if sender.send(msg).await.is_err() {
                                     break;
                                 }
@@ -1325,11 +2550,9 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState) {
                             if same_tick_count >= 5 {
                                 same_tick_count = 0;
                                 if let Ok(json) = serde_json::to_vec(&obs) {
-                                    let msg = if let Some(compressed) = gzip_compress(&json) {
-                                        Message::Binary(compressed.into())
-                                    } else {
-                                        Message::Text(String::from_utf8_lossy(&json).into_owned().into())
-                                    };
+                                    let msg = Message::Text(
+                                        String::from_utf8_lossy(&json).into_owned().into(),
+                                    );
                                     if sender.send(msg).await.is_err() {
                                         break;
                                     }

@@ -1,4 +1,4 @@
-use mlua::{UserData, UserDataFields, UserDataMethods};
+use mlua::{UserData, UserDataFields, UserDataMethods, Value};
 use std::sync::{Arc, Mutex};
 
 use crate::game::lua::events::create_signal;
@@ -9,6 +9,7 @@ pub struct PlayersServiceData {
     pub players: Vec<Instance>,
     pub local_player: Option<Instance>,
     pub max_players: u32,
+    pub character_auto_loads: bool,
     pub player_added: RBXScriptSignal,
     pub player_removing: RBXScriptSignal,
 }
@@ -23,6 +24,7 @@ impl PlayersServiceData {
             players: Vec::new(),
             local_player: None,
             max_players,
+            character_auto_loads: true,
             player_added: create_signal("PlayerAdded"),
             player_removing: create_signal("PlayerRemoving"),
         }
@@ -44,7 +46,9 @@ impl PlayersService {
         let instance = Instance::new(ClassName::Players, "Players");
         Self {
             instance,
-            data: Arc::new(Mutex::new(PlayersServiceData::with_max_players(max_players))),
+            data: Arc::new(Mutex::new(PlayersServiceData::with_max_players(
+                max_players,
+            ))),
         }
     }
 
@@ -136,6 +140,13 @@ impl UserData for PlayersService {
         fields.add_field_method_get("MaxPlayers", |_, this| {
             Ok(this.data.lock().unwrap().max_players)
         });
+        fields.add_field_method_get("CharacterAutoLoads", |_, this| {
+            Ok(this.data.lock().unwrap().character_auto_loads)
+        });
+        fields.add_field_method_set("CharacterAutoLoads", |_, this, enabled: bool| {
+            this.data.lock().unwrap().character_auto_loads = enabled;
+            Ok(())
+        });
 
         fields.add_field_method_get("PlayerAdded", |_, this| {
             Ok(this.data.lock().unwrap().player_added.clone())
@@ -152,8 +163,12 @@ impl UserData for PlayersService {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("GetPlayers", |_, this, ()| Ok(this.get_players()));
 
-        methods.add_method("GetPlayerByUserId", |_, this, user_id: u64| {
-            Ok(this.get_player_by_user_id(user_id))
+        methods.add_method("GetPlayerByUserId", |lua, this, user_id: u64| {
+            if let Some(player) = this.get_player_by_user_id(user_id) {
+                Ok(Value::UserData(Instance::cached_userdata(lua, &player)?))
+            } else {
+                Ok(Value::Nil)
+            }
         });
 
         methods.add_method("GetPlayerFromCharacter", |_, this, character: Instance| {

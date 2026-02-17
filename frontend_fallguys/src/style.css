@@ -1,0 +1,74 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { overflow: hidden; background: #1a1a2e; font-family: 'Arial Rounded MT Bold', 'Nunito', sans-serif; }
+canvas { display: block; width: 100vw; height: 100vh; }
+
+#hud {
+  position: fixed; top: 20px; width: 100%;
+  display: flex; justify-content: center; align-items: flex-start;
+  z-index: 10; pointer-events: none; flex-direction: column; align-items: center;
+  gap: 6px;
+}
+#hud-row {
+  display: flex; gap: 15px; align-items: center;
+}
+#timer {
+  background: rgba(0,0,0,0.6); color: #fff;
+  padding: 10px 30px; border-radius: 30px;
+  font-size: 28px; font-weight: bold;
+  backdrop-filter: blur(8px);
+  border: 2px solid rgba(255,255,255,0.15);
+}
+#position {
+  background: rgba(0,0,0,0.6); color: #ffd700;
+  padding: 10px 20px; border-radius: 30px;
+  font-size: 24px; font-weight: bold;
+  backdrop-filter: blur(8px);
+  border: 2px solid rgba(255,215,0,0.3);
+}
+#progress-bar {
+  width: 300px; height: 8px;
+  background: rgba(0,0,0,0.4);
+  border-radius: 4px; overflow: hidden;
+  backdrop-filter: blur(8px);
+}
+#progress-fill {
+  height: 100%; width: 0%;
+  background: linear-gradient(90deg, #ff69b4, #ffd700);
+  border-radius: 4px;
+  transition: width 0.1s;
+}
+
+#fps-counter {
+  position: fixed; top: 10px; left: 10px;
+  color: rgba(0,0,0,0.6); font-size: 13px;
+  font-family: monospace; z-index: 10; pointer-events: none;
+}
+
+#spectate-bar {
+  position: fixed; bottom: 20px; left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0,0,0,0.5);
+  color: rgba(255,255,255,0.7); font-size: 14px;
+  padding: 6px 18px; border-radius: 20px;
+  z-index: 10; pointer-events: none;
+  backdrop-filter: blur(6px);
+}
+
+#finish-screen {
+  position: fixed; inset: 0;
+  display: none; flex-direction: column;
+  align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.5); z-index: 20;
+  pointer-events: none;
+}
+#finish-title {
+  font-size: 72px; color: #ffd700;
+  text-shadow: 3px 3px 0 rgba(0,0,0,0.4);
+  margin-bottom: 10px; font-weight: bold;
+}
+#finish-place {
+  font-size: 36px; color: #fff; margin-bottom: 10px;
+}
+#finish-time {
+  font-size: 40px; color: #fff; margin-bottom: 30px;
+}

@@ -1,0 +1,9 @@
+name = "Parity Sandbox"
+description = "Multi-file Roblox parity sandbox for scripting behavior validation"
+max_players = 1
+game_type = "lua"
+
+[scripts]
+main = "game.lua"
+tree = "scripts"
+skill = "SKILL.md"

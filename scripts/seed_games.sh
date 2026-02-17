@@ -42,7 +42,7 @@ fi
 ARSENAL_ID="6dd3ff88-150c-440e-b6fb-c80b7df715c0"
 TSUNAMI_ID="0a62727e-b45e-4175-be9f-1070244f8885"
 FLATTEST_ID="26c869ee-da7b-48a4-a198-3daa870ef652"
-FALLGUYS_ID="a0000000-0000-0000-0000-000000000008"
+PHYSICS_TEST_ID="f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
 # Function to extract value from TOML file
 get_toml_value() {
@@ -51,6 +51,35 @@ get_toml_value() {
     local default="$3"
     # Simple grep-based extraction (handles basic cases)
     local value=$(grep "^${key} *= *" "$file" 2>/dev/null | sed 's/.*= *//' | tr -d '"' | tr -d "'")
+    if [ -z "$value" ]; then
+        echo "$default"
+    else
+        echo "$value"
+    fi
+}
+
+# Function to extract key from a specific TOML section.
+get_toml_section_value() {
+    local file="$1"
+    local section="$2"
+    local key="$3"
+    local default="$4"
+
+    local value=$(awk -v section="$section" -v key="$key" '
+        BEGIN { in_section = 0 }
+        /^\[.*\]/ {
+            in_section = ($0 == "[" section "]")
+            next
+        }
+        in_section && $0 ~ ("^" key " *= *") {
+            gsub(/.*= */, "", $0)
+            gsub(/"/, "", $0)
+            gsub(/'\''/, "", $0)
+            print $0
+            exit
+        }
+    ' "$file" 2>/dev/null)
+
     if [ -z "$value" ]; then
         echo "$default"
     else
@@ -75,12 +104,13 @@ seed_game() {
     local description=$(get_toml_value "$world_toml" "description" "")
     local max_players=$(get_toml_value "$world_toml" "max_players" "8")
     local game_type=$(get_toml_value "$world_toml" "game_type" "lua")
+    local observation_radius=$(get_toml_section_value "$world_toml" "observation" "radius" "100")
 
     # Read script files
     local script=$(cat "$game_dir/game.lua")
     local skill=$(cat "$game_dir/SKILL.md" 2>/dev/null || echo "")
 
-    echo "Seeding: $name (max_players=$max_players)"
+    echo "Seeding: $name (max_players=$max_players, observation_radius=$observation_radius)"
 
     # Insert into database
     $PSQL_CMD \
@@ -89,10 +119,11 @@ seed_game() {
         -v description="$description" \
         -v game_type="$game_type" \
         -v max_players="$max_players" \
+        -v observation_radius="$observation_radius" \
         -v script="$script" \
         -v skill="$skill" \
         <<'EOF'
-INSERT INTO games (id, name, description, game_type, status, max_players, script_code, skill_md)
+INSERT INTO games (id, name, description, game_type, status, max_players, observation_radius, script_code, skill_md)
 VALUES (
     :'id',
     :'name',
@@ -100,6 +131,7 @@ VALUES (
     :'game_type',
     'waiting',
     :max_players,
+    :observation_radius,
     :'script',
     :'skill'
 );
@@ -113,7 +145,7 @@ DELETE FROM games WHERE id IN (
     '$ARSENAL_ID',
     '$TSUNAMI_ID',
     '$FLATTEST_ID',
-    '$FALLGUYS_ID'
+    '$PHYSICS_TEST_ID'
 );
 "
 
@@ -121,6 +153,6 @@ DELETE FROM games WHERE id IN (
 seed_game "$PROJECT_ROOT/games/arsenal" "$ARSENAL_ID"
 seed_game "$PROJECT_ROOT/games/tsunami-brainrot" "$TSUNAMI_ID"
 seed_game "$PROJECT_ROOT/games/flat-test" "$FLATTEST_ID"
-seed_game "$PROJECT_ROOT/games/fall-bots" "$FALLGUYS_ID"
+seed_game "$PROJECT_ROOT/games/physics-test" "$PHYSICS_TEST_ID"
 
 echo "Games seeded successfully!"

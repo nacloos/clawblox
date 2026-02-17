@@ -38,9 +38,19 @@ export interface PlayerSnapshot {
   id: string
   name: string
   position: [number, number, number]
+  root_part_id?: number
   health: number
   attributes?: Record<string, unknown>
   gui?: GuiElement[]
+  active_animations?: PlayerAnimationState[]
+}
+
+export interface PlayerAnimationState {
+  animation_id: string
+  time_position: number
+  speed: number
+  looped: boolean
+  is_playing: boolean
 }
 
 export interface StateSnapshot {
@@ -112,9 +122,11 @@ export class StateBuffer {
         id: player.id,
         name: player.name,
         position: player.position,
+        root_part_id: player.root_part_id,
         health: player.health,
         attributes: player.attributes,
         gui: player.gui,
+        active_animations: player.active_animations,
       })
     }
 

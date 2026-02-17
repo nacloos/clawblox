@@ -3,6 +3,7 @@ import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import Entity from './Entity'
 import * as THREE from 'three'
 import { StateBuffer, interpolatePosition } from '../lib/stateBuffer'
+import { GameRenderAdapter } from '../lib/gameAdapter'
 
 // Camera smoothing factor (higher = faster response)
 const CAMERA_SMOOTHING = 8
@@ -11,6 +12,7 @@ interface GameSceneProps {
   stateBuffer: StateBuffer
   entityIds: number[]
   followPlayerId?: string | null
+  renderAdapter: GameRenderAdapter
 }
 
 // Arena is 200x200 units, centered at origin
@@ -287,7 +289,7 @@ function CameraController({
   return null
 }
 
-export default function GameScene({ stateBuffer, entityIds, followPlayerId }: GameSceneProps) {
+export default function GameScene({ stateBuffer, entityIds, followPlayerId, renderAdapter }: GameSceneProps) {
   return (
     <Canvas
       camera={{ position: [0, 140, 70], fov: 50 }}
@@ -303,7 +305,7 @@ export default function GameScene({ stateBuffer, entityIds, followPlayerId }: Ga
       <pointLight position={[-50, 50, -50]} intensity={0.3} color="#4a9eff" />
 
       {entityIds.map((entityId) => (
-        <Entity key={entityId} entityId={entityId} stateBuffer={stateBuffer} />
+        <Entity key={entityId} entityId={entityId} stateBuffer={stateBuffer} renderAdapter={renderAdapter} />
       ))}
 
       <CameraController stateBuffer={stateBuffer} followPlayerId={followPlayerId} />

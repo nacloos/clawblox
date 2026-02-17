@@ -22,7 +22,7 @@ use clawblox::game::{
 #[test]
 fn test_has_capacity_empty_instance() {
     let game_id = Uuid::new_v4();
-    let instance = GameInstance::new_with_config(game_id, 8, None, ErrorMode::Continue);
+    let instance = GameInstance::new_with_config(game_id, 8, 100.0, None, ErrorMode::Continue);
 
     assert!(instance.has_capacity());
     assert_eq!(instance.available_slots(), 8);
@@ -31,7 +31,7 @@ fn test_has_capacity_empty_instance() {
 #[test]
 fn test_has_capacity_partial_instance() {
     let game_id = Uuid::new_v4();
-    let mut instance = GameInstance::new_with_config(game_id, 8, None, ErrorMode::Continue);
+    let mut instance = GameInstance::new_with_config(game_id, 8, 100.0, None, ErrorMode::Continue);
 
     // Add 5 players
     for i in 0..5 {
@@ -46,7 +46,7 @@ fn test_has_capacity_partial_instance() {
 #[test]
 fn test_has_capacity_full_instance() {
     let game_id = Uuid::new_v4();
-    let mut instance = GameInstance::new_with_config(game_id, 8, None, ErrorMode::Continue);
+    let mut instance = GameInstance::new_with_config(game_id, 8, 100.0, None, ErrorMode::Continue);
 
     // Add 8 players (max)
     for i in 0..8 {
@@ -61,7 +61,7 @@ fn test_has_capacity_full_instance() {
 #[test]
 fn test_has_capacity_with_different_max() {
     let game_id = Uuid::new_v4();
-    let mut instance = GameInstance::new_with_config(game_id, 2, None, ErrorMode::Continue);
+    let mut instance = GameInstance::new_with_config(game_id, 2, 100.0, None, ErrorMode::Continue);
 
     assert!(instance.has_capacity());
 
@@ -83,7 +83,7 @@ fn test_find_or_create_instance_creates_first_instance() {
     let (_manager, handle) = GameManager::new_without_db(60, ErrorMode::Continue);
     let game_id = Uuid::new_v4();
 
-    let result = game::find_or_create_instance(&handle, game_id, 8, None);
+    let result = game::find_or_create_instance(&handle, game_id, 8, 100.0, None);
 
     assert!(result.created);
     assert!(handle.instances.contains_key(&result.instance_id));
@@ -95,11 +95,11 @@ fn test_find_or_create_instance_reuses_existing_with_capacity() {
     let game_id = Uuid::new_v4();
 
     // Create first instance
-    let result1 = game::find_or_create_instance(&handle, game_id, 8, None);
+    let result1 = game::find_or_create_instance(&handle, game_id, 8, 100.0, None);
     assert!(result1.created);
 
     // Second call should reuse the same instance (has capacity)
-    let result2 = game::find_or_create_instance(&handle, game_id, 8, None);
+    let result2 = game::find_or_create_instance(&handle, game_id, 8, 100.0, None);
     assert!(!result2.created);
     assert_eq!(result1.instance_id, result2.instance_id);
 }
@@ -110,7 +110,7 @@ fn test_find_or_create_instance_creates_new_when_full() {
     let game_id = Uuid::new_v4();
 
     // Create first instance with max 2 players
-    let result1 = game::find_or_create_instance(&handle, game_id, 2, None);
+    let result1 = game::find_or_create_instance(&handle, game_id, 2, 100.0, None);
     assert!(result1.created);
 
     // Fill the instance
@@ -120,7 +120,7 @@ fn test_find_or_create_instance_creates_new_when_full() {
     game::join_instance(&handle, result1.instance_id, game_id, agent2, "Player2").unwrap();
 
     // Now find_or_create should create a new instance
-    let result2 = game::find_or_create_instance(&handle, game_id, 2, None);
+    let result2 = game::find_or_create_instance(&handle, game_id, 2, 100.0, None);
     assert!(result2.created);
     assert_ne!(result1.instance_id, result2.instance_id);
 
@@ -135,8 +135,8 @@ fn test_find_or_create_instance_different_games_separate() {
     let game_id_a = Uuid::new_v4();
     let game_id_b = Uuid::new_v4();
 
-    let result_a = game::find_or_create_instance(&handle, game_id_a, 8, None);
-    let result_b = game::find_or_create_instance(&handle, game_id_b, 8, None);
+    let result_a = game::find_or_create_instance(&handle, game_id_a, 8, 100.0, None);
+    let result_b = game::find_or_create_instance(&handle, game_id_b, 8, 100.0, None);
 
     assert!(result_a.created);
     assert!(result_b.created);
@@ -157,9 +157,10 @@ fn test_join_instance_success() {
     let game_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
 
-    let result = game::find_or_create_instance(&handle, game_id, 8, None);
+    let result = game::find_or_create_instance(&handle, game_id, 8, 100.0, None);
 
-    let join_result = game::join_instance(&handle, result.instance_id, game_id, agent_id, "TestPlayer");
+    let join_result =
+        game::join_instance(&handle, result.instance_id, game_id, agent_id, "TestPlayer");
     assert!(join_result.is_ok());
 
     // Verify player is tracked
@@ -172,7 +173,7 @@ fn test_join_instance_fails_when_full() {
     let (_manager, handle) = GameManager::new_without_db(60, ErrorMode::Continue);
     let game_id = Uuid::new_v4();
 
-    let result = game::find_or_create_instance(&handle, game_id, 2, None);
+    let result = game::find_or_create_instance(&handle, game_id, 2, 100.0, None);
 
     // Fill the instance
     let agent1 = Uuid::new_v4();
@@ -193,13 +194,14 @@ fn test_join_instance_fails_duplicate() {
     let game_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
 
-    let result = game::find_or_create_instance(&handle, game_id, 8, None);
+    let result = game::find_or_create_instance(&handle, game_id, 8, 100.0, None);
 
     // First join succeeds
     game::join_instance(&handle, result.instance_id, game_id, agent_id, "TestPlayer").unwrap();
 
     // Second join of same agent fails
-    let join_result = game::join_instance(&handle, result.instance_id, game_id, agent_id, "TestPlayer");
+    let join_result =
+        game::join_instance(&handle, result.instance_id, game_id, agent_id, "TestPlayer");
     assert!(join_result.is_err());
     assert_eq!(join_result.unwrap_err(), "Already in instance");
 }
@@ -211,7 +213,8 @@ fn test_join_instance_nonexistent() {
     let agent_id = Uuid::new_v4();
     let fake_instance_id = Uuid::new_v4();
 
-    let join_result = game::join_instance(&handle, fake_instance_id, game_id, agent_id, "TestPlayer");
+    let join_result =
+        game::join_instance(&handle, fake_instance_id, game_id, agent_id, "TestPlayer");
     assert!(join_result.is_err());
     assert_eq!(join_result.unwrap_err(), "Instance not found");
 }
@@ -226,7 +229,7 @@ fn test_leave_instance_success() {
     let game_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
 
-    let result = game::find_or_create_instance(&handle, game_id, 8, None);
+    let result = game::find_or_create_instance(&handle, game_id, 8, 100.0, None);
     game::join_instance(&handle, result.instance_id, game_id, agent_id, "TestPlayer").unwrap();
 
     // Leave
@@ -244,7 +247,7 @@ fn test_leave_game_by_game_id() {
     let game_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
 
-    let result = game::find_or_create_instance(&handle, game_id, 8, None);
+    let result = game::find_or_create_instance(&handle, game_id, 8, 100.0, None);
     game::join_instance(&handle, result.instance_id, game_id, agent_id, "TestPlayer").unwrap();
 
     // Leave using game_id (not instance_id)
@@ -266,7 +269,7 @@ fn test_cleanup_does_not_remove_instances_with_players() {
     let game_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
 
-    let result = game::find_or_create_instance(&handle, game_id, 8, None);
+    let result = game::find_or_create_instance(&handle, game_id, 8, 100.0, None);
     game::join_instance(&handle, result.instance_id, game_id, agent_id, "TestPlayer").unwrap();
 
     // Cleanup with 0 timeout should not remove instances with players
@@ -281,7 +284,7 @@ fn test_cleanup_removes_empty_instances_after_timeout() {
     let game_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
 
-    let result = game::find_or_create_instance(&handle, game_id, 8, None);
+    let result = game::find_or_create_instance(&handle, game_id, 8, 100.0, None);
     game::join_instance(&handle, result.instance_id, game_id, agent_id, "TestPlayer").unwrap();
 
     // Leave - instance becomes empty
@@ -299,7 +302,7 @@ fn test_cleanup_respects_timeout() {
     let game_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
 
-    let result = game::find_or_create_instance(&handle, game_id, 8, None);
+    let result = game::find_or_create_instance(&handle, game_id, 8, 100.0, None);
     game::join_instance(&handle, result.instance_id, game_id, agent_id, "TestPlayer").unwrap();
     game::leave_instance(&handle, result.instance_id, agent_id).unwrap();
 
@@ -314,12 +317,16 @@ fn test_destroy_instance_cleans_up_all_state() {
     let (_manager, handle) = GameManager::new_without_db(60, ErrorMode::Continue);
     let game_id = Uuid::new_v4();
 
-    let result = game::find_or_create_instance(&handle, game_id, 8, None);
+    let result = game::find_or_create_instance(&handle, game_id, 8, 100.0, None);
     let instance_id = result.instance_id;
 
     // Verify instance exists
     assert!(handle.instances.contains_key(&instance_id));
-    assert!(handle.game_instances.get(&game_id).unwrap().contains(&instance_id));
+    assert!(handle
+        .game_instances
+        .get(&game_id)
+        .unwrap()
+        .contains(&instance_id));
 
     // Destroy
     let destroyed = game::destroy_instance(&handle, instance_id);
@@ -327,7 +334,11 @@ fn test_destroy_instance_cleans_up_all_state() {
 
     // Verify all state is cleaned up
     assert!(!handle.instances.contains_key(&instance_id));
-    assert!(!handle.game_instances.get(&game_id).unwrap().contains(&instance_id));
+    assert!(!handle
+        .game_instances
+        .get(&game_id)
+        .unwrap()
+        .contains(&instance_id));
     assert!(!handle.spectator_cache.contains_key(&instance_id));
 }
 
@@ -348,8 +359,15 @@ fn test_integration_8_players_same_instance_9th_new_instance() {
         let agent_id = Uuid::new_v4();
         agents.push(agent_id);
 
-        let result = game::find_or_create_instance(&handle, game_id, 8, None);
-        game::join_instance(&handle, result.instance_id, game_id, agent_id, &format!("Player{}", i)).unwrap();
+        let result = game::find_or_create_instance(&handle, game_id, 8, 100.0, None);
+        game::join_instance(
+            &handle,
+            result.instance_id,
+            game_id,
+            agent_id,
+            &format!("Player{}", i),
+        )
+        .unwrap();
 
         if first_instance_id.is_none() {
             first_instance_id = Some(result.instance_id);
@@ -368,7 +386,7 @@ fn test_integration_8_players_same_instance_9th_new_instance() {
 
     // 9th player should get a NEW instance
     let agent_9 = Uuid::new_v4();
-    let result_9 = game::find_or_create_instance(&handle, game_id, 8, None);
+    let result_9 = game::find_or_create_instance(&handle, game_id, 8, 100.0, None);
 
     assert!(result_9.created);
     assert_ne!(result_9.instance_id, first_instance_id);
@@ -394,21 +412,44 @@ fn test_integration_player_in_multiple_games() {
     let agent_id = Uuid::new_v4();
 
     // Join game A
-    let result_a = game::find_or_create_instance(&handle, game_a, 8, None);
-    game::join_instance(&handle, result_a.instance_id, game_a, agent_id, "TestPlayer").unwrap();
+    let result_a = game::find_or_create_instance(&handle, game_a, 8, 100.0, None);
+    game::join_instance(
+        &handle,
+        result_a.instance_id,
+        game_a,
+        agent_id,
+        "TestPlayer",
+    )
+    .unwrap();
 
     // Join game B (different game, same agent)
-    let result_b = game::find_or_create_instance(&handle, game_b, 8, None);
-    game::join_instance(&handle, result_b.instance_id, game_b, agent_id, "TestPlayer").unwrap();
+    let result_b = game::find_or_create_instance(&handle, game_b, 8, 100.0, None);
+    game::join_instance(
+        &handle,
+        result_b.instance_id,
+        game_b,
+        agent_id,
+        "TestPlayer",
+    )
+    .unwrap();
 
     // Player should be tracked in both games
-    assert_eq!(game::get_player_instance(&handle, agent_id, game_a), Some(result_a.instance_id));
-    assert_eq!(game::get_player_instance(&handle, agent_id, game_b), Some(result_b.instance_id));
+    assert_eq!(
+        game::get_player_instance(&handle, agent_id, game_a),
+        Some(result_a.instance_id)
+    );
+    assert_eq!(
+        game::get_player_instance(&handle, agent_id, game_b),
+        Some(result_b.instance_id)
+    );
 
     // Leave game A - should still be in game B
     game::leave_game(&handle, game_a, agent_id).unwrap();
     assert!(game::get_player_instance(&handle, agent_id, game_a).is_none());
-    assert_eq!(game::get_player_instance(&handle, agent_id, game_b), Some(result_b.instance_id));
+    assert_eq!(
+        game::get_player_instance(&handle, agent_id, game_b),
+        Some(result_b.instance_id)
+    );
 }
 
 #[test]
@@ -417,7 +458,7 @@ fn test_integration_instance_destroyed_after_all_leave() {
     let game_id = Uuid::new_v4();
 
     // Create instance and add players
-    let result = game::find_or_create_instance(&handle, game_id, 8, None);
+    let result = game::find_or_create_instance(&handle, game_id, 8, 100.0, None);
     let instance_id = result.instance_id;
 
     let agent1 = Uuid::new_v4();
@@ -444,7 +485,7 @@ fn test_integration_spectate_returns_most_populated() {
     let game_id = Uuid::new_v4();
 
     // Create first instance with 2 players
-    let result1 = game::find_or_create_instance(&handle, game_id, 4, None);
+    let result1 = game::find_or_create_instance(&handle, game_id, 4, 100.0, None);
     game::join_instance(&handle, result1.instance_id, game_id, Uuid::new_v4(), "A1").unwrap();
     game::join_instance(&handle, result1.instance_id, game_id, Uuid::new_v4(), "A2").unwrap();
 
@@ -453,7 +494,7 @@ fn test_integration_spectate_returns_most_populated() {
     game::join_instance(&handle, result1.instance_id, game_id, Uuid::new_v4(), "A4").unwrap();
 
     // Create second instance with 1 player
-    let result2 = game::find_or_create_instance(&handle, game_id, 4, None);
+    let result2 = game::find_or_create_instance(&handle, game_id, 4, 100.0, None);
     game::join_instance(&handle, result2.instance_id, game_id, Uuid::new_v4(), "B1").unwrap();
 
     // Spectate should route to the first instance (4 players > 1 player)

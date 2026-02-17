@@ -1,19 +1,21 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use super::async_bridge::AsyncBridge;
-use super::constants::physics as consts;
 use super::lua::instance::{
     attributes_to_json, AttributeValue, ClassName, Instance, TextXAlignment, TextYAlignment,
 };
 use super::lua::services::AgentInput;
 use super::lua::LuaRuntime;
 use super::physics::PhysicsWorld;
+use super::touch_events::compute_touch_transitions;
 
-/// Walk speed for player characters (studs per second)
-const WALK_SPEED: f32 = consts::WALK_SPEED;
+mod character_controller;
+mod controller_runtime;
+mod observation;
+mod tick_pipeline;
 
 /// Default AFK timeout in seconds (5 minutes)
 const DEFAULT_AFK_TIMEOUT_SECS: u64 = 300;
@@ -23,6 +25,10 @@ const AFK_CHECK_INTERVAL_TICKS: u64 = 60;
 
 /// Default max players when not specified
 const DEFAULT_MAX_PLAYERS: u32 = 8;
+/// Default visibility radius for other players in observations.
+const DEFAULT_OBSERVATION_RADIUS: f32 = 100.0;
+const MAX_REPLICATED_EVENTS_BUFFER: usize = 512;
+const MAX_RECENT_EVENTS_PER_OBSERVATION: usize = 128;
 
 /// Round a float to 2 decimal places (reduces JSON payload size)
 #[inline]
@@ -34,6 +40,75 @@ fn round_f32(v: f32) -> f32 {
 #[inline]
 fn round_position(pos: [f32; 3]) -> [f32; 3] {
     [round_f32(pos[0]), round_f32(pos[1]), round_f32(pos[2])]
+}
+
+#[inline]
+fn mat_mul_vec3(rot: &[[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
+    [
+        rot[0][0] * v[0] + rot[0][1] * v[1] + rot[0][2] * v[2],
+        rot[1][0] * v[0] + rot[1][1] * v[1] + rot[1][2] * v[2],
+        rot[2][0] * v[0] + rot[2][1] * v[1] + rot[2][2] * v[2],
+    ]
+}
+
+fn compute_part_bounds(
+    center: [f32; 3],
+    size: [f32; 3],
+    rotation: [[f32; 3]; 3],
+) -> (EntityAabb, EntityObb) {
+    let half = [
+        size[0].abs() * 0.5,
+        size[1].abs() * 0.5,
+        size[2].abs() * 0.5,
+    ];
+    let local_corners = [
+        [-half[0], -half[1], -half[2]],
+        [half[0], -half[1], -half[2]],
+        [-half[0], half[1], -half[2]],
+        [half[0], half[1], -half[2]],
+        [-half[0], -half[1], half[2]],
+        [half[0], -half[1], half[2]],
+        [-half[0], half[1], half[2]],
+        [half[0], half[1], half[2]],
+    ];
+
+    let mut raw_corners = [[0.0; 3]; 8];
+    for (i, corner) in local_corners.iter().enumerate() {
+        let rotated = mat_mul_vec3(&rotation, *corner);
+        raw_corners[i] = [
+            center[0] + rotated[0],
+            center[1] + rotated[1],
+            center[2] + rotated[2],
+        ];
+    }
+
+    let mut min = raw_corners[0];
+    let mut max = raw_corners[0];
+    for corner in raw_corners.iter().skip(1) {
+        min[0] = min[0].min(corner[0]);
+        min[1] = min[1].min(corner[1]);
+        min[2] = min[2].min(corner[2]);
+        max[0] = max[0].max(corner[0]);
+        max[1] = max[1].max(corner[1]);
+        max[2] = max[2].max(corner[2]);
+    }
+
+    let mut rounded_corners = [[0.0; 3]; 8];
+    for (i, corner) in raw_corners.iter().enumerate() {
+        rounded_corners[i] = round_position(*corner);
+    }
+
+    (
+        EntityAabb {
+            min: round_position(min),
+            max: round_position(max),
+        },
+        EntityObb {
+            center: round_position(center),
+            half_extents: round_position(half),
+            corners: rounded_corners,
+        },
+    )
 }
 
 /// A game instance that runs Lua scripts with Rapier physics.
@@ -64,6 +139,8 @@ pub struct GameInstance {
     afk_timeout: Duration,
     /// Maximum number of players allowed in this instance
     pub max_players: u32,
+    /// Maximum distance for player-to-player observation visibility.
+    pub observation_radius: f32,
     /// When the instance became empty (for garbage collection)
     /// None if instance has players, Some(Instant) when last player left
     pub empty_since: Option<Instant>,
@@ -71,6 +148,12 @@ pub struct GameInstance {
     pub error_mode: ErrorMode,
     /// Set when error_mode is Halt and a Lua error occurs; prevents further ticking
     pub halted_error: Option<String>,
+    /// Previous frame's touch pairs for Touched/TouchEnded event detection
+    prev_touches: HashSet<(u64, u64)>,
+    /// Ring buffer of recent replicated transient events (shots, impacts, etc.)
+    replicated_events: VecDeque<SpectatorReplicatedEvent>,
+    /// Monotonic event id assigned by server for dedupe/order.
+    next_replicated_event_id: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -89,7 +172,6 @@ pub enum ErrorMode {
     Halt,
 }
 
-
 impl GameInstance {
     /// Derive a stable numeric user_id from an agent UUID (fits Lua safe integer range < 2^53).
     fn user_id_from_agent_id(agent_id: Uuid) -> u64 {
@@ -107,7 +189,13 @@ impl GameInstance {
     /// * `game_id` - The game definition ID this instance belongs to
     /// * `async_bridge` - Optional async bridge for DataStoreService support
     pub fn new(game_id: Uuid, async_bridge: Option<Arc<AsyncBridge>>) -> Self {
-        Self::new_with_config(game_id, DEFAULT_MAX_PLAYERS, async_bridge, ErrorMode::Continue)
+        Self::new_with_config(
+            game_id,
+            DEFAULT_MAX_PLAYERS,
+            DEFAULT_OBSERVATION_RADIUS,
+            async_bridge,
+            ErrorMode::Continue,
+        )
     }
 
     /// Creates a new game instance with configuration
@@ -120,6 +208,7 @@ impl GameInstance {
     pub fn new_with_config(
         game_id: Uuid,
         max_players: u32,
+        observation_radius: f32,
         async_bridge: Option<Arc<AsyncBridge>>,
         error_mode: ErrorMode,
     ) -> Self {
@@ -142,9 +231,13 @@ impl GameInstance {
             player_last_activity: HashMap::new(),
             afk_timeout: Duration::from_secs(DEFAULT_AFK_TIMEOUT_SECS),
             max_players,
+            observation_radius,
             empty_since: Some(Instant::now()), // Starts empty
             error_mode,
             halted_error: None,
+            prev_touches: HashSet::new(),
+            replicated_events: VecDeque::new(),
+            next_replicated_event_id: 1,
         }
     }
 
@@ -174,7 +267,14 @@ impl GameInstance {
         script: &str,
         async_bridge: Option<Arc<AsyncBridge>>,
     ) -> Self {
-        Self::new_with_script_and_config(game_id, script, DEFAULT_MAX_PLAYERS, async_bridge, ErrorMode::Continue)
+        Self::new_with_script_and_config(
+            game_id,
+            script,
+            DEFAULT_MAX_PLAYERS,
+            DEFAULT_OBSERVATION_RADIUS,
+            async_bridge,
+            ErrorMode::Continue,
+        )
     }
 
     /// Creates a new game instance with a Lua script and configuration
@@ -188,10 +288,17 @@ impl GameInstance {
         game_id: Uuid,
         script: &str,
         max_players: u32,
+        observation_radius: f32,
         async_bridge: Option<Arc<AsyncBridge>>,
         error_mode: ErrorMode,
     ) -> Self {
-        let mut instance = Self::new_with_config(game_id, max_players, async_bridge, error_mode);
+        let mut instance = Self::new_with_config(
+            game_id,
+            max_players,
+            observation_radius,
+            async_bridge,
+            error_mode,
+        );
         instance.load_script(script);
         instance
     }
@@ -250,7 +357,8 @@ impl GameInstance {
             let spawn_z = (player_index / 4.0).floor() * 3.0;
 
             // Register character controller for player movement
-            self.physics.add_character(hrp_id, [spawn_x, 6.0, spawn_z], 1.0, 5.0);
+            self.physics
+                .add_character(hrp_id, [spawn_x, 6.0, spawn_z], 1.0, 5.0);
             self.player_hrp_ids.insert(agent_id, hrp_id);
 
             if let Err(e) = runtime.fire_player_added(&player) {
@@ -308,9 +416,6 @@ impl GameInstance {
 
     /// Queues an agent input for the AgentInputService in Lua
     pub fn queue_agent_input(&self, user_id: u64, input_type: String, data: serde_json::Value) {
-        if input_type == "Jump" {
-            eprintln!("[InputQueue] Jump queued for user_id={}", user_id);
-        }
         if let Some(runtime) = &self.lua_runtime {
             let input = AgentInput::new(input_type, data);
             runtime.queue_agent_input(user_id, input);
@@ -334,54 +439,109 @@ impl GameInstance {
             self.check_afk_players();
         }
 
-        // Sync Lua workspace gravity to physics
-        self.sync_gravity();
-
-        // Sync new/changed Lua parts to physics (skip character-controlled parts)
-        self.sync_lua_to_physics();
-
-        // Process agent inputs (fire InputReceived events)
-        // Do this before syncing MoveTo targets so movement can apply in the same tick.
+        // Run start-of-frame Lua work before physics (resume yields + Stepped).
         if let Some(runtime) = &self.lua_runtime {
-            if let Err(e) = runtime.process_agent_inputs() {
-                self.handle_lua_error("Failed to process agent inputs", &e);
+            if let Err(e) = runtime.begin_frame(dt) {
+                self.handle_lua_error("Begin frame error", &e);
                 if self.halted_error.is_some() {
                     return;
                 }
             }
         }
 
-        // Sync Lua humanoid MoveTo targets to physics character controllers
-        self.sync_humanoid_move_targets();
+        tick_pipeline::run_tick_phases(self, dt);
+        if self.halted_error.is_some() {
+            return;
+        }
 
-        // Update query pipeline BEFORE character movement so move_shape has current collision state
-        // This is necessary because the previous tick's physics.step moved the character,
-        // and move_shape needs to see the updated positions.
-        self.physics.query_pipeline.update(&self.physics.collider_set);
-
-        // Update character controller movement
-        self.update_character_movement(dt);
-
-        // Step physics simulation
-        self.physics.step(dt);
-
-        // Sync physics results back to Lua (for Anchored=false parts and characters)
-        self.sync_physics_to_lua();
-
-        // Process weld constraints (update Part1 positions based on Part0)
-        self.process_welds();
-
-        // Run Lua Heartbeat
+        // Run end-of-frame Lua work after physics (Heartbeat).
         if let Some(runtime) = &self.lua_runtime {
-            if let Err(e) = runtime.tick(dt) {
-                self.handle_lua_error("Tick error", &e);
+            if let Err(e) = runtime.end_frame(dt) {
+                self.handle_lua_error("End frame error", &e);
                 if self.halted_error.is_some() {
                     return;
                 }
             }
         }
+
+        self.process_replicated_events();
 
         self.tick += 1;
+    }
+
+    fn process_replicated_events(&mut self) {
+        let Some(runtime) = &self.lua_runtime else {
+            return;
+        };
+        let queued = runtime.game().remote_event_service().drain_events();
+        if queued.is_empty() {
+            return;
+        }
+
+        let tick = self.tick;
+        let server_time_ms = self.elapsed_ms();
+        for event in queued {
+            let id = self.next_replicated_event_id;
+            self.next_replicated_event_id = self.next_replicated_event_id.saturating_add(1);
+            self.replicated_events.push_back(SpectatorReplicatedEvent {
+                id,
+                tick,
+                server_time_ms,
+                name: event.name,
+                reliable: event.reliable,
+                payload: event.payload,
+                target_user_id: event.target_user_id,
+            });
+        }
+
+        while self.replicated_events.len() > MAX_REPLICATED_EVENTS_BUFFER {
+            self.replicated_events.pop_front();
+        }
+    }
+
+    fn recent_public_replicated_events(&self) -> Vec<SpectatorReplicatedEvent> {
+        let count = self
+            .replicated_events
+            .len()
+            .min(MAX_RECENT_EVENTS_PER_OBSERVATION);
+        self.replicated_events
+            .iter()
+            .filter(|evt| evt.target_user_id.is_none())
+            .rev()
+            .take(count)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    }
+
+    fn recent_replicated_events_for_user(&self, user_id: u64) -> Vec<SpectatorReplicatedEvent> {
+        self.recent_replicated_events_filtered(Some(user_id))
+    }
+
+    fn recent_replicated_events_filtered(
+        &self,
+        user_id: Option<u64>,
+    ) -> Vec<SpectatorReplicatedEvent> {
+        let count = self
+            .replicated_events
+            .len()
+            .min(MAX_RECENT_EVENTS_PER_OBSERVATION);
+        self.replicated_events
+            .iter()
+            .filter(|evt| match (evt.target_user_id, user_id) {
+                (None, _) => true,
+                (Some(_), None) => false,
+                (Some(target), Some(viewer)) => target == viewer,
+            })
+            .rev()
+            .take(count)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
     }
 
     /// Process kick requests queued by Lua scripts (e.g., Player:Kick())
@@ -402,7 +562,11 @@ impl GameInstance {
                 .map(|(&aid, _)| aid);
 
             if let Some(agent_id) = agent_id {
-                let name = self.player_names.get(&agent_id).cloned().unwrap_or_default();
+                let name = self
+                    .player_names
+                    .get(&agent_id)
+                    .cloned()
+                    .unwrap_or_default();
                 if let Some(msg) = &request.message {
                     eprintln!(
                         "[Kick] Removing player {} (user_id={}) - Reason: {}",
@@ -496,7 +660,7 @@ impl GameInstance {
     /// - Creates physics bodies for new parts (skips character-controlled parts)
     /// - Updates positions for anchored parts that moved in Lua
     /// - Removes physics bodies for parts that were destroyed in Lua
-    fn sync_lua_to_physics(&mut self) {
+    fn sync_lua_to_physics(&mut self, dt: f32) {
         let Some(runtime) = &self.lua_runtime else {
             return;
         };
@@ -525,7 +689,11 @@ impl GameInstance {
                         );
                         self.physics.set_character_position(
                             lua_id,
-                            [part_data.position.x, part_data.position.y, part_data.position.z],
+                            [
+                                part_data.position.x,
+                                part_data.position.y,
+                                part_data.position.z,
+                            ],
                         );
                         part_data.position_dirty = false;
                     }
@@ -533,16 +701,19 @@ impl GameInstance {
                 }
 
                 if !self.physics.has_part(lua_id) {
-                    // New part - add to physics with CFrame rotation
-                    // Parts with CanCollide=false are added as sensors (no physical response)
-                    let quat = part_data.cframe.to_quaternion();
+                    // New part - add to physics (even CanCollide=false as sensor)
                     self.physics.add_part(
                         lua_id,
-                        [part_data.position.x, part_data.position.y, part_data.position.z],
-                        quat,
+                        [
+                            part_data.position.x,
+                            part_data.position.y,
+                            part_data.position.z,
+                        ],
+                        &part_data.cframe.rotation,
                         [part_data.size.x, part_data.size.y, part_data.size.z],
                         part_data.anchored,
                         part_data.can_collide,
+                        part_data.shape,
                     );
 
                     // Apply initial velocity for dynamic parts
@@ -550,30 +721,99 @@ impl GameInstance {
                         if let Some(handle) = self.physics.get_handle(lua_id) {
                             self.physics.set_velocity(
                                 handle,
-                                [part_data.velocity.x, part_data.velocity.y, part_data.velocity.z],
+                                [
+                                    part_data.velocity.x,
+                                    part_data.velocity.y,
+                                    part_data.velocity.z,
+                                ],
                             );
                         }
                     }
-                } else {
-                    // Existing part — sync CanCollide (sensor toggle) and position/rotation
-                    self.physics.set_can_collide(lua_id, part_data.can_collide);
 
-                    if part_data.anchored {
+                    // Clear all dirty flags since we just created the body
+                    part_data.size_dirty = false;
+                    part_data.anchored_dirty = false;
+                    part_data.can_collide_dirty = false;
+                    part_data.velocity_dirty = false;
+                    part_data.shape_dirty = false;
+                } else {
+                    // Existing part - process dirty flags
+                    if part_data.anchored_dirty {
+                        self.physics.set_anchored(lua_id, part_data.anchored);
+                        part_data.anchored_dirty = false;
+                    }
+                    if part_data.size_dirty {
+                        self.physics.set_size(
+                            lua_id,
+                            [part_data.size.x, part_data.size.y, part_data.size.z],
+                        );
+                        part_data.size_dirty = false;
+                    }
+                    if part_data.can_collide_dirty {
+                        self.physics.set_can_collide(lua_id, part_data.can_collide);
+                        part_data.can_collide_dirty = false;
+                    }
+                    if part_data.velocity_dirty {
                         if let Some(handle) = self.physics.get_handle(lua_id) {
-                            self.physics.set_kinematic_position(
+                            self.physics.set_velocity(
                                 handle,
-                                [part_data.position.x, part_data.position.y, part_data.position.z],
+                                [
+                                    part_data.velocity.x,
+                                    part_data.velocity.y,
+                                    part_data.velocity.z,
+                                ],
                             );
-                            let quat = part_data.cframe.to_quaternion();
-                            self.physics.set_kinematic_rotation(handle, quat);
                         }
+                        part_data.velocity_dirty = false;
+                    }
+                    if part_data.shape_dirty {
+                        self.physics.set_shape(
+                            lua_id,
+                            part_data.shape,
+                            [part_data.size.x, part_data.size.y, part_data.size.z],
+                        );
+                        part_data.shape_dirty = false;
+                    }
+
+                    // Position/CFrame writes from Lua should move both anchored and dynamic parts.
+                    // This preserves Roblox-like semantics for server-authoritative movement scripts.
+                    if part_data.position_dirty {
+                        if let Some(handle) = self.physics.get_handle(lua_id) {
+                            if part_data.anchored {
+                                self.physics.set_kinematic_position_with_dt(
+                                    handle,
+                                    [
+                                        part_data.position.x,
+                                        part_data.position.y,
+                                        part_data.position.z,
+                                    ],
+                                    dt,
+                                );
+                                self.physics
+                                    .set_kinematic_rotation(handle, &part_data.cframe.rotation);
+                            } else {
+                                self.physics.set_dynamic_position(
+                                    handle,
+                                    [
+                                        part_data.position.x,
+                                        part_data.position.y,
+                                        part_data.position.z,
+                                    ],
+                                );
+                                self.physics
+                                    .set_dynamic_rotation(handle, &part_data.cframe.rotation);
+                            }
+                        }
+                        part_data.position_dirty = false;
                     }
                 }
             }
         }
 
         // Remove physics parts that no longer exist in Lua (destroyed parts)
-        let orphaned_ids: Vec<u64> = self.physics.get_all_part_ids()
+        let orphaned_ids: Vec<u64> = self
+            .physics
+            .get_all_part_ids()
             .into_iter()
             .filter(|id| !active_lua_ids.contains(id))
             .collect();
@@ -607,6 +847,16 @@ impl GameInstance {
                         part_data.position.z = pos[2];
                         part_data.cframe.position = part_data.position;
                     }
+                    if let Some(handle) = self.physics.get_handle(lua_id) {
+                        if let Some(rot) = self.physics.get_rotation_matrix(handle) {
+                            part_data.cframe.rotation = rot;
+                        }
+                    }
+                    if let Some(vel) = self.physics.get_character_velocity(lua_id) {
+                        part_data.velocity.x = vel[0];
+                        part_data.velocity.y = vel[1];
+                        part_data.velocity.z = vel[2];
+                    }
                 } else if !part_data.anchored {
                     if let Some(handle) = self.physics.get_handle(lua_id) {
                         // Update position from physics
@@ -615,6 +865,11 @@ impl GameInstance {
                             part_data.position.y = pos[1];
                             part_data.position.z = pos[2];
                             part_data.cframe.position = part_data.position;
+                        }
+
+                        // Update rotation from physics
+                        if let Some(rot) = self.physics.get_rotation_matrix(handle) {
+                            part_data.cframe.rotation = rot;
                         }
 
                         // Update velocity from physics
@@ -629,6 +884,182 @@ impl GameInstance {
         }
     }
 
+    /// Detects touch overlaps and fires Touched / TouchEnded signals.
+    /// Compares current-frame overlaps against previous-frame overlaps.
+    ///
+    /// Matches Roblox semantics:
+    /// - Both parts must have CanTouch=true for events to fire on either
+    /// - Two anchored (non-character) parts never fire Touched on each other
+    /// - Touched fires once on first overlap, TouchEnded fires once when overlap ends
+    fn fire_touch_events(&mut self) {
+        // Refresh query pipeline after physics step
+        self.physics
+            .query_pipeline
+            .update(&self.physics.collider_set);
+
+        // Detect current overlaps
+        let current = self.physics.detect_overlaps();
+        let transitions = compute_touch_transitions(&current, &self.prev_touches);
+
+        // Do all Lua work in a block to scope the runtime borrow,
+        // collecting errors to handle afterward (split-borrow pattern).
+        let mut errors: Vec<(&str, mlua::Error)> = Vec::new();
+
+        if let Some(runtime) = &self.lua_runtime {
+            let lua = runtime.lua();
+
+            // Build lua_id -> Instance lookup from workspace descendants
+            let descendants = runtime.workspace().get_descendants();
+            let mut id_to_instance: HashMap<u64, Instance> = HashMap::new();
+            for inst in &descendants {
+                let data = inst.data.lock().unwrap();
+                let lua_id = data.id.0;
+                if data.part_data.is_some() {
+                    id_to_instance.insert(lua_id, inst.clone());
+                }
+            }
+
+            // Helper: check if a lua_id is an anchored non-character part
+            let is_anchored_non_character = |lua_id: u64| -> bool {
+                if self.physics.has_character(lua_id) {
+                    return false;
+                }
+                id_to_instance
+                    .get(&lua_id)
+                    .and_then(|inst| {
+                        let data = inst.data.lock().unwrap();
+                        data.part_data.as_ref().map(|p| p.anchored)
+                    })
+                    .unwrap_or(false)
+            };
+
+            // Helper: fire a signal on one part with the other as argument
+            let mut fire_signal = |signal: &super::lua::events::RBXScriptSignal,
+                                   other: &Instance| {
+                match lua.create_userdata(other.clone()) {
+                    Ok(ud) => {
+                        match signal.fire_as_coroutines(
+                            lua,
+                            mlua::MultiValue::from_iter([mlua::Value::UserData(ud)]),
+                        ) {
+                            Ok(threads) => {
+                                if let Err(e) =
+                                    super::lua::events::track_yielded_threads(lua, threads)
+                                {
+                                    errors.push(("Touch track threads", e));
+                                }
+                            }
+                            Err(e) => errors.push(("Touch event", e)),
+                        }
+                    }
+                    Err(e) => errors.push(("Touch userdata", e)),
+                }
+            };
+
+            // Began touches
+            for (a, b) in transitions.began.iter().copied() {
+                // Roblox: two anchored (non-character) parts never fire Touched
+                if is_anchored_non_character(a) && is_anchored_non_character(b) {
+                    continue;
+                }
+
+                let (inst_a, inst_b) = match (
+                    id_to_instance.get(&a).cloned(),
+                    id_to_instance.get(&b).cloned(),
+                ) {
+                    (Some(a), Some(b)) => (a, b),
+                    _ => continue,
+                };
+
+                // Roblox: both parts must have CanTouch=true for events to fire
+                let (a_can_touch, a_group, a_signal) = {
+                    let data = inst_a.data.lock().unwrap();
+                    match data.part_data.as_ref() {
+                        Some(p) => (p.can_touch, p.collision_group.clone(), p.touched.clone()),
+                        None => continue,
+                    }
+                };
+                let (b_can_touch, b_group, b_signal) = {
+                    let data = inst_b.data.lock().unwrap();
+                    match data.part_data.as_ref() {
+                        Some(p) => (p.can_touch, p.collision_group.clone(), p.touched.clone()),
+                        None => continue,
+                    }
+                };
+
+                if !a_can_touch || !b_can_touch {
+                    continue;
+                }
+                if !runtime
+                    .game()
+                    .physics_service()
+                    .groups_collidable(&a_group, &b_group)
+                {
+                    continue;
+                }
+
+                // Fire Touched on A with B as argument, and B with A
+                fire_signal(&a_signal, &inst_b);
+                fire_signal(&b_signal, &inst_a);
+            }
+
+            // Ended touches
+            for (a, b) in transitions.ended.iter().copied() {
+                let (inst_a, inst_b) = match (
+                    id_to_instance.get(&a).cloned(),
+                    id_to_instance.get(&b).cloned(),
+                ) {
+                    (Some(a), Some(b)) => (a, b),
+                    _ => continue,
+                };
+
+                let (a_can_touch, a_group, a_signal) = {
+                    let data = inst_a.data.lock().unwrap();
+                    match data.part_data.as_ref() {
+                        Some(p) => (
+                            p.can_touch,
+                            p.collision_group.clone(),
+                            p.touch_ended.clone(),
+                        ),
+                        None => continue,
+                    }
+                };
+                let (b_can_touch, b_group, b_signal) = {
+                    let data = inst_b.data.lock().unwrap();
+                    match data.part_data.as_ref() {
+                        Some(p) => (
+                            p.can_touch,
+                            p.collision_group.clone(),
+                            p.touch_ended.clone(),
+                        ),
+                        None => continue,
+                    }
+                };
+
+                if !a_can_touch || !b_can_touch {
+                    continue;
+                }
+                if !runtime
+                    .game()
+                    .physics_service()
+                    .groups_collidable(&a_group, &b_group)
+                {
+                    continue;
+                }
+
+                fire_signal(&a_signal, &inst_b);
+                fire_signal(&b_signal, &inst_a);
+            }
+        }
+
+        // Handle collected errors after runtime borrow is released
+        for (context, err) in errors {
+            self.handle_lua_error(context, &err);
+        }
+
+        self.prev_touches = current;
+    }
+
     /// Process weld constraints - update Part1 position based on Part0's CFrame
     fn process_welds(&mut self) {
         let Some(runtime) = &self.lua_runtime else {
@@ -639,8 +1070,8 @@ impl GameInstance {
 
         // Collect welds and their data first to avoid borrow conflicts
         let mut weld_updates: Vec<(
-            crate::game::lua::instance::InstanceRef,  // Part1 ref
-            crate::game::lua::types::Vector3,         // new position
+            crate::game::lua::instance::InstanceRef, // Part1 ref
+            crate::game::lua::types::Vector3,        // new position
         )> = Vec::new();
 
         for instance in &descendants {
@@ -690,258 +1121,27 @@ impl GameInstance {
         }
     }
 
-    /// Syncs Lua humanoid MoveTo targets to physics character controllers
-    fn sync_humanoid_move_targets(&mut self) {
-        let Some(runtime) = &self.lua_runtime else {
-            return;
-        };
-
-        // For each player, check if their humanoid has a move target
-        for (&agent_id, &user_id) in &self.players {
-            let Some(&hrp_id) = self.player_hrp_ids.get(&agent_id) else {
-                if let Ok(mut counts) = self.humanoid_warn_counts.lock() {
-                    let count = counts.entry(agent_id).or_insert(0);
-                    if *count < 3 {
-                        eprintln!("[MoveTo WARN] Missing HRP for agent {}", agent_id);
-                        *count += 1;
-                    }
-                }
-                continue;
-            };
-
-            // Get player's character and humanoid
-            let Some(player) = runtime.players().get_player_by_user_id(user_id) else {
-                if let Ok(mut counts) = self.humanoid_warn_counts.lock() {
-                    let count = counts.entry(agent_id).or_insert(0);
-                    if *count < 3 {
-                        eprintln!("[MoveTo WARN] Missing player for agent {}", agent_id);
-                        *count += 1;
-                    }
-                }
-                continue;
-            };
-
-            let player_data = player.data.lock().unwrap();
-            let Some(character_weak) = player_data.player_data.as_ref().and_then(|pd| pd.character.as_ref()) else {
-                if let Ok(mut counts) = self.humanoid_warn_counts.lock() {
-                    let count = counts.entry(agent_id).or_insert(0);
-                    if *count < 3 {
-                        eprintln!("[MoveTo WARN] Missing character for agent {}", agent_id);
-                        *count += 1;
-                    }
-                }
-                continue;
-            };
-            let Some(character_ref) = character_weak.upgrade() else {
-                if let Ok(mut counts) = self.humanoid_warn_counts.lock() {
-                    let count = counts.entry(agent_id).or_insert(0);
-                    if *count < 3 {
-                        eprintln!("[MoveTo WARN] Character ref expired for agent {}", agent_id);
-                        *count += 1;
-                    }
-                }
-                continue;
-            };
-            drop(player_data);
-
-            // Find humanoid in character and process move target
-            let character_data = character_ref.lock().unwrap();
-            let mut found_humanoid = false;
-            for child_ref in &character_data.children {
-                let mut child_data = child_ref.lock().unwrap();
-                if let Some(humanoid) = &mut child_data.humanoid_data {
-                    found_humanoid = true;
-                    // Check for cancel first
-                    if humanoid.cancel_move_to {
-                        humanoid.cancel_move_to = false;
-                        self.physics.set_character_target(hrp_id, None);
-                    } else if let Some(target) = humanoid.move_to_target.take() {
-                        self.physics.set_character_target(hrp_id, Some([target.x, target.y, target.z]));
-                    }
-                    // Sync jump request and jump power to physics
-                    if humanoid.jump_requested {
-                        humanoid.jump_requested = false;
-                        if let Some(state) = self.physics.get_character_state_mut(hrp_id) {
-                            state.jump_requested = true;
-                            state.jump_power = humanoid.jump_power;
-                        }
-                    }
-                }
-            }
-            if !found_humanoid {
-                if let Ok(mut counts) = self.humanoid_warn_counts.lock() {
-                    let count = counts.entry(agent_id).or_insert(0);
-                    if *count < 3 {
-                        eprintln!("[MoveTo WARN] No humanoid found for agent {}", agent_id);
-                        *count += 1;
-                    }
-                }
-            }
-        }
+    /// Sync control targets from script state into physics character controllers.
+    fn sync_controller_targets(&mut self) {
+        controller_runtime::sync_move_targets(self);
     }
-
-
 
     /// Updates character controller movement towards targets.
     /// Uses Rapier's kinematic character controller for full 3D translation.
     fn update_character_movement(&mut self, dt: f32) {
-        // Collect agent_id -> hrp_id pairs to process (avoid borrow issues)
-        let agent_hrp_pairs: Vec<(Uuid, u64)> = self
-            .player_hrp_ids
-            .iter()
-            .map(|(&agent_id, &hrp_id)| (agent_id, hrp_id))
-            .collect();
-
-        for (agent_id, hrp_id) in agent_hrp_pairs {
-            // Get current position, target, vertical velocity, and jump state
-            let (current_pos, target, vertical_velocity, grounded, jump_requested, jump_power) = {
-                let Some(state) = self.physics.get_character_state(hrp_id) else {
-                    continue;
-                };
-                let Some(pos) = self.physics.get_character_position(hrp_id) else {
-                    continue;
-                };
-                (pos, state.target_position, state.vertical_velocity, state.grounded, state.jump_requested, state.jump_power)
-            };
-
-            // Look up the humanoid's walk_speed from Lua instance data
-            let walk_speed = self.get_humanoid_walk_speed(agent_id).unwrap_or(WALK_SPEED);
-
-            let gravity = self.physics.gravity.y;
-            let mut new_vertical_velocity = vertical_velocity + gravity * dt;
-
-            // Apply jump when grounded and jump was requested
-            // Only clear the flag when the jump actually executes, so jumps
-            // can be queued while airborne and fire on next landing
-            if grounded && jump_requested {
-                new_vertical_velocity = jump_power;
-                if let Some(state) = self.physics.get_character_state_mut(hrp_id) {
-                    state.jump_requested = false;
-                }
-                eprintln!("[Jump] agent={} jump_power={:.1} grounded={}", agent_id, jump_power, grounded);
-            }
-
-            // Calculate horizontal movement towards target
-            let mut dx = 0.0f32;
-            let mut dz = 0.0f32;
-
-            if let Some(target) = target {
-                let tx = target[0] - current_pos[0];
-                let tz = target[2] - current_pos[2];
-                let dist_xz = (tx * tx + tz * tz).sqrt();
-
-                if dist_xz > 0.5 {
-                    // Reduce horizontal speed while truly airborne (jumping/falling),
-                    // but keep full speed for brief ground loss (walking over bumps)
-                    let effective_speed = if grounded {
-                        walk_speed
-                    } else if new_vertical_velocity.abs() > consts::AIR_CONTROL_THRESHOLD {
-                        walk_speed * consts::AIR_CONTROL
-                    } else {
-                        walk_speed // Brief ground loss, keep normal speed
-                    };
-                    let speed = effective_speed * dt;
-                    dx = (tx / dist_xz) * speed;
-                    dz = (tz / dist_xz) * speed;
-                } else {
-                    // Reached target, clear it
-                    self.physics.set_character_target(hrp_id, None);
-                }
-            }
-
-            // When grounded, use zero vertical component - snap_to_ground handles staying grounded
-            // Only apply gravity when airborne
-            // Note: The -0.001 epsilon was causing floor collisions that blocked horizontal movement
-            let desired_y = if grounded && new_vertical_velocity <= 0.0 {
-                0.0 // snap_to_ground keeps character on ground; no downward component needed
-            } else {
-                new_vertical_velocity * dt
-            };
-            let desired = [dx, desired_y, dz];
-            if let Some(movement) = self.physics.move_character(hrp_id, desired, dt) {
-                // Debug: log grounded transitions for first few frames
-                if !grounded && movement.grounded {
-                    if let Some(pos) = self.physics.get_character_position(hrp_id) {
-                        eprintln!("[Ground] agent={} LANDED at y={:.3} vert_vel={:.2}", agent_id, pos[1], new_vertical_velocity);
-                    }
-                } else if grounded && !movement.grounded {
-                    if let Some(pos) = self.physics.get_character_position(hrp_id) {
-                        eprintln!("[Ground] agent={} LEFT ground at y={:.3} vert_vel={:.2} desired_y={:.4}", agent_id, pos[1], new_vertical_velocity, desired_y);
-                    }
-                }
-                if movement.grounded && new_vertical_velocity < 0.0 {
-                    new_vertical_velocity = 0.0;
-                }
-                if desired[1] > 0.0 && movement.translation.y + 1.0e-4 < desired[1] {
-                    new_vertical_velocity = 0.0;
-                }
-            }
-
-            if let Some(state) = self.physics.get_character_state_mut(hrp_id) {
-                state.vertical_velocity = new_vertical_velocity;
-            }
-        }
+        controller_runtime::update_character_movement(self, dt);
     }
 
     /// Gets the observation for a specific player
     pub fn get_player_observation(&self, agent_id: Uuid) -> Option<PlayerObservation> {
-        let user_id = *self.players.get(&agent_id)?;
-
-        let runtime = self.lua_runtime.as_ref()?;
-        let player = runtime.players().get_player_by_user_id(user_id)?;
-
-        // Get position from character's HumanoidRootPart (rounded to reduce payload size)
-        let position = round_position(self.get_player_position(agent_id).unwrap_or([0.0, 3.0, 0.0]));
-
-        {
-            let mut counts = self.observation_log_counts.lock().unwrap();
-            let count = counts.entry(agent_id).or_insert(0);
-            if *count < 5 {
-                let name = self.player_names.get(&agent_id).cloned().unwrap_or_default();
-                eprintln!(
-                    "[Obs] tick={} agent={} name={} pos=({:.2},{:.2},{:.2})",
-                    self.tick,
-                    agent_id,
-                    name,
-                    position[0],
-                    position[1],
-                    position[2]
-                );
-                *count += 1;
-            }
-        }
-
-        // Get health from humanoid
-        let health = self.get_player_health(agent_id).unwrap_or(100);
-
-        // Read all player attributes generically and convert to JSON
-        let player_data = player.data.lock().unwrap();
-        let attributes = attributes_to_json(&player_data.attributes);
-        drop(player_data);
-
-        // Get other players (with LOS filtering)
-        let other_players = self.get_other_players(agent_id, position);
-
-        // Get dynamic world entities only (static entities fetched via /map endpoint)
-        let world = self.get_dynamic_world_info();
-
-        Some(PlayerObservation {
-            tick: self.tick,
-            game_status: self.get_game_status_from_lua(),
-            player: PlayerInfo {
-                id: agent_id,
-                position,
-                health,
-                attributes,
-            },
-            other_players,
-            world,
-            events: Vec::new(),
-        })
+        observation::build_player_observation(self, agent_id)
     }
 
     /// Get the game status from Lua if available
     fn get_game_status_from_lua(&self) -> String {
+        if self.halted_error.is_some() {
+            return "failed".to_string();
+        }
         // Default to instance status
         match self.status {
             GameStatus::Waiting => "waiting".to_string(),
@@ -983,64 +1183,16 @@ impl GameInstance {
         None
     }
 
-    /// Get walk speed from the player's Humanoid
+    #[cfg(test)]
+    /// Get walk speed from the player's controller source.
     fn get_humanoid_walk_speed(&self, agent_id: Uuid) -> Option<f32> {
-        let user_id = *self.players.get(&agent_id)?;
-        let runtime = self.lua_runtime.as_ref()?;
-        let player = runtime.players().get_player_by_user_id(user_id)?;
-
-        let player_data = player.data.lock().unwrap();
-        let character = player_data
-            .player_data
-            .as_ref()?
-            .character
-            .as_ref()?
-            .upgrade()?;
-        drop(player_data);
-
-        let char_data = character.lock().unwrap();
-        for child in &char_data.children {
-            let child_data = child.lock().unwrap();
-            if let Some(humanoid) = &child_data.humanoid_data {
-                return Some(humanoid.walk_speed);
-            }
-        }
-        None
+        controller_runtime::get_humanoid_walk_speed(self, agent_id)
     }
 
     /// Get static map geometry (entities with "Static" tag)
     /// Used for one-time fetch via /map endpoint
     pub fn get_map_info(&self) -> MapInfo {
-        let mut entities = Vec::new();
-
-        if let Some(runtime) = &self.lua_runtime {
-            for part in runtime.workspace().get_descendants() {
-                let data = part.data.lock().unwrap();
-
-                // Only include entities with "Static" tag
-                if !data.tags.contains("Static") {
-                    continue;
-                }
-
-                if let Some(part_data) = &data.part_data {
-                    let attrs = attributes_to_json(&data.attributes);
-                    entities.push(WorldEntity {
-                        id: data.id.0,
-                        name: data.name.clone(),
-                        entity_type: Some("part".to_string()),
-                        position: [part_data.position.x, part_data.position.y, part_data.position.z],
-                        size: [part_data.size.x, part_data.size.y, part_data.size.z],
-                        color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
-                        material: Some(part_data.material.name().to_string()),
-                        anchored: part_data.anchored,
-                        transparency: if part_data.transparency > 0.0 { Some(part_data.transparency) } else { None },
-                        attributes: if attrs.is_empty() { None } else { Some(attrs) },
-                    });
-                }
-            }
-        }
-
-        MapInfo { entities }
+        observation::build_map_info(self)
     }
 
     /// Get dynamic world info (entities WITHOUT "Static" tag + folders with attributes)
@@ -1058,17 +1210,33 @@ impl GameInstance {
                 if let Some(part_data) = &data.part_data {
                     // Only include parts WITHOUT "Static" tag
                     if !is_static {
+                        let raw_position = [
+                            part_data.position.x,
+                            part_data.position.y,
+                            part_data.position.z,
+                        ];
+                        let raw_size = [part_data.size.x, part_data.size.y, part_data.size.z];
+                        let (aabb, obb) =
+                            compute_part_bounds(raw_position, raw_size, part_data.cframe.rotation);
                         let attrs = attributes_to_json(&data.attributes);
                         entities.push(WorldEntity {
                             id: data.id.0,
                             name: data.name.clone(),
                             entity_type: Some("part".to_string()),
-                            position: round_position([part_data.position.x, part_data.position.y, part_data.position.z]),
-                            size: round_position([part_data.size.x, part_data.size.y, part_data.size.z]),
+                            position: round_position(raw_position),
+                            size: round_position(raw_size),
+                            rotation: Some(part_data.cframe.rotation),
+                            aabb: Some(aabb),
+                            obb: Some(obb),
                             color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
                             material: Some(part_data.material.name().to_string()),
+                            shape: Some(part_data.shape.name().to_string()),
+                            transparency: if part_data.transparency != 0.0 {
+                                Some(part_data.transparency)
+                            } else {
+                                None
+                            },
                             anchored: part_data.anchored,
-                            transparency: if part_data.transparency > 0.0 { Some(part_data.transparency) } else { None },
                             attributes: if attrs.is_empty() { None } else { Some(attrs) },
                         });
                     }
@@ -1082,10 +1250,14 @@ impl GameInstance {
                             entity_type: Some("folder".to_string()),
                             position: [0.0, 0.0, 0.0],
                             size: [0.0, 0.0, 0.0],
+                            rotation: None,
+                            aabb: None,
+                            obb: None,
                             color: None,
                             material: None,
-                            anchored: true,
+                            shape: None,
                             transparency: None,
+                            anchored: true,
                             attributes: Some(attrs),
                         });
                     }
@@ -1111,12 +1283,24 @@ impl GameInstance {
                         id: data.id.0,
                         name: data.name.clone(),
                         entity_type: Some("part".to_string()),
-                        position: [part_data.position.x, part_data.position.y, part_data.position.z],
+                        position: [
+                            part_data.position.x,
+                            part_data.position.y,
+                            part_data.position.z,
+                        ],
                         size: [part_data.size.x, part_data.size.y, part_data.size.z],
+                        rotation: Some(part_data.cframe.rotation),
+                        aabb: None,
+                        obb: None,
                         color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
                         material: Some(part_data.material.name().to_string()),
+                        shape: Some(part_data.shape.name().to_string()),
+                        transparency: if part_data.transparency != 0.0 {
+                            Some(part_data.transparency)
+                        } else {
+                            None
+                        },
                         anchored: part_data.anchored,
-                        transparency: if part_data.transparency > 0.0 { Some(part_data.transparency) } else { None },
                         attributes: if attrs.is_empty() { None } else { Some(attrs) },
                     });
                 } else if data.class_name == ClassName::Folder {
@@ -1129,10 +1313,14 @@ impl GameInstance {
                             entity_type: Some("folder".to_string()),
                             position: [0.0, 0.0, 0.0],
                             size: [0.0, 0.0, 0.0],
+                            rotation: None,
+                            aabb: None,
+                            obb: None,
                             color: None,
                             material: None,
-                            anchored: true,
+                            shape: None,
                             transparency: None,
+                            anchored: true,
                             attributes: Some(attrs),
                         });
                     }
@@ -1143,14 +1331,47 @@ impl GameInstance {
         WorldInfo { entities }
     }
 
-    /// Get info about other players with distance and line-of-sight filtering
-    fn get_other_players(&self, exclude_agent_id: Uuid, observer_pos: [f32; 3]) -> Vec<OtherPlayerInfo> {
-        const MAX_VISIBILITY_DISTANCE: f32 = 100.0;
+    fn get_player_view_origin(&self, agent_id: Uuid) -> Option<[f32; 3]> {
+        let pos = self.get_player_position(agent_id)?;
+        Some([pos[0], pos[1] + 2.0, pos[2]])
+    }
 
+    fn get_player_view_forward(&self, agent_id: Uuid) -> Option<[f32; 3]> {
+        let hrp_id = *self.player_hrp_ids.get(&agent_id)?;
+        let state = self.physics.get_character_state(hrp_id)?;
+        let rot = self.physics.get_rotation_matrix(state.body_handle)?;
+        // Roblox/CFrame look vector convention: local -Z points forward.
+        let mut fx = -rot[0][2];
+        let mut fz = -rot[2][2];
+        let mag = (fx * fx + fz * fz).sqrt();
+        if mag <= 1e-4 {
+            return Some([0.0, 0.0, -1.0]);
+        }
+        fx /= mag;
+        fz /= mag;
+        Some([fx, 0.0, fz])
+    }
+
+    fn player_view_fov_deg(&self) -> f32 {
+        // Matches spectator camera intent (75deg vertical perspective on widescreen ~= ~105deg horizontal).
+        105.0
+    }
+
+    /// Get info about other players with distance, line-of-sight and view-cone filtering.
+    fn get_other_players(&self, exclude_agent_id: Uuid) -> Vec<OtherPlayerInfo> {
         let mut others = Vec::new();
-
+        let observer_pos = self
+            .get_player_position(exclude_agent_id)
+            .unwrap_or([0.0, 0.0, 0.0]);
+        let observer_eye = self.get_player_view_origin(exclude_agent_id).unwrap_or([
+            observer_pos[0],
+            observer_pos[1] + 2.0,
+            observer_pos[2],
+        ]);
         // Get observer's body handle for LOS exclusion
-        let observer_body = self.player_hrp_ids.get(&exclude_agent_id)
+        let observer_body = self
+            .player_hrp_ids
+            .get(&exclude_agent_id)
             .and_then(|&hrp_id| self.physics.get_character_state(hrp_id))
             .map(|state| state.body_handle);
 
@@ -1159,7 +1380,9 @@ impl GameInstance {
                 continue;
             }
 
-            let position = self.get_player_position(agent_id).unwrap_or([0.0, 0.0, 0.0]);
+            let position = self
+                .get_player_position(agent_id)
+                .unwrap_or([0.0, 0.0, 0.0]);
 
             // Distance culling
             let dx = position[0] - observer_pos[0];
@@ -1167,12 +1390,21 @@ impl GameInstance {
             let dz = position[2] - observer_pos[2];
             let distance = (dx * dx + dy * dy + dz * dz).sqrt();
 
-            if distance > MAX_VISIBILITY_DISTANCE {
+            if distance > self.observation_radius {
                 continue;
             }
 
-            // Line-of-sight check (only for nearby players)
-            if !self.physics.has_line_of_sight(observer_pos, position, observer_body) {
+            let target_eye = [position[0], position[1] + 2.0, position[2]];
+            let target_body = self
+                .player_hrp_ids
+                .get(&agent_id)
+                .and_then(|&hrp_id| self.physics.get_character_state(hrp_id))
+                .map(|state| state.body_handle);
+            // Line-of-sight check from eye-to-eye.
+            if !self
+                .physics
+                .has_line_of_sight(observer_eye, target_eye, observer_body, target_body)
+            {
                 continue;
             }
 
@@ -1192,7 +1424,9 @@ impl GameInstance {
 
             others.push(OtherPlayerInfo {
                 id: agent_id,
+                name: self.player_names.get(&agent_id).cloned(),
                 position: round_position(position),
+                distance: round_f32(distance),
                 health,
                 attributes,
             });
@@ -1239,7 +1473,13 @@ impl GameInstance {
             rotation: gui_data.map(|g| g.rotation),
             z_index: gui_data.map(|g| g.z_index),
             visible: gui_data.map(|g| g.visible),
-            background_color: gui_data.map(|g| [g.background_color.r, g.background_color.g, g.background_color.b]),
+            background_color: gui_data.map(|g| {
+                [
+                    g.background_color.r,
+                    g.background_color.g,
+                    g.background_color.b,
+                ]
+            }),
             background_transparency: gui_data.map(|g| g.background_transparency),
             border_color: gui_data.map(|g| [g.border_color.r, g.border_color.g, g.border_color.b]),
             border_size_pixel: gui_data.map(|g| g.border_size_pixel),
@@ -1281,142 +1521,7 @@ impl GameInstance {
 
     /// Gets the spectator observation (full world state from Lua Workspace)
     pub fn get_spectator_observation(&self) -> SpectatorObservation {
-        let mut entities = Vec::new();
-        let mut players = Vec::new();
-
-        if let Some(runtime) = &self.lua_runtime {
-            // Collect all parts from Workspace
-            for part in runtime.workspace().get_descendants() {
-                let data = part.data.lock().unwrap();
-
-                if let Some(part_data) = &data.part_data {
-                    // Only include rotation if it's not identity
-                    let rot = part_data.cframe.rotation;
-                    let is_identity = (rot[0][0] - 1.0).abs() < 0.001
-                        && rot[0][1].abs() < 0.001
-                        && rot[0][2].abs() < 0.001
-                        && rot[1][0].abs() < 0.001
-                        && (rot[1][1] - 1.0).abs() < 0.001
-                        && rot[1][2].abs() < 0.001
-                        && rot[2][0].abs() < 0.001
-                        && rot[2][1].abs() < 0.001
-                        && (rot[2][2] - 1.0).abs() < 0.001;
-
-                    // Check for BillboardGui children
-                    let billboard_gui = Self::collect_billboard_gui(&data.children);
-
-                    entities.push(SpectatorEntity {
-                        id: data.id.0 as u32,
-                        entity_type: "part".to_string(),
-                        position: round_position([
-                            part_data.position.x,
-                            part_data.position.y,
-                            part_data.position.z,
-                        ]),
-                        rotation: if is_identity { None } else { Some(rot) },
-                        size: Some(round_position([part_data.size.x, part_data.size.y, part_data.size.z])),
-                        color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
-                        material: Some(part_data.material.name().to_string()),
-                        shape: Some(part_data.shape.name().to_string()),
-                        transparency: if part_data.transparency > 0.0 { Some(part_data.transparency) } else { None },
-                        health: None,
-                        pickup_type: None,
-                        model_url: Self::extract_model_url(&data.attributes),
-                        billboard_gui,
-                    });
-                }
-            }
-
-            // Collect player info
-            for (&agent_id, &user_id) in &self.players {
-                if let Some(player) = runtime.players().get_player_by_user_id(user_id) {
-                    let player_data = player.data.lock().unwrap();
-
-                    // Get position and health in one pass (avoid redundant locking)
-                    let (position, health) = player_data.player_data.as_ref()
-                        .and_then(|pd| pd.character.as_ref())
-                        .and_then(|weak| weak.upgrade())
-                        .map(|char_ref| {
-                            let char = char_ref.lock().unwrap();
-
-                            // Get position from HumanoidRootPart
-                            let pos = char.model_data.as_ref()
-                                .and_then(|m| m.primary_part.as_ref())
-                                .and_then(|weak| weak.upgrade())
-                                .and_then(|hrp_data| {
-                                    let hrp = hrp_data.lock().unwrap();
-                                    hrp.part_data.as_ref().map(|p| [p.position.x, p.position.y, p.position.z])
-                                })
-                                .unwrap_or([0.0, 3.0, 0.0]);
-
-                            // Get health from Humanoid (while we have character locked)
-                            let hp = char.children.iter()
-                                .find_map(|child| {
-                                    let child_data = child.lock().unwrap();
-                                    if child_data.name == "Humanoid" {
-                                        child_data.humanoid_data.as_ref().map(|h| h.health as i32)
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .unwrap_or(100);
-
-                            (pos, hp)
-                        })
-                        .unwrap_or(([0.0, 3.0, 0.0], 100));
-
-                    // Get player name from our cache, or fall back to Player_<uuid>
-                    let name = self.player_names.get(&agent_id)
-                        .cloned()
-                        .unwrap_or_else(|| format!("Player_{}", agent_id.as_simple()));
-
-                    // Get all attributes and convert to JSON Value
-                    let attrs = attributes_to_json(&player_data.attributes);
-                    let attributes = if attrs.is_empty() {
-                        None
-                    } else {
-                        Some(serde_json::to_value(&attrs).unwrap_or(serde_json::Value::Null))
-                    };
-
-                    // Serialize PlayerGui tree
-                    let gui = player_data.player_data.as_ref()
-                        .and_then(|pd| pd.player_gui.as_ref())
-                        .and_then(|weak| weak.upgrade())
-                        .map(|player_gui_ref| {
-                            let player_gui = Instance::from_ref(player_gui_ref);
-                            // Get all ScreenGui children
-                            player_gui.get_children()
-                                .iter()
-                                .filter_map(|child| Self::serialize_gui_tree(child))
-                                .collect::<Vec<_>>()
-                        })
-                        .filter(|v: &Vec<GuiElement>| !v.is_empty());
-
-                    players.push(SpectatorPlayerInfo {
-                        id: agent_id,
-                        name,
-                        position: round_position(position),
-                        health,
-                        attributes,
-                        gui,
-                    });
-                    drop(player_data);
-                }
-            }
-        }
-
-        SpectatorObservation {
-            instance_id: self.instance_id,
-            tick: self.tick,
-            server_time_ms: self.elapsed_ms(),
-            game_status: match self.status {
-                GameStatus::Waiting => "waiting".to_string(),
-                GameStatus::Playing => "playing".to_string(),
-                GameStatus::Finished => "finished".to_string(),
-            },
-            players,
-            entities,
-        }
+        observation::build_spectator_observation(self)
     }
 
     /// Collects BillboardGui data from a part's children
@@ -1482,6 +1587,21 @@ impl GameInstance {
         }
         None
     }
+
+    /// Reads model local yaw correction (degrees) from instance attributes.
+    /// Supports both `ModelYawOffsetDeg` and `model_yaw_offset_deg`.
+    fn extract_model_yaw_offset_deg(
+        attributes: &std::collections::HashMap<String, AttributeValue>,
+    ) -> Option<f32> {
+        for key in ["ModelYawOffsetDeg", "model_yaw_offset_deg"] {
+            if let Some(AttributeValue::Number(value)) = attributes.get(key) {
+                if value.is_finite() {
+                    return Some(*value as f32);
+                }
+            }
+        }
+        None
+    }
 }
 
 // ============================================================================
@@ -1496,6 +1616,8 @@ pub struct PlayerObservation {
     pub other_players: Vec<OtherPlayerInfo>,
     pub world: WorldInfo,
     pub events: Vec<GameEvent>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recent_events: Vec<SpectatorReplicatedEvent>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1518,14 +1640,35 @@ pub struct WorldEntity {
     pub position: [f32; 3],
     pub size: [f32; 3],
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<[[f32; 3]; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aabb: Option<EntityAabb>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub obb: Option<EntityObb>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<[f32; 3]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub material: Option<String>,
-    pub anchored: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transparency: Option<f32>,
+    pub anchored: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attributes: Option<std::collections::HashMap<String, serde_json::Value>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EntityAabb {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EntityObb {
+    pub center: [f32; 3],
+    pub half_extents: [f32; 3],
+    pub corners: [[f32; 3]; 8],
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1540,7 +1683,10 @@ pub struct PlayerInfo {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OtherPlayerInfo {
     pub id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub position: [f32; 3],
+    pub distance: f32,
     pub health: i32,
     /// Game-specific attributes set by Lua scripts
     pub attributes: std::collections::HashMap<String, serde_json::Value>,
@@ -1582,6 +1728,29 @@ pub struct SpectatorObservation {
     pub game_status: String,
     pub players: Vec<SpectatorPlayerInfo>,
     pub entities: Vec<SpectatorEntity>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sounds: Vec<SpectatorSound>,
+    pub recent_events: Vec<SpectatorReplicatedEvent>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SpectatorSound {
+    pub id: u32,
+    pub stream_id: String,
+    pub volume: f32,
+    pub is_playing: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SpectatorReplicatedEvent {
+    pub id: u64,
+    pub tick: u64,
+    pub server_time_ms: u64,
+    pub name: String,
+    pub reliable: bool,
+    pub payload: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_user_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1589,11 +1758,33 @@ pub struct SpectatorPlayerInfo {
     pub id: Uuid,
     pub name: String,
     pub position: [f32; 3],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_part_id: Option<u32>,
     pub health: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub humanoid_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attributes: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gui: Option<Vec<GuiElement>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_animations: Option<Vec<SpectatorPlayerAnimation>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SpectatorPlayerAnimation {
+    pub track_id: u64,
+    pub animation_id: String,
+    pub length: f32,
+    pub priority: i32,
+    pub time_position: f32,
+    pub speed: f32,
+    pub looped: bool,
+    pub is_playing: bool,
+    pub is_stopping: bool,
+    pub weight_current: f32,
+    pub weight_target: f32,
+    pub effective_weight: f32,
 }
 
 /// Serialized GUI element for frontend rendering
@@ -1667,14 +1858,7 @@ pub struct SpectatorEntity {
     pub rotation: Option<[[f32; 3]; 3]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<[f32; 3]>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub color: Option<[f32; 3]>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub material: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub shape: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transparency: Option<f32>,
+    pub render: SpectatorRender,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1682,7 +1866,28 @@ pub struct SpectatorEntity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_yaw_offset_deg: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub billboard_gui: Option<BillboardGuiJson>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SpectatorRender {
+    pub kind: String,
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset_id: Option<String>,
+    pub primitive: String,
+    pub material: String,
+    pub color: [f32; 3],
+    #[serde(rename = "static")]
+    pub is_static: bool,
+    pub casts_shadow: bool,
+    pub receives_shadow: bool,
+    pub visible: bool,
+    pub double_sided: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transparency: Option<f32>,
 }
 
 /// BillboardGui serialization for 3D floating labels
@@ -1710,14 +1915,16 @@ mod tests {
         let mut instance = GameInstance::new(Uuid::new_v4(), None);
 
         // Load a simple script that creates a floor
-        instance.load_script(r#"
+        instance.load_script(
+            r#"
             local floor = Instance.new("Part")
             floor.Name = "Floor"
             floor.Size = Vector3.new(100, 1, 100)
             floor.Position = Vector3.new(0, 0, 0)
             floor.Anchored = true
             floor.Parent = Workspace
-        "#);
+        "#,
+        );
 
         // Add a player
         let agent_id = Uuid::new_v4();
@@ -1732,7 +1939,9 @@ mod tests {
         println!("Initial player position: {:?}", initial_pos);
 
         // Set movement target directly via physics
-        instance.physics.set_character_target(hrp_id, Some([10.0, 5.0, 10.0]));
+        instance
+            .physics
+            .set_character_target(hrp_id, Some([10.0, 5.0, 10.0]));
 
         // Run 120 ticks (2 seconds at 60 Hz)
         for _ in 0..120 {
@@ -1752,7 +1961,10 @@ mod tests {
 
         // At 16 studs/sec for 2 seconds, should move up to 32 studs
         // Target is ~14.14 studs away horizontally, should reach it
-        assert!(horizontal_distance > 5.0, "Player should have moved significantly towards target");
+        assert!(
+            horizontal_distance > 5.0,
+            "Player should have moved significantly towards target"
+        );
     }
 
     #[test]
@@ -1798,14 +2010,21 @@ mod tests {
 
         // Queue a MoveTo input via agent input service (like Python test does)
         let user_id = *instance.players.get(&agent_id).unwrap();
-        instance.queue_agent_input(user_id, "MoveTo".to_string(), serde_json::json!({"position": [20.0, initial_pos[1], 0.0]}));
+        instance.queue_agent_input(
+            user_id,
+            "MoveTo".to_string(),
+            serde_json::json!({"position": [20.0, initial_pos[1], 0.0]}),
+        );
 
         // Run 120 ticks (2 seconds)
         for i in 0..120 {
             instance.tick();
             if i % 30 == 0 {
                 let pos = instance.physics.get_character_position(hrp_id).unwrap();
-                println!("Tick {}: pos=({:.2}, {:.2}, {:.2})", i, pos[0], pos[1], pos[2]);
+                println!(
+                    "Tick {}: pos=({:.2}, {:.2}, {:.2})",
+                    i, pos[0], pos[1], pos[2]
+                );
             }
         }
 
@@ -1818,7 +2037,504 @@ mod tests {
         println!("Horizontal distance moved: {}", horizontal_distance);
 
         // Should move significantly (at 16 studs/sec, should move ~32 studs in 2 sec)
-        assert!(horizontal_distance > 10.0, "Player should have moved towards target via Lua MoveTo");
+        assert!(
+            horizontal_distance > 10.0,
+            "Player should have moved towards target via Lua MoveTo"
+        );
+    }
+
+    #[test]
+    fn test_player_move_direction_via_lua_input() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(
+            r#"
+            local AgentInputService = game:GetService("AgentInputService")
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(100, 1, 100)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            if AgentInputService then
+                AgentInputService.InputReceived:Connect(function(player, inputType, data)
+                    if inputType == "Move" and data and data.direction then
+                        local humanoid = player.Character and player.Character:FindFirstChild("Humanoid")
+                        if humanoid then
+                            local dir = data.direction
+                            humanoid:Move(Vector3.new(dir[1], dir[2], dir[3]), false)
+                        end
+                    end
+                end)
+            end
+        "#,
+        );
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "MovePlayer"));
+        let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+        let user_id = *instance.players.get(&agent_id).unwrap();
+
+        let initial_pos = instance.physics.get_character_position(hrp_id).unwrap();
+
+        // Feed directional Move() input for ~2 seconds.
+        for _ in 0..120 {
+            instance.queue_agent_input(
+                user_id,
+                "Move".to_string(),
+                serde_json::json!({ "direction": [1.0, 0.0, 0.0] }),
+            );
+            instance.tick();
+        }
+
+        let final_pos = instance.physics.get_character_position(hrp_id).unwrap();
+        let moved_x = final_pos[0] - initial_pos[0];
+        let moved_z = final_pos[2] - initial_pos[2];
+        let horizontal_distance = (moved_x * moved_x + moved_z * moved_z).sqrt();
+
+        assert!(
+            horizontal_distance > 8.0,
+            "Player should move with Humanoid:Move input. Initial={:?} Final={:?}",
+            initial_pos,
+            final_pos
+        );
+    }
+
+    #[test]
+    fn test_humanoid_jump_input_moves_character_upward() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(r#"
+            local AgentInputService = game:GetService("AgentInputService")
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(100, 1, 100)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            if AgentInputService then
+                AgentInputService.InputReceived:Connect(function(player, inputType, data)
+                    if inputType == "Jump" then
+                        local humanoid = player.Character and player.Character:FindFirstChild("Humanoid")
+                        if humanoid then
+                            humanoid.Jump = true
+                        end
+                    end
+                end)
+            end
+        "#);
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "TestPlayer"));
+        let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+        let user_id = *instance.players.get(&agent_id).unwrap();
+
+        for _ in 0..30 {
+            instance.tick();
+        }
+
+        let start = instance.physics.get_character_position(hrp_id).unwrap();
+        instance.queue_agent_input(user_id, "Jump".to_string(), serde_json::json!({}));
+
+        let mut max_y = start[1];
+        for _ in 0..60 {
+            instance.tick();
+            let pos = instance.physics.get_character_position(hrp_id).unwrap();
+            max_y = max_y.max(pos[1]);
+        }
+
+        assert!(
+            max_y > start[1] + 1.0,
+            "Jump should move the character upward. start_y={}, max_y={}",
+            start[1],
+            max_y
+        );
+    }
+
+    #[test]
+    fn test_humanoid_state_changed_transitions_jump_freefall_running() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(r#"
+            local AgentInputService = game:GetService("AgentInputService")
+            local Players = game:GetService("Players")
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(100, 1, 100)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            local state = Instance.new("Part")
+            state.Name = "StateMarker"
+            state.Size = Vector3.new(2, 2, 2)
+            state.Position = Vector3.new(0, 2, 15)
+            state.Anchored = true
+            state.Parent = Workspace
+            state:SetAttribute("JumpingCount", 0)
+            state:SetAttribute("FreefallCount", 0)
+            state:SetAttribute("LandedCount", 0)
+            state:SetAttribute("RunningCount", 0)
+            state:SetAttribute("LastState", "")
+
+            local function bindHumanoid(player)
+                local character = player.Character
+                if not character then return end
+                local humanoid = character:FindFirstChild("Humanoid")
+                if not humanoid then return end
+
+                humanoid.StateChanged:Connect(function(_oldState, newState)
+                    if newState == Enum.HumanoidStateType.Jumping then
+                        state:SetAttribute("JumpingCount", (state:GetAttribute("JumpingCount") or 0) + 1)
+                    elseif newState == Enum.HumanoidStateType.Freefall then
+                        state:SetAttribute("FreefallCount", (state:GetAttribute("FreefallCount") or 0) + 1)
+                    elseif newState == Enum.HumanoidStateType.Landed then
+                        state:SetAttribute("LandedCount", (state:GetAttribute("LandedCount") or 0) + 1)
+                    elseif newState == Enum.HumanoidStateType.Running then
+                        state:SetAttribute("RunningCount", (state:GetAttribute("RunningCount") or 0) + 1)
+                    end
+                    state:SetAttribute("LastState", newState.Name)
+                end)
+            end
+
+            Players.PlayerAdded:Connect(function(player)
+                player.CharacterAdded:Connect(function()
+                    bindHumanoid(player)
+                end)
+                bindHumanoid(player)
+            end)
+
+            if AgentInputService then
+                AgentInputService.InputReceived:Connect(function(player, inputType, _data)
+                    if inputType == "Jump" then
+                        local humanoid = player.Character and player.Character:FindFirstChild("Humanoid")
+                        if humanoid then
+                            humanoid.Jump = true
+                        end
+                    end
+                end)
+            end
+        "#);
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "TestPlayer"));
+        let user_id = *instance.players.get(&agent_id).unwrap();
+
+        // Settle character onto ground first.
+        for _ in 0..45 {
+            instance.tick();
+        }
+
+        instance.queue_agent_input(user_id, "Jump".to_string(), serde_json::json!({}));
+
+        // Run enough frames to observe jump up, freefall down, and landing.
+        for _ in 0..120 {
+            instance.tick();
+        }
+
+        let jumping_count = get_trigger_attr(&instance, "StateMarker", "JumpingCount");
+        let freefall_count = get_trigger_attr(&instance, "StateMarker", "FreefallCount");
+        let landed_count = get_trigger_attr(&instance, "StateMarker", "LandedCount");
+        let running_count = get_trigger_attr(&instance, "StateMarker", "RunningCount");
+        let last_state = get_trigger_str_attr(&instance, "StateMarker", "LastState");
+
+        assert!(
+            jumping_count >= 1.0,
+            "Expected at least one Jumping state transition"
+        );
+        assert!(
+            freefall_count >= 1.0,
+            "Expected at least one Freefall state transition"
+        );
+        assert!(
+            landed_count >= 1.0,
+            "Expected at least one Landed state transition"
+        );
+        assert!(
+            running_count >= 1.0,
+            "Expected a Running state transition after landing"
+        );
+        assert_eq!(
+            last_state, "Running",
+            "Expected final state to return to Running"
+        );
+    }
+
+    #[test]
+    fn test_moveto_finished_fires_for_reach_and_cancel() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(r#"
+            local AgentInputService = game:GetService("AgentInputService")
+            local Players = game:GetService("Players")
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(200, 1, 200)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            local state = Instance.new("Part")
+            state.Name = "SignalState"
+            state.Size = Vector3.new(2, 2, 2)
+            state.Position = Vector3.new(0, 2, 20)
+            state.Anchored = true
+            state.Parent = Workspace
+            state:SetAttribute("ReachCount", 0)
+            state:SetAttribute("CancelCount", 0)
+            state:SetAttribute("LastReached", false)
+
+            local function bindHumanoid(player)
+                local character = player.Character
+                if not character then return end
+                local humanoid = character:FindFirstChild("Humanoid")
+                if not humanoid then return end
+
+                humanoid.MoveToFinished:Connect(function(reached)
+                    if reached then
+                        state:SetAttribute("ReachCount", (state:GetAttribute("ReachCount") or 0) + 1)
+                    else
+                        state:SetAttribute("CancelCount", (state:GetAttribute("CancelCount") or 0) + 1)
+                    end
+                    state:SetAttribute("LastReached", reached)
+                end)
+            end
+
+            Players.PlayerAdded:Connect(function(player)
+                player.CharacterAdded:Connect(function()
+                    bindHumanoid(player)
+                end)
+                bindHumanoid(player)
+            end)
+
+            if AgentInputService then
+                AgentInputService.InputReceived:Connect(function(player, inputType, data)
+                    local humanoid = player.Character and player.Character:FindFirstChild("Humanoid")
+                    if not humanoid then return end
+
+                    if inputType == "MoveTo" and data and data.position then
+                        local pos = data.position
+                        humanoid:MoveTo(Vector3.new(pos[1], pos[2], pos[3]))
+                    elseif inputType == "Stop" then
+                        humanoid:CancelMoveTo()
+                    end
+                end)
+            end
+        "#);
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "TestPlayer"));
+        let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+        let user_id = *instance.players.get(&agent_id).unwrap();
+
+        for _ in 0..20 {
+            instance.tick();
+        }
+
+        let start = instance.physics.get_character_position(hrp_id).unwrap();
+        instance.queue_agent_input(
+            user_id,
+            "MoveTo".to_string(),
+            serde_json::json!({"position": [start[0] + 8.0, start[1], start[2]]}),
+        );
+        for _ in 0..180 {
+            instance.tick();
+        }
+
+        let reach_count = get_trigger_attr(&instance, "SignalState", "ReachCount");
+        assert!(
+            reach_count >= 1.0,
+            "MoveToFinished(true) should fire on reach"
+        );
+
+        let mid = instance.physics.get_character_position(hrp_id).unwrap();
+        instance.queue_agent_input(
+            user_id,
+            "MoveTo".to_string(),
+            serde_json::json!({"position": [mid[0] + 40.0, mid[1], mid[2]]}),
+        );
+        for _ in 0..20 {
+            instance.tick();
+        }
+        instance.queue_agent_input(user_id, "Stop".to_string(), serde_json::json!({}));
+        for _ in 0..10 {
+            instance.tick();
+        }
+
+        let cancel_count = get_trigger_attr(&instance, "SignalState", "CancelCount");
+        assert!(
+            cancel_count >= 1.0,
+            "MoveToFinished(false) should fire on cancel"
+        );
+
+        let last_reached = get_trigger_bool_attr(&instance, "SignalState", "LastReached");
+        assert!(!last_reached, "LastReached should be false after cancel");
+    }
+
+    #[test]
+    fn test_moveto_finished_false_on_timeout_when_blocked() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(r#"
+            local AgentInputService = game:GetService("AgentInputService")
+            local Players = game:GetService("Players")
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(300, 1, 300)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            local wall = Instance.new("Part")
+            wall.Name = "Wall"
+            wall.Size = Vector3.new(2, 20, 120)
+            wall.Position = Vector3.new(5, 10, 0)
+            wall.Anchored = true
+            wall.Parent = Workspace
+
+            local state = Instance.new("Part")
+            state.Name = "SignalState"
+            state.Size = Vector3.new(2, 2, 2)
+            state.Position = Vector3.new(0, 2, 40)
+            state.Anchored = true
+            state.Parent = Workspace
+            state:SetAttribute("TimeoutCount", 0)
+            state:SetAttribute("ReachedCount", 0)
+
+            local function bindHumanoid(player)
+                local character = player.Character
+                if not character then return end
+                local humanoid = character:FindFirstChild("Humanoid")
+                if not humanoid then return end
+                humanoid.MoveToFinished:Connect(function(reached)
+                    if reached then
+                        state:SetAttribute("ReachedCount", (state:GetAttribute("ReachedCount") or 0) + 1)
+                    else
+                        state:SetAttribute("TimeoutCount", (state:GetAttribute("TimeoutCount") or 0) + 1)
+                    end
+                end)
+            end
+
+            Players.PlayerAdded:Connect(function(player)
+                player.CharacterAdded:Connect(function()
+                    bindHumanoid(player)
+                end)
+                bindHumanoid(player)
+            end)
+
+            if AgentInputService then
+                AgentInputService.InputReceived:Connect(function(player, inputType, data)
+                    if inputType == "MoveTo" and data and data.position then
+                        local humanoid = player.Character and player.Character:FindFirstChild("Humanoid")
+                        if humanoid then
+                            local pos = data.position
+                            humanoid:MoveTo(Vector3.new(pos[1], pos[2], pos[3]))
+                        end
+                    end
+                end)
+            end
+        "#);
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "TestPlayer"));
+        let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+        let user_id = *instance.players.get(&agent_id).unwrap();
+
+        for _ in 0..20 {
+            instance.tick();
+        }
+
+        let start = instance.physics.get_character_position(hrp_id).unwrap();
+        instance.queue_agent_input(
+            user_id,
+            "MoveTo".to_string(),
+            serde_json::json!({"position": [20.0, start[1], 0.0]}),
+        );
+
+        // Wait longer than MoveTo timeout window.
+        for _ in 0..540 {
+            instance.tick();
+        }
+
+        let timeout_count = get_trigger_attr(&instance, "SignalState", "TimeoutCount");
+        let reached_count = get_trigger_attr(&instance, "SignalState", "ReachedCount");
+        let final_pos = instance.physics.get_character_position(hrp_id).unwrap();
+
+        assert!(
+            timeout_count >= 1.0,
+            "MoveToFinished(false) should fire on timeout when blocked. timeout_count={}",
+            timeout_count
+        );
+        assert_eq!(
+            reached_count, 0.0,
+            "Blocked target should not report reached"
+        );
+        assert!(
+            final_pos[0] < 6.0,
+            "Character should remain blocked near wall. final_pos={:?}",
+            final_pos
+        );
+    }
+
+    #[test]
+    fn test_grounded_character_carried_by_moving_platform() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(
+            r#"
+            local RunService = game:GetService("RunService")
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(300, 1, 300)
+            floor.Position = Vector3.new(0, -1, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            local elevator = Instance.new("Part")
+            elevator.Name = "Elevator"
+            elevator.Size = Vector3.new(30, 1, 30)
+            elevator.Position = Vector3.new(-1.5, 1.0, 0.0)
+            elevator.Anchored = true
+            elevator.Parent = Workspace
+
+            local elapsed = 0
+            RunService.Heartbeat:Connect(function(dt)
+                elapsed = elapsed + dt
+                if elapsed < 1.0 then
+                    elevator.Position = elevator.Position + Vector3.new(0, 0.12, 0)
+                end
+            end)
+        "#,
+        );
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "TestPlayer"));
+        let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+
+        for _ in 0..20 {
+            instance.tick();
+        }
+        let y_before = instance.physics.get_character_position(hrp_id).unwrap()[1];
+
+        for _ in 0..60 {
+            instance.tick();
+        }
+        let y_after = instance.physics.get_character_position(hrp_id).unwrap()[1];
+
+        assert!(
+            y_after > y_before + 1.0,
+            "Character should be carried upward by moving platform. before_y={}, after_y={}",
+            y_before,
+            y_after
+        );
     }
 
     #[test]
@@ -1826,7 +2542,8 @@ mod tests {
         let mut instance = GameInstance::new(Uuid::new_v4(), None);
 
         // Load a script that creates some geometry
-        instance.load_script(r#"
+        instance.load_script(
+            r#"
             local floor = Instance.new("Part")
             floor.Name = "Floor"
             floor.Size = Vector3.new(100, 1, 100)
@@ -1840,7 +2557,8 @@ mod tests {
             platform.Position = Vector3.new(0, 5, 0)
             platform.Anchored = true
             platform.Parent = Workspace
-        "#);
+        "#,
+        );
 
         let agent_id = Uuid::new_v4();
         instance.add_player(agent_id, "TestPlayer");
@@ -1851,17 +2569,35 @@ mod tests {
         let obs = instance.get_player_observation(agent_id).unwrap();
 
         // Should have world entities
-        assert!(!obs.world.entities.is_empty(), "World should contain entities");
+        assert!(
+            !obs.world.entities.is_empty(),
+            "World should contain entities"
+        );
 
         // Should have Floor and CenterPlatform
         let names: Vec<&str> = obs.world.entities.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"Floor"), "Should contain Floor");
-        assert!(names.contains(&"CenterPlatform"), "Should contain CenterPlatform");
+        assert!(
+            names.contains(&"CenterPlatform"),
+            "Should contain CenterPlatform"
+        );
 
         // Check Floor properties
-        let floor = obs.world.entities.iter().find(|e| e.name == "Floor").unwrap();
+        let floor = obs
+            .world
+            .entities
+            .iter()
+            .find(|e| e.name == "Floor")
+            .unwrap();
         assert_eq!(floor.size, [100.0, 1.0, 100.0]);
         assert!(floor.anchored);
+        let aabb = floor.aabb.as_ref().expect("observe should include AABB");
+        assert_eq!(aabb.min, [-50.0, -0.5, -50.0]);
+        assert_eq!(aabb.max, [50.0, 0.5, 50.0]);
+        let obb = floor.obb.as_ref().expect("observe should include OBB");
+        assert_eq!(obb.center, [0.0, 0.0, 0.0]);
+        assert_eq!(obb.half_extents, [50.0, 0.5, 50.0]);
+        assert_eq!(obb.corners.len(), 8);
     }
 
     #[test]
@@ -1869,7 +2605,8 @@ mod tests {
         let mut instance = GameInstance::new(Uuid::new_v4(), None);
 
         // Create a wall between two player spawn points
-        instance.load_script(r#"
+        instance.load_script(
+            r#"
             local floor = Instance.new("Part")
             floor.Name = "Floor"
             floor.Size = Vector3.new(100, 1, 100)
@@ -1883,7 +2620,8 @@ mod tests {
             wall.Position = Vector3.new(0, 5, 0)
             wall.Anchored = true
             wall.Parent = Workspace
-        "#);
+        "#,
+        );
 
         let agent_a = Uuid::new_v4();
         let agent_b = Uuid::new_v4();
@@ -1899,17 +2637,27 @@ mod tests {
         let hrp_b = *instance.player_hrp_ids.get(&agent_b).unwrap();
 
         // Ensure characters have physics bodies initialized
-        instance.physics.set_character_position(hrp_a, [0.0, 2.0, -10.0]);
-        instance.physics.set_character_position(hrp_b, [0.0, 2.0, 10.0]);
+        instance
+            .physics
+            .set_character_position(hrp_a, [0.0, 2.0, -10.0]);
+        instance
+            .physics
+            .set_character_position(hrp_b, [0.0, 2.0, 10.0]);
 
         // Manually set positions behind the wall
         // Update query pipeline
-        instance.physics.query_pipeline.update(&instance.physics.collider_set);
+        instance
+            .physics
+            .query_pipeline
+            .update(&instance.physics.collider_set);
 
         let obs = instance.get_player_observation(agent_a).unwrap();
 
         // Agent A should NOT see Agent B (blocked by wall)
-        assert!(obs.other_players.is_empty(), "Should not see player through wall");
+        assert!(
+            obs.other_players.is_empty(),
+            "Should not see player through wall"
+        );
     }
 
     #[test]
@@ -1917,14 +2665,16 @@ mod tests {
         let mut instance = GameInstance::new(Uuid::new_v4(), None);
 
         // Just a floor, no obstructions
-        instance.load_script(r#"
+        instance.load_script(
+            r#"
             local floor = Instance.new("Part")
             floor.Name = "Floor"
             floor.Size = Vector3.new(100, 1, 100)
             floor.Position = Vector3.new(0, 0, 0)
             floor.Anchored = true
             floor.Parent = Workspace
-        "#);
+        "#,
+        );
 
         let agent_a = Uuid::new_v4();
         let agent_b = Uuid::new_v4();
@@ -1952,13 +2702,71 @@ mod tests {
         }
 
         // Update query pipeline
-        instance.physics.query_pipeline.update(&instance.physics.collider_set);
+        instance
+            .physics
+            .query_pipeline
+            .update(&instance.physics.collider_set);
 
         let obs = instance.get_player_observation(agent_a).unwrap();
 
         // Agent A should see Agent B (clear LOS)
-        assert_eq!(obs.other_players.len(), 1, "Should see other player with clear LOS");
+        assert_eq!(
+            obs.other_players.len(),
+            1,
+            "Should see other player with clear LOS"
+        );
         assert_eq!(obs.other_players[0].id, agent_b);
+    }
+
+    #[test]
+    fn test_observation_radius_filters_other_players() {
+        let mut instance =
+            GameInstance::new_with_config(Uuid::new_v4(), 8, 5.0, None, ErrorMode::Continue);
+
+        instance.load_script(
+            r#"
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(100, 1, 100)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+        "#,
+        );
+
+        let agent_a = Uuid::new_v4();
+        let agent_b = Uuid::new_v4();
+        instance.add_player(agent_a, "PlayerA");
+        instance.add_player(agent_b, "PlayerB");
+
+        for _ in 0..5 {
+            instance.tick();
+        }
+
+        let hrp_a = *instance.player_hrp_ids.get(&agent_a).unwrap();
+        let hrp_b = *instance.player_hrp_ids.get(&agent_b).unwrap();
+
+        if let Some(state) = instance.physics.get_character_state(hrp_a) {
+            if let Some(body) = instance.physics.rigid_body_set.get_mut(state.body_handle) {
+                body.set_translation(rapier3d::prelude::vector![0.0, 2.0, 0.0], true);
+            }
+        }
+        if let Some(state) = instance.physics.get_character_state(hrp_b) {
+            if let Some(body) = instance.physics.rigid_body_set.get_mut(state.body_handle) {
+                body.set_translation(rapier3d::prelude::vector![10.0, 2.0, 0.0], true);
+            }
+        }
+
+        instance
+            .physics
+            .query_pipeline
+            .update(&instance.physics.collider_set);
+
+        let obs = instance.get_player_observation(agent_a).unwrap();
+        assert!(
+            obs.other_players.is_empty(),
+            "Player beyond configured observation radius should be filtered out"
+        );
     }
 
     #[test]
@@ -2090,7 +2898,11 @@ mod tests {
         }
 
         let final_health = instance.get_player_health(victim_id).unwrap_or(0);
-        assert!(final_health <= 0, "Victim should be dead after {} shots", shots);
+        assert!(
+            final_health <= 0,
+            "Victim should be dead after {} shots",
+            shots
+        );
 
         // Check attacker stats
         if let Some(runtime) = &instance.lua_runtime {
@@ -2119,7 +2931,8 @@ mod tests {
         let mut instance = GameInstance::new(Uuid::new_v4(), None);
 
         // Load a script that kicks a player after they join
-        instance.load_script(r#"
+        instance.load_script(
+            r#"
             local Players = game:GetService("Players")
 
             local floor = Instance.new("Part")
@@ -2135,7 +2948,8 @@ mod tests {
                 -- Schedule kick after a few ticks
                 _G.playerToKick = player
             end)
-        "#);
+        "#,
+        );
 
         // Add a player
         let agent_id = Uuid::new_v4();
@@ -2153,12 +2967,16 @@ mod tests {
         // Now trigger the kick via Lua
         if let Some(runtime) = &instance.lua_runtime {
             let lua = runtime.lua();
-            lua.load(r#"
+            lua.load(
+                r#"
                 if _G.playerToKick then
                     _G.playerToKick:Kick("Test kick")
                     _G.kickCalled = true
                 end
-            "#).exec().expect("Failed to run kick script");
+            "#,
+            )
+            .exec()
+            .expect("Failed to run kick script");
         }
 
         // Run tick to process kick request
@@ -2169,20 +2987,95 @@ mod tests {
     }
 
     #[test]
-    fn test_afk_timeout() {
+    fn test_player_added_can_assign_player_character_roblox_parity() {
         let mut instance = GameInstance::new(Uuid::new_v4(), None);
 
-        // Set a very short AFK timeout for testing (100ms)
-        instance.set_afk_timeout(Duration::from_millis(100));
+        instance.load_script(
+            r#"
+            local Players = game:GetService("Players")
 
-        instance.load_script(r#"
             local floor = Instance.new("Part")
             floor.Name = "Floor"
             floor.Size = Vector3.new(100, 1, 100)
             floor.Position = Vector3.new(0, 0, 0)
             floor.Anchored = true
             floor.Parent = Workspace
-        "#);
+
+            local function createCharacter(player)
+                local character = Instance.new("Model")
+                character.Name = player.Name
+
+                local hrp = Instance.new("Part")
+                hrp.Name = "HumanoidRootPart"
+                hrp.Size = Vector3.new(2, 2, 1)
+                hrp.Anchored = false
+                hrp.Parent = character
+
+                local humanoid = Instance.new("Humanoid")
+                humanoid.Parent = character
+
+                character.Parent = Workspace
+                -- Roblox parity: Player.Character assignment in PlayerAdded callback.
+                player.Character = character
+            end
+
+            Players.PlayerAdded:Connect(function(player)
+                createCharacter(player)
+            end)
+        "#,
+        );
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "ParityPlayer"));
+        assert!(
+            instance.halted_error.is_none(),
+            "Instance should not halt when Player.Character is assigned in PlayerAdded: {:?}",
+            instance.halted_error
+        );
+
+        for _ in 0..3 {
+            instance.tick();
+        }
+
+        if let Some(runtime) = &instance.lua_runtime {
+            let user_id = *instance.players.get(&agent_id).unwrap();
+            let player = runtime
+                .players()
+                .get_player_by_user_id(user_id)
+                .expect("player should exist");
+            let character = {
+                let data = player.data.lock().unwrap();
+                data.player_data
+                    .as_ref()
+                    .and_then(|p| p.character.as_ref())
+                    .and_then(|w| w.upgrade())
+            };
+            assert!(
+                character.is_some(),
+                "player.Character should be set by PlayerAdded callback"
+            );
+        } else {
+            panic!("Lua runtime should be loaded");
+        }
+    }
+
+    #[test]
+    fn test_afk_timeout() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        // Set a very short AFK timeout for testing (100ms)
+        instance.set_afk_timeout(Duration::from_millis(100));
+
+        instance.load_script(
+            r#"
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(100, 1, 100)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+        "#,
+        );
 
         // Add a player
         let agent_id = Uuid::new_v4();
@@ -2206,7 +3099,11 @@ mod tests {
         }
 
         // Player should be kicked for being AFK
-        assert_eq!(instance.players.len(), 0, "Player should have been kicked for AFK");
+        assert_eq!(
+            instance.players.len(),
+            0,
+            "Player should have been kicked for AFK"
+        );
     }
 
     #[test]
@@ -2216,14 +3113,16 @@ mod tests {
         // Set a longer AFK timeout for this test to avoid race conditions (200ms)
         instance.set_afk_timeout(Duration::from_millis(200));
 
-        instance.load_script(r#"
+        instance.load_script(
+            r#"
             local floor = Instance.new("Part")
             floor.Name = "Floor"
             floor.Size = Vector3.new(100, 1, 100)
             floor.Position = Vector3.new(0, 0, 0)
             floor.Anchored = true
             floor.Parent = Workspace
-        "#);
+        "#,
+        );
 
         // Add a player
         let agent_id = Uuid::new_v4();
@@ -2249,7 +3148,11 @@ mod tests {
 
         // Player should still be there (activity reset the timer)
         // Total time since reset: ~100ms, which is less than 200ms timeout
-        assert_eq!(instance.players.len(), 1, "Player should NOT be kicked - activity reset timer");
+        assert_eq!(
+            instance.players.len(),
+            1,
+            "Player should NOT be kicked - activity reset timer"
+        );
     }
 
     #[test]
@@ -2291,12 +3194,21 @@ mod tests {
 
         // Verify default walk speed is returned
         let default_speed = instance.get_humanoid_walk_speed(agent_id);
-        assert!(default_speed.is_some(), "Should be able to get humanoid walk speed");
-        assert_eq!(default_speed.unwrap(), 16.0, "Default walk speed should be 16.0");
+        assert!(
+            default_speed.is_some(),
+            "Should be able to get humanoid walk speed"
+        );
+        assert_eq!(
+            default_speed.unwrap(),
+            16.0,
+            "Default walk speed should be 16.0"
+        );
 
         // Get initial position and set movement target
         let initial_pos = instance.physics.get_character_position(hrp_id).unwrap();
-        instance.physics.set_character_target(hrp_id, Some([50.0, initial_pos[1], 0.0]));
+        instance
+            .physics
+            .set_character_target(hrp_id, Some([50.0, initial_pos[1], 0.0]));
 
         // Run 60 ticks (1 second at default speed)
         for _ in 0..60 {
@@ -2308,19 +3220,29 @@ mod tests {
         println!("Distance moved at default speed (16): {}", distance_default);
 
         // Now set a higher WalkSpeed via agent input (simulating speed upgrade)
-        instance.queue_agent_input(user_id, "SetSpeed".to_string(), serde_json::json!({"speed": 32.0}));
+        instance.queue_agent_input(
+            user_id,
+            "SetSpeed".to_string(),
+            serde_json::json!({"speed": 32.0}),
+        );
 
         // Process the input
         instance.tick();
 
         // Verify the new walk speed is returned
         let new_speed = instance.get_humanoid_walk_speed(agent_id);
-        assert!(new_speed.is_some(), "Should still be able to get humanoid walk speed");
+        assert!(
+            new_speed.is_some(),
+            "Should still be able to get humanoid walk speed"
+        );
         assert_eq!(new_speed.unwrap(), 32.0, "Walk speed should now be 32.0");
 
         // Reset position and move again
         let start_pos = instance.physics.get_character_position(hrp_id).unwrap();
-        instance.physics.set_character_target(hrp_id, Some([start_pos[0] + 50.0, start_pos[1], start_pos[2]]));
+        instance.physics.set_character_target(
+            hrp_id,
+            Some([start_pos[0] + 50.0, start_pos[1], start_pos[2]]),
+        );
 
         // Run another 60 ticks (1 second at double speed)
         for _ in 0..60 {
@@ -2339,5 +3261,819 @@ mod tests {
             distance_default,
             distance_fast
         );
+    }
+
+    #[test]
+    fn test_remote_event_position_write_on_unanchored_part_moves_xz() {
+        // Regression: scripts that move unanchored parts via Position writes each Heartbeat
+        // should move in X/Z when driven by RemoteEvent input.
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(
+            r#"
+            local Players = game:GetService("Players")
+            local ReplicatedStorage = game:GetService("ReplicatedStorage")
+            local RunService = game:GetService("RunService")
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(200, 1, 200)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            local input = Instance.new("RemoteEvent")
+            input.Name = "PlayerInput"
+            input.Parent = ReplicatedStorage
+
+            local moveByPlayer = {}
+            local bodyByPlayer = {}
+
+            Players.PlayerAdded:Connect(function(player)
+                local body = Instance.new("Part")
+                body.Name = player.Name .. "_Body"
+                body.Size = Vector3.new(4, 2, 2)
+                body.Anchored = false
+                body.CanCollide = true
+                body.Position = Vector3.new(0, 6, 0)
+                body.Parent = Workspace
+
+                bodyByPlayer[player] = body
+                moveByPlayer[player] = Vector3.new(0, 0, 0)
+            end)
+
+            input.OnServerEvent:Connect(function(player, moveVec)
+                moveByPlayer[player] = Vector3.new(moveVec.X, 0, moveVec.Z)
+            end)
+
+            RunService.Heartbeat:Connect(function(dt)
+                for player, body in pairs(bodyByPlayer) do
+                    if body and body.Parent then
+                        local v = moveByPlayer[player] or Vector3.new(0, 0, 0)
+                        body.Position = body.Position + v * 25 * dt
+                    end
+                end
+            end)
+        "#,
+        );
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "Probe"));
+        let user_id = *instance.players.get(&agent_id).unwrap();
+
+        for _ in 0..10 {
+            instance.tick();
+        }
+
+        let get_body_x = |instance: &GameInstance| {
+            let obs = instance.get_player_observation(agent_id).unwrap();
+            obs.world
+                .entities
+                .iter()
+                .find(|e| e.name == "Probe_Body")
+                .map(|e| e.position[0])
+                .expect("Probe_Body should exist in world entities")
+        };
+
+        let x_before = get_body_x(&instance);
+
+        for _ in 0..60 {
+            instance.queue_agent_input(
+                user_id,
+                "RemoteEvent".to_string(),
+                serde_json::json!({
+                    "name": "PlayerInput",
+                    "args": [{
+                        "$type": "Vector3",
+                        "x": 1.0,
+                        "y": 0.0,
+                        "z": 0.0
+                    }]
+                }),
+            );
+            instance.tick();
+        }
+
+        let x_after = get_body_x(&instance);
+        let dx = (x_after - x_before).abs();
+
+        assert!(
+            dx > 5.0,
+            "Probe_Body should move in X with RemoteEvent-driven Position writes. before={}, after={}, dx={}",
+            x_before,
+            x_after,
+            dx
+        );
+    }
+
+    #[test]
+    fn test_player_userdata_identity_stable_for_remote_event_tables() {
+        // Regression: scripts commonly key state by Player instance. The same player object
+        // must be seen across PlayerAdded and RemoteEvent.OnServerEvent.
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(
+            r#"
+            local Players = game:GetService("Players")
+            local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+            local input = Instance.new("RemoteEvent")
+            input.Name = "PlayerInput"
+            input.Parent = ReplicatedStorage
+
+            local seen = {}
+            local bodyByPlayer = {}
+            _G.remoteHitCount = 0
+            _G.identityOk = 0
+
+            Players.PlayerAdded:Connect(function(player)
+                local body = Instance.new("Part")
+                body.Name = player.Name .. "_Body"
+                body.Size = Vector3.new(2, 2, 2)
+                body.Anchored = true
+                body.Position = Vector3.new(0, 3, 0)
+                body.Parent = Workspace
+
+                seen[player] = true
+                bodyByPlayer[player] = body
+            end)
+
+            input.OnServerEvent:Connect(function(player, _moveVec)
+                _G.remoteHitCount = (_G.remoteHitCount or 0) + 1
+                _G.identityOk = seen[player] and 1 or 0
+                local body = bodyByPlayer[player]
+                if body then
+                    body:SetAttribute("RemoteHit", 1)
+                    body:SetAttribute("IdentityOk", seen[player] and 1 or 0)
+                end
+            end)
+        "#,
+        );
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "ProbeId"));
+        let user_id = *instance.players.get(&agent_id).unwrap();
+
+        // Let PlayerAdded handlers run and part replication settle.
+        for _ in 0..5 {
+            instance.tick();
+        }
+
+        for _ in 0..8 {
+            instance.queue_agent_input(
+                user_id,
+                "RemoteEvent".to_string(),
+                serde_json::json!({
+                    "name": "PlayerInput",
+                    "args": [{
+                        "$type": "Vector3",
+                        "x": 1.0,
+                        "y": 0.0,
+                        "z": 0.0
+                    }]
+                }),
+            );
+            instance.tick();
+        }
+
+        let globals = instance
+            .lua_runtime
+            .as_ref()
+            .expect("Lua runtime should exist")
+            .lua()
+            .globals();
+        let remote_hit_count: i64 = globals.get("remoteHitCount").unwrap_or(0);
+        let identity_ok_global: i64 = globals.get("identityOk").unwrap_or(0);
+
+        let obs = instance.get_player_observation(agent_id).unwrap();
+        let body = obs
+            .world
+            .entities
+            .iter()
+            .find(|e| e.name == "ProbeId_Body")
+            .expect("ProbeId_Body should exist");
+        let attrs = body
+            .attributes
+            .as_ref()
+            .expect("Body should have attributes");
+        let remote_hit = attrs
+            .get("RemoteHit")
+            .and_then(|v| v.as_f64())
+            .unwrap_or_default();
+        let identity_ok = attrs
+            .get("IdentityOk")
+            .and_then(|v| v.as_f64())
+            .unwrap_or_default();
+
+        assert!(
+            remote_hit_count > 0,
+            "OnServerEvent should run (remoteHitCount={})",
+            remote_hit_count
+        );
+        assert_eq!(
+            identity_ok_global, 1,
+            "identityOk global should be true after OnServerEvent"
+        );
+        assert!(
+            remote_hit > 0.5,
+            "Body attribute should confirm OnServerEvent path (RemoteHit={})",
+            remote_hit
+        );
+        assert_eq!(
+            identity_ok as i64, 1,
+            "Player identity should be stable for table key lookups across callbacks"
+        );
+    }
+
+    #[test]
+    fn test_collectible_touched_owner_player_lookup_path() {
+        // Reproduces generated-game collectible logic:
+        // hit:GetAttribute("Owner") -> Players:GetPlayerByUserId(ownerId)
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(
+            r#"
+            local Players = game:GetService("Players")
+            local ReplicatedStorage = game:GetService("ReplicatedStorage")
+            local RunService = game:GetService("RunService")
+
+            local input = Instance.new("RemoteEvent")
+            input.Name = "PlayerInput"
+            input.Parent = ReplicatedStorage
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(200, 1, 200)
+            floor.Anchored = true
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Parent = Workspace
+
+            local bodyByPlayer = {}
+            local moveByPlayer = {}
+
+            local collectible = Instance.new("Part")
+            collectible.Name = "Collectible"
+            collectible.Size = Vector3.new(2, 2, 2)
+            collectible.Shape = Enum.PartType.Ball
+            collectible.Anchored = true
+            collectible.CanCollide = false
+            collectible.Position = Vector3.new(20, 3, 0)
+            collectible.Parent = Workspace
+            collectible:SetAttribute("HitCount", 0)
+            collectible:SetAttribute("LookupOk", 0)
+
+            collectible.Touched:Connect(function(hit)
+                collectible:SetAttribute("HitCount", (collectible:GetAttribute("HitCount") or 0) + 1)
+                local ownerId = hit:GetAttribute("Owner")
+                if ownerId then
+                    local player = Players:GetPlayerByUserId(ownerId)
+                    if player then
+                        collectible:SetAttribute("LookupOk", 1)
+                    end
+                end
+            end)
+
+            Players.PlayerAdded:Connect(function(player)
+                local body = Instance.new("Part")
+                body.Name = player.Name .. "_Body"
+                body.Size = Vector3.new(4, 2, 2)
+                body.Anchored = false
+                body.CanCollide = true
+                body.Position = Vector3.new(0, 6, 0)
+                body:SetAttribute("Owner", player.UserId)
+                body.Parent = Workspace
+                bodyByPlayer[player] = body
+                moveByPlayer[player] = Vector3.new(0, 0, 0)
+            end)
+
+            input.OnServerEvent:Connect(function(player, moveVec)
+                moveByPlayer[player] = Vector3.new(moveVec.X, 0, moveVec.Z)
+            end)
+
+            RunService.Heartbeat:Connect(function(dt)
+                for player, body in pairs(bodyByPlayer) do
+                    local v = moveByPlayer[player] or Vector3.new(0, 0, 0)
+                    body.Position = body.Position + v * 25 * dt
+                end
+            end)
+        "#,
+        );
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "ProbeTouch"));
+        let user_id = *instance.players.get(&agent_id).unwrap();
+
+        for _ in 0..10 {
+            instance.tick();
+        }
+
+        // Drive body roughly toward collectible at x=20,z=0
+        for _ in 0..80 {
+            instance.queue_agent_input(
+                user_id,
+                "RemoteEvent".to_string(),
+                serde_json::json!({
+                    "name": "PlayerInput",
+                    "args": [{
+                        "$type": "Vector3",
+                        "x": 1.0,
+                        "y": 0.0,
+                        "z": 0.0
+                    }]
+                }),
+            );
+            instance.tick();
+        }
+        for _ in 0..10 {
+            instance.queue_agent_input(
+                user_id,
+                "RemoteEvent".to_string(),
+                serde_json::json!({
+                    "name": "PlayerInput",
+                    "args": [{
+                        "$type": "Vector3",
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 0.0
+                    }]
+                }),
+            );
+            instance.tick();
+        }
+
+        let obs = instance.get_player_observation(agent_id).unwrap();
+        let collectible = obs
+            .world
+            .entities
+            .iter()
+            .find(|e| e.name == "Collectible")
+            .expect("Collectible should exist");
+        let attrs = collectible
+            .attributes
+            .as_ref()
+            .expect("Collectible should have attributes");
+
+        let hit_count = attrs
+            .get("HitCount")
+            .and_then(|v| v.as_f64())
+            .unwrap_or_default();
+        let lookup_ok = attrs
+            .get("LookupOk")
+            .and_then(|v| v.as_f64())
+            .unwrap_or_default();
+
+        assert!(hit_count >= 1.0, "Touched should fire at least once");
+        assert!(
+            lookup_ok >= 1.0,
+            "GetPlayerByUserId(ownerId) should resolve the touching player"
+        );
+    }
+
+    #[test]
+    fn test_touched_events_fire_on_overlap() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        // Script: floor + trigger zone that sets an attribute when Touched fires
+        instance.load_script(
+            r#"
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(200, 1, 200)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            -- Trigger zone: CanCollide=false, CanTouch=true
+            local trigger = Instance.new("Part")
+            trigger.Name = "Trigger"
+            trigger.Size = Vector3.new(6, 6, 6)
+            trigger.Position = Vector3.new(10, 3, 0)
+            trigger.Anchored = true
+            trigger.CanCollide = false
+            trigger.Parent = Workspace
+
+            trigger.Touched:Connect(function(otherPart)
+                trigger:SetAttribute("TouchCount",
+                    (trigger:GetAttribute("TouchCount") or 0) + 1)
+                trigger:SetAttribute("LastTouched", otherPart.Name)
+            end)
+
+            trigger.TouchEnded:Connect(function(otherPart)
+                trigger:SetAttribute("EndedCount",
+                    (trigger:GetAttribute("EndedCount") or 0) + 1)
+            end)
+        "#,
+        );
+
+        // Add player — spawns away from trigger
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "TestPlayer"));
+        let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+
+        // Run a few ticks to settle
+        for _ in 0..10 {
+            instance.tick();
+        }
+
+        // Verify no touches yet
+        let touch_count = get_trigger_attr(&instance, "Trigger", "TouchCount");
+        assert_eq!(touch_count, 0.0, "No touches before moving to trigger");
+
+        // Teleport player into the trigger zone
+        instance
+            .physics
+            .set_character_position(hrp_id, [10.0, 3.0, 0.0]);
+
+        // Tick to detect the overlap
+        for _ in 0..3 {
+            instance.tick();
+        }
+
+        let touch_count = get_trigger_attr(&instance, "Trigger", "TouchCount");
+        assert!(
+            touch_count >= 1.0,
+            "Touched should have fired. Got count={}",
+            touch_count
+        );
+
+        let last_touched = get_trigger_str_attr(&instance, "Trigger", "LastTouched");
+        assert_eq!(
+            last_touched, "HumanoidRootPart",
+            "Touched arg should be the character's HRP"
+        );
+
+        // Now teleport player away from trigger
+        instance
+            .physics
+            .set_character_position(hrp_id, [50.0, 3.0, 0.0]);
+
+        for _ in 0..3 {
+            instance.tick();
+        }
+
+        let ended_count = get_trigger_attr(&instance, "Trigger", "EndedCount");
+        assert!(
+            ended_count >= 1.0,
+            "TouchEnded should have fired. Got count={}",
+            ended_count
+        );
+    }
+
+    #[test]
+    fn test_moveto_reaches_non_collidable_trigger() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(r#"
+            local AgentInputService = game:GetService("AgentInputService")
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(200, 2, 200)
+            floor.Position = Vector3.new(0, -1, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            local trigger = Instance.new("Part")
+            trigger.Name = "Trigger"
+            trigger.Size = Vector3.new(6, 6, 6)
+            trigger.Position = Vector3.new(0, 3, -30)
+            trigger.Anchored = true
+            trigger.CanCollide = false
+            trigger.Parent = Workspace
+
+            trigger.Touched:Connect(function(otherPart)
+                trigger:SetAttribute("TouchCount",
+                    (trigger:GetAttribute("TouchCount") or 0) + 1)
+            end)
+
+            if AgentInputService then
+                AgentInputService.InputReceived:Connect(function(player, inputType, data)
+                    if inputType == "MoveTo" and data and data.position then
+                        local humanoid = player.Character and player.Character:FindFirstChild("Humanoid")
+                        if humanoid then
+                            local pos = data.position
+                            humanoid:MoveTo(Vector3.new(pos[1], pos[2], pos[3]))
+                        end
+                    end
+                end)
+            end
+        "#);
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "TestPlayer"));
+        let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+        let user_id = *instance.players.get(&agent_id).unwrap();
+
+        for _ in 0..10 {
+            instance.tick();
+        }
+
+        let start = instance.physics.get_character_position(hrp_id).unwrap();
+        instance.queue_agent_input(
+            user_id,
+            "MoveTo".to_string(),
+            serde_json::json!({"position": [0.0, start[1], -30.0]}),
+        );
+
+        for _ in 0..240 {
+            instance.tick();
+        }
+
+        let final_pos = instance.physics.get_character_position(hrp_id).unwrap();
+        let dx = final_pos[0] - 0.0;
+        let dz = final_pos[2] - (-30.0);
+        let dist_xz = (dx * dx + dz * dz).sqrt();
+        assert!(
+            dist_xz < 4.0,
+            "MoveTo should reach the non-collidable trigger. Final pos={:?}, dist_xz={}",
+            final_pos,
+            dist_xz
+        );
+
+        let touch_count = get_trigger_attr(&instance, "Trigger", "TouchCount");
+        assert!(
+            touch_count >= 1.0,
+            "Touched should fire when entering trigger via MoveTo. Got count={}",
+            touch_count
+        );
+    }
+
+    #[test]
+    fn test_touched_requires_both_can_touch() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        // Script: trigger with CanTouch=false — Touched should NOT fire
+        instance.load_script(
+            r#"
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(200, 1, 200)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            local trigger = Instance.new("Part")
+            trigger.Name = "Trigger"
+            trigger.Size = Vector3.new(6, 6, 6)
+            trigger.Position = Vector3.new(10, 3, 0)
+            trigger.Anchored = true
+            trigger.CanCollide = false
+            trigger.CanTouch = false
+            trigger.Parent = Workspace
+
+            trigger.Touched:Connect(function(otherPart)
+                trigger:SetAttribute("TouchCount",
+                    (trigger:GetAttribute("TouchCount") or 0) + 1)
+            end)
+        "#,
+        );
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "TestPlayer"));
+        let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+
+        for _ in 0..10 {
+            instance.tick();
+        }
+
+        // Teleport into trigger
+        instance
+            .physics
+            .set_character_position(hrp_id, [10.0, 3.0, 0.0]);
+
+        for _ in 0..5 {
+            instance.tick();
+        }
+
+        let touch_count = get_trigger_attr(&instance, "Trigger", "TouchCount");
+        assert_eq!(
+            touch_count, 0.0,
+            "Touched should NOT fire when CanTouch=false. Got count={}",
+            touch_count
+        );
+    }
+
+    #[test]
+    fn test_touched_skips_anchored_anchored() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        // Two overlapping anchored parts — Roblox never fires Touched for these
+        instance.load_script(
+            r#"
+            local partA = Instance.new("Part")
+            partA.Name = "PartA"
+            partA.Size = Vector3.new(4, 4, 4)
+            partA.Position = Vector3.new(0, 2, 0)
+            partA.Anchored = true
+            partA.Parent = Workspace
+
+            local partB = Instance.new("Part")
+            partB.Name = "PartB"
+            partB.Size = Vector3.new(4, 4, 4)
+            partB.Position = Vector3.new(1, 2, 0)
+            partB.Anchored = true
+            partB.Parent = Workspace
+
+            partA.Touched:Connect(function(otherPart)
+                partA:SetAttribute("TouchCount",
+                    (partA:GetAttribute("TouchCount") or 0) + 1)
+            end)
+        "#,
+        );
+
+        // No players needed — just tick to detect overlaps
+        for _ in 0..10 {
+            instance.tick();
+        }
+
+        let touch_count = get_trigger_attr(&instance, "PartA", "TouchCount");
+        assert_eq!(
+            touch_count, 0.0,
+            "Anchored+Anchored should never fire Touched. Got count={}",
+            touch_count
+        );
+    }
+
+    #[test]
+    fn test_touched_respects_physics_service_collision_groups() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(
+            r#"
+            local PhysicsService = game:GetService("PhysicsService")
+
+            PhysicsService:RegisterCollisionGroup("PlayersGroup")
+            PhysicsService:RegisterCollisionGroup("TriggerGroup")
+            PhysicsService:CollisionGroupSetCollidable("PlayersGroup", "TriggerGroup", false)
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(200, 1, 200)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            local trigger = Instance.new("Part")
+            trigger.Name = "Trigger"
+            trigger.Size = Vector3.new(6, 6, 6)
+            trigger.Position = Vector3.new(10, 3, 0)
+            trigger.Anchored = true
+            trigger.CanCollide = false
+            trigger.Parent = Workspace
+            PhysicsService:SetPartCollisionGroup(trigger, "TriggerGroup")
+
+            trigger.Touched:Connect(function(otherPart)
+                trigger:SetAttribute("TouchCount",
+                    (trigger:GetAttribute("TouchCount") or 0) + 1)
+            end)
+
+            local mover = Instance.new("Part")
+            mover.Name = "Mover"
+            mover.Size = Vector3.new(4, 4, 4)
+            mover.Position = Vector3.new(10, 3, 0)
+            mover.Anchored = false
+            mover.Parent = Workspace
+            PhysicsService:SetPartCollisionGroup(mover, "PlayersGroup")
+        "#,
+        );
+
+        for _ in 0..20 {
+            instance.tick();
+        }
+
+        let touch_count = get_trigger_attr(&instance, "Trigger", "TouchCount");
+        assert_eq!(
+            touch_count, 0.0,
+            "Touched should not fire for non-collidable collision groups"
+        );
+    }
+
+    #[test]
+    fn test_game_instance_serverscriptservice_require_smoke() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        // Root script creates module + server script in ServerScriptService.
+        instance.load_script(
+            r#"
+            local module = Instance.new("ModuleScript")
+            module.Name = "SharedModule"
+            module.Source = [[
+                _G.module_runs = (_G.module_runs or 0) + 1
+                return { value = 123 }
+            ]]
+            module.Parent = ServerScriptService
+
+            local boot = Instance.new("Script")
+            boot.Name = "BootScript"
+            boot.Source = [[
+                local m = ServerScriptService:FindFirstChild("SharedModule")
+                local data = require(m)
+
+                local marker = Instance.new("Folder")
+                marker.Name = "ServerScriptMarker"
+                marker:SetAttribute("Ran", true)
+                marker:SetAttribute("ModuleValue", data.value)
+                marker.Parent = Workspace
+            ]]
+            boot.Parent = ServerScriptService
+        "#,
+        );
+
+        for _ in 0..4 {
+            instance.tick();
+        }
+
+        assert!(
+            get_trigger_bool_attr(&instance, "ServerScriptMarker", "Ran"),
+            "ServerScriptService script should have executed in real game loop"
+        );
+        assert_eq!(
+            get_trigger_attr(&instance, "ServerScriptMarker", "ModuleValue"),
+            123.0,
+            "Script should read value from ModuleScript require()"
+        );
+    }
+
+    #[test]
+    fn test_game_instance_waitforchild_smoke() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(
+            r#"
+            local waiter = Instance.new("Script")
+            waiter.Name = "WaiterScript"
+            waiter.Source = [[
+                local part = Workspace:WaitForChild("DelayedPart", 1.0)
+                local marker = Instance.new("Folder")
+                marker.Name = "WaitForChildMarker"
+                marker:SetAttribute("Found", part ~= nil)
+                marker.Parent = Workspace
+            ]]
+            waiter.Parent = ServerScriptService
+
+            task.delay(0.05, function()
+                local p = Instance.new("Part")
+                p.Name = "DelayedPart"
+                p.Parent = Workspace
+            end)
+        "#,
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        for _ in 0..6 {
+            instance.tick();
+        }
+
+        assert!(
+            get_trigger_bool_attr(&instance, "WaitForChildMarker", "Found"),
+            "WaitForChild should resolve in game loop when child appears"
+        );
+    }
+
+    /// Helper: get a numeric attribute from a named part in workspace
+    fn get_trigger_attr(instance: &GameInstance, name: &str, attr: &str) -> f64 {
+        let runtime = instance.lua_runtime.as_ref().unwrap();
+        let descendants = runtime.workspace().get_descendants();
+        for inst in &descendants {
+            let data = inst.data.lock().unwrap();
+            if data.name == name {
+                if let Some(AttributeValue::Number(v)) = data.attributes.get(attr) {
+                    return *v;
+                }
+                return 0.0;
+            }
+        }
+        0.0
+    }
+
+    /// Helper: get a string attribute from a named part in workspace
+    fn get_trigger_str_attr(instance: &GameInstance, name: &str, attr: &str) -> String {
+        let runtime = instance.lua_runtime.as_ref().unwrap();
+        let descendants = runtime.workspace().get_descendants();
+        for inst in &descendants {
+            let data = inst.data.lock().unwrap();
+            if data.name == name {
+                if let Some(AttributeValue::String(v)) = data.attributes.get(attr) {
+                    return v.clone();
+                }
+                return String::new();
+            }
+        }
+        String::new()
+    }
+
+    /// Helper: get a bool attribute from a named part in workspace
+    fn get_trigger_bool_attr(instance: &GameInstance, name: &str, attr: &str) -> bool {
+        let runtime = instance.lua_runtime.as_ref().unwrap();
+        let descendants = runtime.workspace().get_descendants();
+        for inst in &descendants {
+            let data = inst.data.lock().unwrap();
+            if data.name == name {
+                if let Some(AttributeValue::Bool(v)) = data.attributes.get(attr) {
+                    return *v;
+                }
+                return false;
+            }
+        }
+        false
     }
 }

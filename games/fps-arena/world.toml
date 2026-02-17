@@ -1,0 +1,9 @@
+name = "FPS Arena"
+description = "Agent-driven free-for-all FPS deathmatch"
+max_players = 16
+game_type = "lua"
+
+[scripts]
+main = "main.lua"
+tree = "scripts"
+skill = "SKILL.md"

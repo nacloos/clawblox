@@ -1,4 +1,4 @@
-use mlua::{FromLua, Lua, Result, UserData, UserDataMethods, Value};
+use mlua::{FromLua, Lua, Result, UserData, UserDataFields, UserDataMethods, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartType {
@@ -42,6 +42,11 @@ impl FromLua for PartType {
 }
 
 impl UserData for PartType {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("Name", |_, this| Ok(this.name().to_string()));
+        fields.add_field_method_get("Value", |_, this| Ok(this.value()));
+    }
+
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
             Ok(format!("Enum.PartType.{}", this.name()))
@@ -130,6 +135,11 @@ impl FromLua for Material {
 }
 
 impl UserData for Material {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("Name", |_, this| Ok(this.name().to_string()));
+        fields.add_field_method_get("Value", |_, this| Ok(this.value()));
+    }
+
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
             Ok(format!("Enum.Material.{}", this.name()))
@@ -143,6 +153,7 @@ impl UserData for Material {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HumanoidStateType {
     Running,
+    Landed,
     Jumping,
     Freefall,
     Dead,
@@ -154,6 +165,7 @@ impl HumanoidStateType {
     pub fn name(&self) -> &'static str {
         match self {
             HumanoidStateType::Running => "Running",
+            HumanoidStateType::Landed => "Landed",
             HumanoidStateType::Jumping => "Jumping",
             HumanoidStateType::Freefall => "Freefall",
             HumanoidStateType::Dead => "Dead",
@@ -177,14 +189,17 @@ impl FromLua for HumanoidStateType {
 }
 
 impl UserData for HumanoidStateType {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("Name", |_, this| Ok(this.name().to_string()));
+    }
+
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
             Ok(format!("Enum.HumanoidStateType.{}", this.name()))
         });
-        methods.add_meta_method(
-            mlua::MetaMethod::Eq,
-            |_, this, other: HumanoidStateType| Ok(*this == other),
-        );
+        methods.add_meta_method(mlua::MetaMethod::Eq, |_, this, other: HumanoidStateType| {
+            Ok(*this == other)
+        });
     }
 }
 
@@ -217,14 +232,106 @@ impl FromLua for RaycastFilterType {
 }
 
 impl UserData for RaycastFilterType {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("Name", |_, this| Ok(this.name().to_string()));
+    }
+
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
             Ok(format!("Enum.RaycastFilterType.{}", this.name()))
         });
-        methods.add_meta_method(
-            mlua::MetaMethod::Eq,
-            |_, this, other: RaycastFilterType| Ok(*this == other),
-        );
+        methods.add_meta_method(mlua::MetaMethod::Eq, |_, this, other: RaycastFilterType| {
+            Ok(*this == other)
+        });
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextXAlignmentEnum {
+    Left,
+    Center,
+    Right,
+}
+
+impl TextXAlignmentEnum {
+    pub fn name(&self) -> &'static str {
+        match self {
+            TextXAlignmentEnum::Left => "Left",
+            TextXAlignmentEnum::Center => "Center",
+            TextXAlignmentEnum::Right => "Right",
+        }
+    }
+}
+
+impl UserData for TextXAlignmentEnum {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("Name", |_, this| Ok(this.name().to_string()));
+    }
+
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
+            Ok(format!("Enum.TextXAlignment.{}", this.name()))
+        });
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextYAlignmentEnum {
+    Top,
+    Center,
+    Bottom,
+}
+
+impl TextYAlignmentEnum {
+    pub fn name(&self) -> &'static str {
+        match self {
+            TextYAlignmentEnum::Top => "Top",
+            TextYAlignmentEnum::Center => "Center",
+            TextYAlignmentEnum::Bottom => "Bottom",
+        }
+    }
+}
+
+impl UserData for TextYAlignmentEnum {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("Name", |_, this| Ok(this.name().to_string()));
+    }
+
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
+            Ok(format!("Enum.TextYAlignment.{}", this.name()))
+        });
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontEnum {
+    GothamBold,
+    Gotham,
+    SourceSans,
+    SourceSansBold,
+}
+
+impl FontEnum {
+    pub fn name(&self) -> &'static str {
+        match self {
+            FontEnum::GothamBold => "GothamBold",
+            FontEnum::Gotham => "Gotham",
+            FontEnum::SourceSans => "SourceSans",
+            FontEnum::SourceSansBold => "SourceSansBold",
+        }
+    }
+}
+
+impl UserData for FontEnum {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("Name", |_, this| Ok(this.name().to_string()));
+    }
+
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
+            Ok(format!("Enum.Font.{}", this.name()))
+        });
     }
 }
 
@@ -237,6 +344,14 @@ pub fn register_enums(lua: &Lua) -> Result<()> {
     part_type_table.set("Cylinder", PartType::Cylinder)?;
     part_type_table.set("Wedge", PartType::Wedge)?;
     enum_table.set("PartType", part_type_table)?;
+
+    // Legacy alias used by older Roblox scripts.
+    let part_shape_table = lua.create_table()?;
+    part_shape_table.set("Ball", PartType::Ball)?;
+    part_shape_table.set("Block", PartType::Block)?;
+    part_shape_table.set("Cylinder", PartType::Cylinder)?;
+    part_shape_table.set("Wedge", PartType::Wedge)?;
+    enum_table.set("PartShape", part_shape_table)?;
 
     let material_table = lua.create_table()?;
     material_table.set("Plastic", Material::Plastic)?;
@@ -259,6 +374,7 @@ pub fn register_enums(lua: &Lua) -> Result<()> {
 
     let state_type_table = lua.create_table()?;
     state_type_table.set("Running", HumanoidStateType::Running)?;
+    state_type_table.set("Landed", HumanoidStateType::Landed)?;
     state_type_table.set("Jumping", HumanoidStateType::Jumping)?;
     state_type_table.set("Freefall", HumanoidStateType::Freefall)?;
     state_type_table.set("Dead", HumanoidStateType::Dead)?;
@@ -269,7 +385,42 @@ pub fn register_enums(lua: &Lua) -> Result<()> {
     let filter_type_table = lua.create_table()?;
     filter_type_table.set("Include", RaycastFilterType::Include)?;
     filter_type_table.set("Exclude", RaycastFilterType::Exclude)?;
+    // Roblox-compatible aliases
+    filter_type_table.set("Whitelist", RaycastFilterType::Include)?;
+    filter_type_table.set("Blacklist", RaycastFilterType::Exclude)?;
     enum_table.set("RaycastFilterType", filter_type_table)?;
+
+    let text_x_alignment_table = lua.create_table()?;
+    text_x_alignment_table.set("Left", "Left")?;
+    text_x_alignment_table.set("Center", "Center")?;
+    text_x_alignment_table.set("Right", "Right")?;
+    enum_table.set("TextXAlignment", text_x_alignment_table)?;
+
+    let text_y_alignment_table = lua.create_table()?;
+    text_y_alignment_table.set("Top", "Top")?;
+    text_y_alignment_table.set("Center", "Center")?;
+    text_y_alignment_table.set("Bottom", "Bottom")?;
+    enum_table.set("TextYAlignment", text_y_alignment_table)?;
+
+    let font_table = lua.create_table()?;
+    font_table.set("GothamBold", "GothamBold")?;
+    font_table.set("Gotham", "Gotham")?;
+    font_table.set("SourceSans", "SourceSans")?;
+    font_table.set("SourceSansBold", "SourceSansBold")?;
+    enum_table.set("Font", font_table)?;
+
+    let surface_type_table = lua.create_table()?;
+    surface_type_table.set("Smooth", "Smooth")?;
+    surface_type_table.set("Studs", "Studs")?;
+    surface_type_table.set("Inlet", "Inlet")?;
+    surface_type_table.set("Universal", "Universal")?;
+    surface_type_table.set("Weld", "Weld")?;
+    surface_type_table.set("Glue", "Glue")?;
+    surface_type_table.set("Hinge", "Hinge")?;
+    surface_type_table.set("Motor", "Motor")?;
+    surface_type_table.set("SteppingMotor", "SteppingMotor")?;
+    surface_type_table.set("SmoothNoOutlines", "SmoothNoOutlines")?;
+    enum_table.set("SurfaceType", surface_type_table)?;
 
     lua.globals().set("Enum", enum_table)?;
 

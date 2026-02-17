@@ -76,7 +76,7 @@ impl AgentInputService {
         let threads = signal.fire_as_coroutines(
             lua,
             MultiValue::from_iter([
-                Value::UserData(lua.create_userdata(player.clone())?),
+                Value::UserData(Instance::cached_userdata(lua, player)?),
                 Value::String(lua.create_string(input_type)?),
                 lua_data,
             ]),
@@ -296,8 +296,14 @@ mod tests {
     fn test_multiple_users() {
         let service = AgentInputService::new();
 
-        service.queue_input(1, AgentInput::new("Fire".to_string(), serde_json::json!({})));
-        service.queue_input(2, AgentInput::new("Melee".to_string(), serde_json::json!({})));
+        service.queue_input(
+            1,
+            AgentInput::new("Fire".to_string(), serde_json::json!({})),
+        );
+        service.queue_input(
+            2,
+            AgentInput::new("Melee".to_string(), serde_json::json!({})),
+        );
 
         assert!(service.has_pending_inputs(1));
         assert!(service.has_pending_inputs(2));

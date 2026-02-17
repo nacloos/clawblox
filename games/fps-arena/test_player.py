@@ -1,0 +1,691 @@
+#!/usr/bin/env python3
+"""Simple FPS Arena test agent.
+
+Supports two backend modes:
+- Local CLI server (`clawblox run`): session-based auth (`X-Session`)
+- Hosted/API server (`/api/v1`): API-key auth (`Authorization: Bearer ...`)
+
+Examples:
+  # Default: platform mode, auto-discovers game by name
+  python test_player.py
+
+  # Local clawblox run server
+  python test_player.py --api-base http://localhost:8080
+
+  # Hosted/api server with explicit game ID
+  python test_player.py --api-base http://localhost:8080/api/v1 --game-id <uuid>
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import requests
+
+TEST_AGENT_NAME = "fps-arena-cache-check"
+GAME_NAME = "FPS Arena"
+
+
+@dataclass
+class Session:
+    mode: str  # "local" | "platform"
+    api_base: str
+    game_id: str | None
+    headers: dict[str, str]
+    agent_name: str
+
+
+def key_cache_path() -> Path:
+    env = os.getenv("CLOWBLOX_TEST_PLAYER_KEY_CACHE")
+    if env:
+        return Path(env)
+    return Path.home() / ".clawblox" / "fps_arena_test_player_keys.json"
+
+
+def _cache_key(api_base: str, name: str) -> str:
+    return f"{api_base}::{name}"
+
+
+def load_cached_api_key(api_base: str, name: str) -> str | None:
+    path = key_cache_path()
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None
+
+    key = data.get(_cache_key(api_base, name))
+    return key if isinstance(key, str) and key else None
+
+
+def save_cached_api_key(api_base: str, name: str, api_key: str) -> None:
+    path = key_cache_path()
+    data: dict[str, str] = {}
+    try:
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+
+    data[_cache_key(api_base, name)] = api_key
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True))
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Simple test player for FPS Arena")
+    p.add_argument(
+        "--api-base",
+        default="http://localhost:8080/api/v1",
+        help="Base URL (local: http://localhost:8080, hosted: .../api/v1)",
+    )
+    p.add_argument("--game-id", default=None, help="Required for /api/v1 mode")
+    p.add_argument("--api-key", default=None, help="Existing API key for /api/v1 mode")
+    p.add_argument("--num-players", type=int, default=1, help="Number of bot players to join")
+    p.add_argument("--duration", type=float, default=45.0, help="Run duration in seconds")
+    p.add_argument("--tick", type=float, default=0.35, help="Loop interval in seconds")
+    p.add_argument("--fire-cooldown", type=float, default=0.28, help="Minimum seconds between Fire inputs")
+    p.add_argument("--engage-range", type=float, default=90.0, help="Only chase/fire enemies within this range")
+    p.add_argument("--chase-refresh", type=float, default=0.75, help="Seconds between chase MoveTo refreshes")
+    return p.parse_args()
+
+
+def normalize_base(url: str) -> str:
+    return url.rstrip("/")
+
+
+def detect_mode(api_base: str) -> str:
+    return "platform" if api_base.endswith("/api/v1") else "local"
+
+
+def discover_game_id(api_base: str, game_name: str) -> str:
+    """Query GET /games and find a running game matching *game_name*."""
+    r = requests.get(f"{api_base}/games", timeout=10)
+    r.raise_for_status()
+    games = r.json().get("games", [])
+    # Prefer a running game whose name matches
+    for g in games:
+        if g.get("name") == game_name and g.get("is_running"):
+            print(f"[discover] found running game: {g['id']} ({g['name']})")
+            return g["id"]
+    # Fall back to any game with matching name
+    for g in games:
+        if g.get("name") == game_name:
+            print(f"[discover] found game (not running): {g['id']} ({g['name']})")
+            return g["id"]
+    available = [f"{g.get('name')} ({g.get('id')})" for g in games]
+    raise RuntimeError(
+        f"No game named '{game_name}' found. "
+        f"Available: {available or 'none'}. "
+        f"Deploy first: ./scripts/deploy_local_game.sh --game games/fps-arena"
+    )
+
+
+def register_agent(api_base: str, name: str) -> str:
+    payload = {"name": name, "description": "Simple FPS Arena smoke test bot"}
+    r = requests.post(f"{api_base}/agents/register", json=payload, timeout=10)
+    r.raise_for_status()
+    body = r.json()
+    key = body.get("api_key")
+    if not isinstance(key, str) or not key:
+        agent = body.get("agent")
+        if isinstance(agent, dict):
+            key = agent.get("api_key")
+    if not isinstance(key, str) or not key:
+        raise RuntimeError("register response missing api_key")
+    agent_id = body.get("agent_id")
+    if agent_id is None and isinstance(body.get("agent"), dict):
+        agent_id = body["agent"].get("id")
+    print(f"[register] agent_id={agent_id} name={name}")
+    return key
+
+
+def create_platform_session(args: argparse.Namespace, api_base: str, agent_name: str) -> Session:
+    if not args.game_id:
+        raise RuntimeError(
+            "No game ID. Pass --game-id or deploy the game first: "
+            "./scripts/deploy_local_game.sh --game games/fps-arena"
+        )
+
+    api_key = args.api_key or load_cached_api_key(api_base, agent_name)
+    if api_key:
+        print(f"[auth] using cached api_key for name={agent_name}")
+    else:
+        api_key = register_agent(api_base, agent_name)
+        save_cached_api_key(api_base, agent_name, api_key)
+        print(f"[auth] cached api_key for name={agent_name} at {key_cache_path()}")
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    r = requests.post(f"{api_base}/games/{args.game_id}/join", headers=headers, timeout=10)
+    r.raise_for_status()
+    print("[join] joined game (/api/v1 mode)")
+
+    return Session(mode="platform", api_base=api_base, game_id=args.game_id, headers=headers, agent_name=agent_name)
+
+
+def create_local_session(args: argparse.Namespace, api_base: str, agent_name: str) -> Session:
+    # `clawblox run` starts a daemon and may take a moment before endpoints respond.
+    deadline = time.time() + 12.0
+    last_err: str | None = None
+    while time.time() < deadline:
+        try:
+            ping = requests.get(f"{api_base}/skill.md", timeout=2)
+            if ping.status_code in (200, 404):
+                break
+        except Exception as exc:  # noqa: BLE001
+            last_err = str(exc)
+        time.sleep(0.25)
+    else:
+        raise RuntimeError(f"local server not ready at {api_base}: {last_err or 'timeout'}")
+
+    r = requests.post(f"{api_base}/join", params={"name": agent_name}, timeout=10)
+    r.raise_for_status()
+    body = r.json()
+
+    token = body.get("session")
+    if not isinstance(token, str) or not token:
+        raise RuntimeError("local /join response missing session token")
+
+    headers = {"X-Session": token, "Content-Type": "application/json"}
+    print(f"[join] joined local game session={token[:8]}...")
+
+    return Session(mode="local", api_base=api_base, game_id=args.game_id, headers=headers, agent_name=agent_name)
+
+
+def leave_game(sess: Session) -> None:
+    try:
+        if sess.mode == "platform":
+            assert sess.game_id is not None
+            requests.post(f"{sess.api_base}/games/{sess.game_id}/leave", headers=sess.headers, timeout=5)
+            print("[leave] left game")
+        else:
+            # local server has no leave endpoint; dropping session is enough
+            print("[leave] local session ended")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[leave] warning: {exc}")
+
+
+def observe(sess: Session) -> dict[str, Any]:
+    if sess.mode == "platform":
+        assert sess.game_id is not None
+        r = requests.get(f"{sess.api_base}/games/{sess.game_id}/observe", headers=sess.headers, timeout=10)
+    else:
+        r = requests.get(f"{sess.api_base}/observe", headers=sess.headers, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+
+def send_input(sess: Session, input_type: str, data: dict[str, Any] | None = None) -> None:
+    if data is None:
+        data = {}
+    payload = {"type": input_type, "data": data}
+    if sess.mode == "platform":
+        assert sess.game_id is not None
+        r = requests.post(f"{sess.api_base}/games/{sess.game_id}/input", headers=sess.headers, json=payload, timeout=10)
+    else:
+        r = requests.post(f"{sess.api_base}/input", headers=sess.headers, json=payload, timeout=10)
+    r.raise_for_status()
+
+def safe_observe(sess: Session) -> dict[str, Any] | None:
+    try:
+        return observe(sess)
+    except requests.Timeout:
+        print(f"[net][{sess.agent_name}] observe timeout; skipping tick")
+        return None
+    except requests.RequestException as exc:
+        print(f"[net][{sess.agent_name}] observe error: {exc}")
+        return None
+
+
+def safe_send_input(sess: Session, input_type: str, data: dict[str, Any] | None = None) -> bool:
+    try:
+        send_input(sess, input_type, data)
+        return True
+    except requests.Timeout:
+        print(f"[net][{sess.agent_name}] input timeout type={input_type}")
+        return False
+    except requests.RequestException as exc:
+        print(f"[net][{sess.agent_name}] input error type={input_type}: {exc}")
+        return False
+
+
+def choose_move_target(t: float, radius: float = 32.0) -> list[float]:
+    x = math.cos(t * 0.55) * radius
+    z = math.sin(t * 0.55) * radius
+    return [x, 2.0, z]
+
+
+def xz_distance(a: list[float], b: list[float]) -> float:
+    dx = float(a[0]) - float(b[0])
+    dz = float(a[2]) - float(b[2])
+    return math.sqrt(dx * dx + dz * dz)
+
+
+def nearest_visible_enemy_from_observation(
+    obs: dict[str, Any],
+    self_pos: list[float],
+) -> tuple[list[float] | None, str | None, float | None]:
+    others_raw = obs.get("other_players")
+    if not isinstance(others_raw, list):
+        return None, None, None
+
+    best_pos: list[float] | None = None
+    best_name: str | None = None
+    best_dist: float | None = None
+    for raw in others_raw:
+        if not isinstance(raw, dict):
+            continue
+        raw_name = raw.get("name")
+        name = raw_name if isinstance(raw_name, str) and raw_name else str(raw.get("id"))
+        health = raw.get("health")
+        if isinstance(health, (int, float)) and float(health) <= 0:
+            continue
+        pos = raw.get("position")
+        if not (isinstance(pos, list) and len(pos) >= 3):
+            continue
+        x, y, z = pos[0], pos[1], pos[2]
+        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)) or not isinstance(z, (int, float)):
+            continue
+        enemy_pos = [float(x), float(y), float(z)]
+        dist = xz_distance(self_pos, enemy_pos)
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best_pos = enemy_pos
+            best_name = name
+
+    return best_pos, best_name, best_dist
+
+
+def offset_target_away_from_obstacle(
+    target: list[float],
+    normal_x: float | None,
+    normal_z: float | None,
+    margin: float = 6.0,
+) -> list[float]:
+    if normal_x is None or normal_z is None:
+        return [float(target[0]), float(target[1]), float(target[2])]
+    nx = float(normal_x)
+    nz = float(normal_z)
+    mag = math.sqrt(nx * nx + nz * nz)
+    if mag <= 1e-4:
+        return [float(target[0]), float(target[1]), float(target[2])]
+    nx /= mag
+    nz /= mag
+    return [
+        float(target[0]) + nx * margin,
+        float(target[1]),
+        float(target[2]) + nz * margin,
+    ]
+
+
+def choose_detour_target(
+    pos: list[float],
+    target: list[float],
+    attempt: int,
+    nav_best: list[float] | None = None,
+) -> list[float]:
+    px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
+    if nav_best is not None:
+        fx, fz = float(nav_best[0]), float(nav_best[1])
+        mag = math.sqrt(fx * fx + fz * fz)
+        if mag > 0.01:
+            fx, fz = fx / mag, fz / mag
+        else:
+            nav_best = None
+    if nav_best is None:
+        tx, tz = float(target[0]), float(target[2])
+        dx = tx - px
+        dz = tz - pz
+        mag = math.sqrt(dx * dx + dz * dz)
+        if mag < 0.01:
+            # Fallback: arbitrary forward axis when target vector is degenerate.
+            fx, fz = 1.0, 0.0
+        else:
+            fx, fz = dx / mag, dz / mag
+
+    if nav_best is not None:
+        # When nav hint is available, still add widening lateral offset so we don't
+        # keep sampling nearly identical blocked points along a long wall.
+        side_sign = 1.0 if (attempt % 2 == 0) else -1.0
+        sx, sz = -fz * side_sign, fx * side_sign
+        forward_dist = 5.5 + min(attempt, 6) * 0.8
+        side_dist = 4.0 + min(attempt, 6) * 1.2
+        return [
+            px + fx * forward_dist + sx * side_dist,
+            max(2.0, py),
+            pz + fz * forward_dist + sz * side_dist,
+        ]
+
+    # Fallback heuristic when no sensing hint is available.
+    if mag < 0.01:
+        fx, fz = 1.0, 0.0
+    else:
+        fx, fz = dx / mag, dz / mag
+
+    # Alternate left/right around obstacles.
+    side_sign = 1.0 if (attempt % 2 == 0) else -1.0
+    sx, sz = -fz * side_sign, fx * side_sign
+
+    forward_dist = 4.0
+    side_dist = 6.0
+    return [
+        px + fx * forward_dist + sx * side_dist,
+        max(2.0, py),
+        pz + fz * forward_dist + sz * side_dist,
+    ]
+
+
+def main() -> int:
+    args = parse_args()
+    api_base = normalize_base(args.api_base)
+    mode = detect_mode(api_base)
+    print(f"[mode] {mode} ({api_base})")
+
+    # Auto-discover game ID in platform mode when not explicitly provided
+    if mode == "platform" and not args.game_id:
+        args.game_id = discover_game_id(api_base, GAME_NAME)
+
+    sessions: list[Session] = []
+
+    try:
+        num_players = max(1, int(args.num_players))
+        names = [TEST_AGENT_NAME] if num_players == 1 else [f"{TEST_AGENT_NAME}-{i + 1}" for i in range(num_players)]
+        for name in names:
+            if mode == "platform":
+                sessions.append(create_platform_session(args, api_base, name))
+            else:
+                sessions.append(create_local_session(args, api_base, name))
+
+        start = time.time()
+        stuck_timeout_secs = 0.7
+        progress_epsilon = 0.12
+        stationary_speed_eps = 0.06
+        nav_block_clearance_threshold = 2.8
+        last_move_by_idx = [0.0 for _ in sessions]
+        last_progress_by_idx = [start for _ in sessions]
+        last_distance_by_idx: list[float | None] = [None for _ in sessions]
+        last_pos_by_idx: list[list[float] | None] = [None for _ in sessions]
+        low_motion_ticks_by_idx = [0 for _ in sessions]
+        current_main_target_by_idx: list[list[float] | None] = [None for _ in sessions]
+        current_move_target_by_idx: list[list[float] | None] = [None for _ in sessions]
+        in_detour_by_idx = [False for _ in sessions]
+        detour_attempts_by_idx = [0 for _ in sessions]
+        front_blocked_ticks_by_idx = [0 for _ in sessions]
+        last_nav_blocked_log_by_idx = [False for _ in sessions]
+        last_fire_by_idx = [0.0 for _ in sessions]
+        last_chase_refresh_by_idx = [0.0 for _ in sessions]
+        last_enemy_name_by_idx: list[str | None] = [None for _ in sessions]
+        last_visible_any_by_idx = [False for _ in sessions]
+
+        while time.time() - start < args.duration:
+            now = time.time()
+            for i, sess in enumerate(sessions):
+                obs = safe_observe(sess)
+                if obs is None:
+                    continue
+
+                player = obs.get("player") or {}
+
+                pos = player.get("position") or [0.0, 0.0, 0.0]
+                hp = player.get("health")
+                attrs = player.get("attributes") or {}
+                kills = attrs.get("Kills")
+                deaths = attrs.get("Deaths")
+                score = attrs.get("Score")
+                tick = obs.get("tick")
+                nav_front_clear_raw = attrs.get("NavFrontClear")
+                nav_front_clear = nav_front_clear_raw if isinstance(nav_front_clear_raw, bool) else None
+                nav_front_clearance = attrs.get("NavClearanceFront")
+                nav_front_hit = attrs.get("NavFrontHitName")
+                nav_front_normal_x_raw = attrs.get("NavFrontNormalX")
+                nav_front_normal_z_raw = attrs.get("NavFrontNormalZ")
+                nav_front_normal_x = float(nav_front_normal_x_raw) if isinstance(nav_front_normal_x_raw, (int, float)) else None
+                nav_front_normal_z = float(nav_front_normal_z_raw) if isinstance(nav_front_normal_z_raw, (int, float)) else None
+                nav_best_x = attrs.get("NavBestDirX")
+                nav_best_z = attrs.get("NavBestDirZ")
+
+                print(
+                    f"[obs][{sess.agent_name}] tick={tick} hp={hp} pos=({pos[0]:.1f},{pos[1]:.1f},{pos[2]:.1f}) "
+                    f"kills={kills} deaths={deaths} score={score}"
+                )
+
+                enemy_pos, enemy_name, enemy_dist = nearest_visible_enemy_from_observation(obs, pos)
+                visible_count_raw = obs.get("other_players")
+                visible_count = len(visible_count_raw) if isinstance(visible_count_raw, list) else 0
+                visible_any = visible_count > 0
+                if visible_any != last_visible_any_by_idx[i]:
+                    if visible_any:
+                        print(f"[vis][{sess.agent_name}] visible_enemies={visible_count}")
+                    else:
+                        print(f"[vis][{sess.agent_name}] visible_enemies=0")
+                    last_visible_any_by_idx[i] = visible_any
+                has_enemy = (
+                    enemy_pos is not None
+                    and enemy_dist is not None
+                    and enemy_dist <= float(args.engage_range)
+                )
+                if enemy_name != last_enemy_name_by_idx[i]:
+                    if enemy_name is None:
+                        print(f"[target][{sess.agent_name}] none")
+                    else:
+                        print(f"[target][{sess.agent_name}] enemy={enemy_name} dist={enemy_dist:.1f}")
+                    last_enemy_name_by_idx[i] = enemy_name
+
+                nav_blocked = nav_front_clear is False
+                if nav_blocked:
+                    front_blocked_ticks_by_idx[i] += 1
+                else:
+                    front_blocked_ticks_by_idx[i] = 0
+                if nav_blocked != last_nav_blocked_log_by_idx[i]:
+                    print(
+                        f"[nav][{sess.agent_name}] blocked={nav_blocked} front={nav_front_clearance} "
+                        f"hit={nav_front_hit} n=({nav_front_normal_x},{nav_front_normal_z}) best=({nav_best_x},{nav_best_z})"
+                    )
+                    last_nav_blocked_log_by_idx[i] = nav_blocked
+
+                current_target = current_move_target_by_idx[i]
+
+                if current_target is None:
+                    if has_enemy and enemy_pos is not None:
+                        move_target = [enemy_pos[0], max(2.0, enemy_pos[1]), enemy_pos[2]]
+                        last_chase_refresh_by_idx[i] = now
+                    else:
+                        move_target = choose_move_target((now - start) + (i * 0.9))
+                    current_main_target_by_idx[i] = move_target
+                    current_move_target_by_idx[i] = move_target
+                    in_detour_by_idx[i] = False
+                    detour_attempts_by_idx[i] = 0
+                    last_distance_by_idx[i] = None
+                    last_progress_by_idx[i] = now
+                    if safe_send_input(sess, "MoveTo", {"position": move_target}):
+                        last_move_by_idx[i] = now
+                    print(
+                        f"[move][{sess.agent_name}] main=({move_target[0]:.1f},{move_target[1]:.1f},{move_target[2]:.1f})"
+                    )
+                    continue
+
+                if (
+                    has_enemy
+                    and enemy_pos is not None
+                    and not in_detour_by_idx[i]
+                    and now - last_chase_refresh_by_idx[i] >= float(args.chase_refresh)
+                ):
+                    chase_target = [enemy_pos[0], max(2.0, enemy_pos[1]), enemy_pos[2]]
+                    current_main_target = current_main_target_by_idx[i]
+                    should_refresh_chase = (
+                        current_main_target is None
+                        or xz_distance(current_main_target, chase_target) >= 4.0
+                    )
+                    if should_refresh_chase:
+                        current_main_target_by_idx[i] = chase_target
+                        current_move_target_by_idx[i] = chase_target
+                        last_distance_by_idx[i] = None
+                        last_progress_by_idx[i] = now
+                        if safe_send_input(sess, "MoveTo", {"position": chase_target}):
+                            last_move_by_idx[i] = now
+                        print(
+                            f"[move][{sess.agent_name}] chase=({chase_target[0]:.1f},{chase_target[1]:.1f},{chase_target[2]:.1f}) "
+                            f"enemy={enemy_name}"
+                        )
+                    last_chase_refresh_by_idx[i] = now
+
+                dx = float(current_target[0]) - float(pos[0])
+                dz = float(current_target[2]) - float(pos[2])
+                dist_xz = math.sqrt(dx * dx + dz * dz)
+
+                prev_pos = last_pos_by_idx[i]
+                if prev_pos is None:
+                    frame_speed_xz = 999.0
+                else:
+                    pdx = float(pos[0]) - float(prev_pos[0])
+                    pdz = float(pos[2]) - float(prev_pos[2])
+                    frame_speed_xz = math.sqrt(pdx * pdx + pdz * pdz) / max(args.tick, 1e-4)
+                last_pos_by_idx[i] = [float(pos[0]), float(pos[1]), float(pos[2])]
+                if frame_speed_xz <= stationary_speed_eps:
+                    low_motion_ticks_by_idx[i] += 1
+                else:
+                    low_motion_ticks_by_idx[i] = 0
+
+                prev_dist = last_distance_by_idx[i]
+                if prev_dist is None or dist_xz <= prev_dist - progress_epsilon:
+                    last_progress_by_idx[i] = now
+                last_distance_by_idx[i] = dist_xz
+
+                reached_target = dist_xz <= 4.0
+                stuck = (now - last_progress_by_idx[i]) >= stuck_timeout_secs
+
+                preemptively_blocked = (
+                    not in_detour_by_idx[i]
+                    and (
+                        (front_blocked_ticks_by_idx[i] >= 1 and nav_front_hit is not None)
+                        or (
+                            isinstance(nav_front_clearance, (int, float))
+                            and float(nav_front_clearance) <= nav_block_clearance_threshold
+                            and nav_front_hit is not None
+                        )
+                    )
+                    and now - last_move_by_idx[i] >= 0.45
+                )
+                preemptively_stationary = (
+                    not in_detour_by_idx[i]
+                    and low_motion_ticks_by_idx[i] >= 2
+                    and now - last_move_by_idx[i] >= 0.45
+                )
+
+                if reached_target:
+                    if in_detour_by_idx[i] and current_main_target_by_idx[i] is not None:
+                        # Finished detour: resume original main target.
+                        move_target = current_main_target_by_idx[i]
+                        current_move_target_by_idx[i] = move_target
+                        in_detour_by_idx[i] = False
+                        detour_attempts_by_idx[i] = 0
+                        last_distance_by_idx[i] = None
+                        last_progress_by_idx[i] = now
+                        if safe_send_input(sess, "MoveTo", {"position": move_target}):
+                            last_move_by_idx[i] = now
+                        print(
+                            f"[move][{sess.agent_name}] resume-main=({move_target[0]:.1f},{move_target[1]:.1f},{move_target[2]:.1f})"
+                        )
+                    else:
+                        # Pick next roaming target.
+                        move_target = choose_move_target((now - start) + (i * 0.9))
+                        current_main_target_by_idx[i] = move_target
+                        current_move_target_by_idx[i] = move_target
+                        in_detour_by_idx[i] = False
+                        detour_attempts_by_idx[i] = 0
+                        last_distance_by_idx[i] = None
+                        last_progress_by_idx[i] = now
+                        if safe_send_input(sess, "MoveTo", {"position": move_target}):
+                            last_move_by_idx[i] = now
+                        print(
+                            f"[move][{sess.agent_name}] next-main=({move_target[0]:.1f},{move_target[1]:.1f},{move_target[2]:.1f})"
+                        )
+                elif preemptively_blocked or preemptively_stationary or (stuck and now - last_move_by_idx[i] >= 0.45):
+                    # Obstacle ahead or no meaningful progress: issue detour waypoint.
+                    detour_attempts_by_idx[i] += 1
+                    attempts = detour_attempts_by_idx[i]
+                    nav_best = None
+                    nav_x = nav_best_x
+                    nav_z = nav_best_z
+                    if isinstance(nav_x, (int, float)) and isinstance(nav_z, (int, float)):
+                        nav_best = [float(nav_x), float(nav_z)]
+                    if attempts > 6:
+                        move_target = choose_move_target((now - start) + (i * 1.7) + 0.75)
+                        current_main_target_by_idx[i] = move_target
+                        current_move_target_by_idx[i] = move_target
+                        in_detour_by_idx[i] = False
+                        detour_attempts_by_idx[i] = 0
+                        print(
+                            f"[stuck][{sess.agent_name}] fallback-main=({move_target[0]:.1f},{move_target[1]:.1f},{move_target[2]:.1f})"
+                        )
+                    else:
+                        if preemptively_blocked and current_main_target_by_idx[i] is not None:
+                            current_main_target_by_idx[i] = offset_target_away_from_obstacle(
+                                current_main_target_by_idx[i],
+                                nav_front_normal_x,
+                                nav_front_normal_z,
+                            )
+                            bumped = current_main_target_by_idx[i]
+                            print(
+                                f"[nav][{sess.agent_name}] bump-main=({bumped[0]:.1f},{bumped[1]:.1f},{bumped[2]:.1f}) "
+                                f"from-normal=({nav_front_normal_x},{nav_front_normal_z})"
+                            )
+                        move_target = choose_detour_target(pos, current_target, attempts, nav_best=nav_best)
+                        current_move_target_by_idx[i] = move_target
+                        in_detour_by_idx[i] = True
+                        reason = "blocked" if preemptively_blocked else ("stationary" if preemptively_stationary else "stuck")
+                        print(
+                            f"[stuck][{sess.agent_name}] reason={reason} detour#{attempts}=({move_target[0]:.1f},{move_target[1]:.1f},{move_target[2]:.1f})"
+                        )
+                    last_distance_by_idx[i] = None
+                    last_progress_by_idx[i] = now
+                    front_blocked_ticks_by_idx[i] = 0
+                    low_motion_ticks_by_idx[i] = 0
+                    if safe_send_input(sess, "MoveTo", {"position": move_target}):
+                        last_move_by_idx[i] = now
+
+                if (
+                    has_enemy
+                    and enemy_dist is not None
+                    and enemy_dist <= 65.0
+                    and now - last_fire_by_idx[i] >= float(args.fire_cooldown)
+                ):
+                    if safe_send_input(sess, "Fire"):
+                        last_fire_by_idx[i] = now
+                        print(f"[fire][{sess.agent_name}] enemy={enemy_name} dist={enemy_dist:.1f}")
+
+            time.sleep(args.tick)
+
+        print("[done] duration reached")
+        return 0
+
+    except requests.HTTPError as exc:
+        detail = exc.response.text if exc.response is not None else str(exc)
+        print(f"[fatal] HTTP error: {detail}")
+        return 1
+    except KeyboardInterrupt:
+        print("[done] interrupted")
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        print(f"[fatal] {exc}")
+        return 1
+    finally:
+        try:
+            for s in sessions:  # type: ignore[name-defined]
+                leave_game(s)
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    sys.exit(main())

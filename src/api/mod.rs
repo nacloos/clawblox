@@ -1,8 +1,8 @@
 pub mod agents;
 mod assets;
 mod chat;
-mod games;
 mod gameplay;
+mod games;
 
 use axum::{routing::get, Router};
 use dashmap::DashMap;

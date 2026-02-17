@@ -1,4 +1,7 @@
-use mlua::{Function, Lua, MultiValue, RegistryKey, Result, Thread, UserData, UserDataFields, UserDataMethods};
+use mlua::{
+    Function, Lua, MultiValue, RegistryKey, Result, Thread, UserData, UserDataFields,
+    UserDataMethods, Value,
+};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -125,11 +128,15 @@ impl RBXScriptSignal {
         let connection = RBXScriptConnection::new(Arc::clone(&self.inner));
         let id = connection.id();
 
-        self.inner.lock().unwrap().connections.push(ConnectionEntry {
-            id,
-            callback: key,
-            once: false,
-        });
+        self.inner
+            .lock()
+            .unwrap()
+            .connections
+            .push(ConnectionEntry {
+                id,
+                callback: key,
+                once: false,
+            });
 
         Ok(connection)
     }
@@ -139,11 +146,15 @@ impl RBXScriptSignal {
         let connection = RBXScriptConnection::new(Arc::clone(&self.inner));
         let id = connection.id();
 
-        self.inner.lock().unwrap().connections.push(ConnectionEntry {
-            id,
-            callback: key,
-            once: true,
-        });
+        self.inner
+            .lock()
+            .unwrap()
+            .connections
+            .push(ConnectionEntry {
+                id,
+                callback: key,
+                once: true,
+            });
 
         Ok(connection)
     }
@@ -176,7 +187,10 @@ impl RBXScriptSignal {
                     if error_mode == ErrorMode::Halt {
                         return Err(e);
                     }
-                    eprintln!("[Lua Error] Callback error in signal '{}': {}", self.name, e);
+                    eprintln!(
+                        "[Lua Error] Callback error in signal '{}': {}",
+                        self.name, e
+                    );
                 }
                 if once {
                     to_remove.push(id);
@@ -280,11 +294,30 @@ impl UserData for RBXScriptSignal {
             this.once(lua, callback)
         });
 
-        methods.add_method("Wait", |_, this, ()| {
-            Ok(format!(
-                "[Signal:Wait() not fully implemented for {}]",
-                this.name
-            ))
+        // Wait() yields until the signal fires, then returns event args.
+        // Implemented as an async method so mlua can yield across userdata method boundaries.
+        methods.add_async_method("Wait", |lua, this, ()| {
+            let signal = this.clone();
+            let (tx, rx) = tokio::sync::oneshot::channel::<Vec<Value>>();
+            let tx = Arc::new(Mutex::new(Some(tx)));
+
+            let callback = {
+                let tx = tx.clone();
+                lua.create_function(move |_, args: MultiValue| {
+                    if let Some(tx) = tx.lock().unwrap().take() {
+                        let _ = tx.send(args.into_vec());
+                    }
+                    Ok(())
+                })
+            };
+
+            async move {
+                signal.once(&lua, callback?)?;
+                let args = rx.await.map_err(|_| {
+                    mlua::Error::RuntimeError("Signal:Wait cancelled before firing".to_string())
+                })?;
+                Ok(MultiValue::from_vec(args))
+            }
         });
     }
 }

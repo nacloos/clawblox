@@ -125,8 +125,14 @@ fn test_multiple_coroutines_yield_independently() {
     println!("Thread 1 status: {:?}", thread1.status());
     println!("Thread 2 status: {:?}", thread2.status());
 
-    assert!(matches!(r1, Value::LightUserData(_)), "Thread 1 should yield");
-    assert!(matches!(r2, Value::LightUserData(_)), "Thread 2 should yield");
+    assert!(
+        matches!(r1, Value::LightUserData(_)),
+        "Thread 1 should yield"
+    );
+    assert!(
+        matches!(r2, Value::LightUserData(_)),
+        "Thread 2 should yield"
+    );
     assert_eq!(thread1.status(), ThreadStatus::Resumable);
     assert_eq!(thread2.status(), ThreadStatus::Resumable);
 
@@ -262,7 +268,11 @@ fn test_lua_callback_yields_on_async() {
 
     // First resume - should start callback, which calls async, which yields
     let result1 = thread.resume::<Value>(()).expect("First resume");
-    println!("Callback first resume: {:?}, status: {:?}", result1, thread.status());
+    println!(
+        "Callback first resume: {:?}, status: {:?}",
+        result1,
+        thread.status()
+    );
 
     // Should be yielded (PENDING)
     assert!(

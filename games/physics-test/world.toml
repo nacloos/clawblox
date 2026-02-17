@@ -1,0 +1,8 @@
+# Physics Test - World Configuration
+name = "Physics Test"
+description = "Tests all physics plan features: rotation sync, property changes, shapes, touched events, jump, kinematic push."
+max_players = 4
+game_type = "lua"
+
+[scripts]
+main = "game.lua"

@@ -55,7 +55,11 @@ impl UserData for RunService {
     }
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("IsServer", |_, this, ()| Ok(this.data.lock().unwrap().is_server));
-        methods.add_method("IsClient", |_, this, ()| Ok(this.data.lock().unwrap().is_client));
+        methods.add_method("IsServer", |_, this, ()| {
+            Ok(this.data.lock().unwrap().is_server)
+        });
+        methods.add_method("IsClient", |_, this, ()| {
+            Ok(this.data.lock().unwrap().is_client)
+        });
     }
 }

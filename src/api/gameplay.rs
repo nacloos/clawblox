@@ -8,11 +8,6 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use tower_governor::{
-    governor::GovernorConfigBuilder,
-    key_extractor::KeyExtractor,
-    GovernorError, GovernorLayer,
-};
 use flate2::{write::GzEncoder, Compression};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -20,6 +15,9 @@ use sqlx::PgPool;
 use std::io::Write;
 use std::time::Duration;
 use tokio::time::interval;
+use tower_governor::{
+    governor::GovernorConfigBuilder, key_extractor::KeyExtractor, GovernorError, GovernorLayer,
+};
 use uuid::Uuid;
 
 use crate::db::models::Game;
@@ -80,12 +78,13 @@ async fn get_agent_id_from_api_key(
     }
 
     // Cache miss - query DB for both id and name
-    let agent = sqlx::query_as::<_, (Uuid, String)>("SELECT id, name FROM agents WHERE api_key = $1")
-        .bind(api_key)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
+    let agent =
+        sqlx::query_as::<_, (Uuid, String)>("SELECT id, name FROM agents WHERE api_key = $1")
+            .bind(api_key)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
 
     // Cache the result
     cache.insert(api_key.to_string(), agent.clone());
@@ -99,7 +98,12 @@ pub fn routes(
     api_key_cache: ApiKeyCache,
     r2_public_url: Option<String>,
 ) -> Router {
-    let state = GameplayState { pool, game_manager, api_key_cache, r2_public_url };
+    let state = GameplayState {
+        pool,
+        game_manager,
+        api_key_cache,
+        r2_public_url,
+    };
 
     // Rate limit: 10 requests/second per agent, burst of 20
     // per_millisecond(100) = 1 token every 100ms = 10 tokens/second
@@ -123,6 +127,7 @@ pub fn routes(
     let public_routes = Router::new()
         .route("/games/{id}/spectate", get(spectate))
         .route("/games/{id}/spectate/ws", get(spectate_ws))
+        .route("/games/{id}/play/ws", get(play_ws))
         .route("/games/{id}/skill.md", get(get_skill))
         .route("/games/{id}/leaderboard", get(get_leaderboard))
         .route("/games/{id}/map", get(get_map));
@@ -139,15 +144,59 @@ async fn observe(
     Path(game_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<PlayerObservation>, (StatusCode, String)> {
-    let api_key = extract_api_key(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
+    let api_key = extract_api_key(&headers).ok_or((
+        StatusCode::UNAUTHORIZED,
+        "Missing Authorization header".to_string(),
+    ))?;
 
     let agent_id = get_agent_id_from_api_key(&api_key, &state.api_key_cache, &state.pool).await?;
 
-    let observation = game::get_observation(&state.game_manager, game_id, agent_id)
+    let mut observation = game::get_observation(&state.game_manager, game_id, agent_id)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
+    if let Some(asset_info) = get_asset_info(&state, game_id).await? {
+        resolve_player_observation_assets(
+            &mut observation,
+            &asset_info.r2_public_url,
+            game_id,
+            asset_info.asset_version,
+        );
+    }
+
     Ok(Json(observation))
+}
+
+fn resolve_asset_url(url: &mut String, r2_public_url: &str, game_id: Uuid, asset_version: i32) {
+    if let Some(path) = url.strip_prefix("asset://") {
+        *url = format!(
+            "{}/games/{}/v{}/{}",
+            r2_public_url.trim_end_matches('/'),
+            game_id,
+            asset_version,
+            path
+        );
+    }
+}
+
+fn resolve_model_url_attrs(
+    attrs: &mut std::collections::HashMap<String, serde_json::Value>,
+    r2_public_url: &str,
+    game_id: Uuid,
+    asset_version: i32,
+) {
+    for key in ["ModelUrl", "model_url"] {
+        if let Some(value) = attrs.get_mut(key) {
+            if let Some(path) = value.as_str().and_then(|url| url.strip_prefix("asset://")) {
+                *value = serde_json::Value::String(format!(
+                    "{}/games/{}/v{}/{}",
+                    r2_public_url.trim_end_matches('/'),
+                    game_id,
+                    asset_version,
+                    path
+                ));
+            }
+        }
+    }
 }
 
 /// Resolve asset:// URLs in a SpectatorObservation to actual CDN URLs.
@@ -161,18 +210,60 @@ fn resolve_observation_assets(
 ) {
     for entity in &mut obs.entities {
         if let Some(ref mut url) = entity.model_url {
-            if let Some(path) = url.strip_prefix("asset://") {
-                *url = format!(
-                    "{}/games/{}/v{}/{}",
-                    r2_public_url.trim_end_matches('/'),
-                    game_id,
-                    asset_version,
-                    path
-                );
-            }
+            resolve_asset_url(url, r2_public_url, game_id, asset_version);
             // /static/ and https:// pass through unchanged
         }
     }
+}
+
+fn resolve_player_observation_assets(
+    obs: &mut PlayerObservation,
+    r2_public_url: &str,
+    game_id: Uuid,
+    asset_version: i32,
+) {
+    for entity in &mut obs.world.entities {
+        if let Some(attrs) = entity.attributes.as_mut() {
+            resolve_model_url_attrs(attrs, r2_public_url, game_id, asset_version);
+        }
+    }
+}
+
+struct AssetInfo {
+    r2_public_url: String,
+    asset_version: i32,
+}
+
+#[derive(sqlx::FromRow)]
+struct GameAssetInfoRow {
+    has_assets: bool,
+    asset_version: i32,
+}
+
+async fn get_asset_info(
+    state: &GameplayState,
+    game_id: Uuid,
+) -> Result<Option<AssetInfo>, (StatusCode, String)> {
+    let game: GameAssetInfoRow =
+        sqlx::query_as("SELECT has_assets, asset_version FROM games WHERE id = $1")
+            .bind(game_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or((StatusCode::NOT_FOUND, "Game not found".to_string()))?;
+
+    if !game.has_assets {
+        return Ok(None);
+    }
+
+    let Some(r2_public_url) = state.r2_public_url.clone() else {
+        return Ok(None);
+    };
+
+    Ok(Some(AssetInfo {
+        r2_public_url,
+        asset_version: game.asset_version,
+    }))
 }
 
 async fn spectate(
@@ -193,6 +284,7 @@ async fn spectate(
             &state.game_manager,
             game_id,
             db_game.max_players as u32,
+            db_game.observation_radius,
             db_game.script_code.as_deref(),
         );
     }
@@ -228,12 +320,13 @@ async fn get_map(
             &state.game_manager,
             game_id,
             db_game.max_players as u32,
+            db_game.observation_radius,
             db_game.script_code.as_deref(),
         );
     }
 
-    let map_info = game::get_map(&state.game_manager, game_id)
-        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
+    let map_info =
+        game::get_map(&state.game_manager, game_id).map_err(|e| (StatusCode::NOT_FOUND, e))?;
 
     Ok(Json(map_info))
 }
@@ -250,9 +343,10 @@ async fn get_skill(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Game not found".to_string()))?;
 
-    let skill_md = game
-        .skill_md
-        .ok_or((StatusCode::NOT_FOUND, "Game has no skill definition".to_string()))?;
+    let skill_md = game.skill_md.ok_or((
+        StatusCode::NOT_FOUND,
+        "Game has no skill definition".to_string(),
+    ))?;
 
     Ok((
         StatusCode::OK,
@@ -278,17 +372,34 @@ async fn send_input(
     headers: HeaderMap,
     Json(input): Json<AgentInputRequest>,
 ) -> Result<Json<PlayerObservation>, (StatusCode, String)> {
-    let api_key = extract_api_key(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
+    let api_key = extract_api_key(&headers).ok_or((
+        StatusCode::UNAUTHORIZED,
+        "Missing Authorization header".to_string(),
+    ))?;
 
     let agent_id = get_agent_id_from_api_key(&api_key, &state.api_key_cache, &state.pool).await?;
 
-    game::queue_input(&state.game_manager, game_id, agent_id, input.input_type, input.data)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    game::queue_input(
+        &state.game_manager,
+        game_id,
+        agent_id,
+        input.input_type,
+        input.data,
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     // Return observation instead of simple success message (reduces round-trips)
-    let observation = game::get_observation(&state.game_manager, game_id, agent_id)
+    let mut observation = game::get_observation(&state.game_manager, game_id, agent_id)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    if let Some(asset_info) = get_asset_info(&state, game_id).await? {
+        resolve_player_observation_assets(
+            &mut observation,
+            &asset_info.r2_public_url,
+            game_id,
+            asset_info.asset_version,
+        );
+    }
 
     Ok(Json(observation))
 }
@@ -300,6 +411,156 @@ async fn spectate_ws(
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_spectate_ws(socket, state, game_id))
+}
+
+fn anon_play_ws_enabled() -> bool {
+    if cfg!(debug_assertions) {
+        return true;
+    }
+
+    match std::env::var("CLAWBLOX_ENABLE_ANON_PLAY_WS") {
+        Ok(v) => matches!(v.as_str(), "1" | "true" | "TRUE"),
+        Err(_) => false,
+    }
+}
+
+#[derive(Deserialize)]
+struct PlayWsQuery {
+    name: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct PlayButtons {
+    #[serde(default)]
+    jump: bool,
+    #[serde(default)]
+    dive: bool,
+}
+
+#[derive(Deserialize)]
+struct PlayIntentMessage {
+    #[serde(default)]
+    seq: Option<u64>,
+    #[serde(default, rename = "move")]
+    move_axis: Option<[f32; 2]>,
+    #[serde(default)]
+    buttons: PlayButtons,
+    #[serde(default)]
+    camera_yaw: f32,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum PlayClientMessage {
+    Intent(PlayIntentMessage),
+}
+
+#[derive(Serialize)]
+struct PlayJoinedMessage {
+    #[serde(rename = "type")]
+    message_type: &'static str,
+    player_id: Uuid,
+    instance_id: Uuid,
+}
+
+#[derive(Serialize)]
+struct PlayAckMessage {
+    #[serde(rename = "type")]
+    message_type: &'static str,
+    seq: u64,
+}
+
+#[derive(Serialize)]
+struct PlayErrorMessage {
+    #[serde(rename = "type")]
+    message_type: &'static str,
+    message: String,
+}
+
+#[derive(Default)]
+struct PlayIntentState {
+    move_x: f32,
+    move_z: f32,
+    camera_yaw: f32,
+    jump_pressed: bool,
+    dive_pressed: bool,
+    jump_pending: bool,
+    dive_pending: bool,
+    was_moving: bool,
+}
+
+fn sanitized_player_name(name: Option<&str>, fallback_id: Uuid) -> String {
+    let fallback = format!("player-{}", &fallback_id.to_string()[..8]);
+    let Some(raw) = name else {
+        return fallback;
+    };
+
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return fallback;
+    }
+
+    let cleaned: String = trimmed
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == ' ')
+        .take(24)
+        .collect();
+
+    if cleaned.trim().is_empty() {
+        fallback
+    } else {
+        cleaned
+    }
+}
+
+fn camera_relative_move_to_world(move_x: f32, move_z: f32, camera_yaw: f32) -> (f32, f32) {
+    let cos_yaw = camera_yaw.cos();
+    let sin_yaw = camera_yaw.sin();
+
+    let world_x = move_x * cos_yaw + move_z * sin_yaw;
+    let world_z = -move_x * sin_yaw + move_z * cos_yaw;
+    (world_x, world_z)
+}
+
+fn normalize_clamped_axis(v: [f32; 2]) -> (f32, f32) {
+    let mut x = v[0].clamp(-1.0, 1.0);
+    let mut z = v[1].clamp(-1.0, 1.0);
+    let len = (x * x + z * z).sqrt();
+    if len > 1.0 {
+        x /= len;
+        z /= len;
+    }
+    (x, z)
+}
+
+async fn send_play_error(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    message: &str,
+) {
+    let payload = PlayErrorMessage {
+        message_type: "error",
+        message: message.to_string(),
+    };
+    if let Ok(json) = serde_json::to_string(&payload) {
+        let _ = sender.send(Message::Text(json.into())).await;
+    }
+}
+
+async fn play_ws(
+    State(state): State<GameplayState>,
+    Path(game_id): Path<Uuid>,
+    Query(query): Query<PlayWsQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if !anon_play_ws_enabled() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Anonymous play WebSocket is disabled. Set CLAWBLOX_ENABLE_ANON_PLAY_WS=1 to enable."
+                .to_string(),
+        ));
+    }
+
+    Ok(ws.on_upgrade(move |socket| handle_play_ws(socket, state, game_id, query.name)))
 }
 
 /// Query parameters for leaderboard endpoint
@@ -368,10 +629,7 @@ async fn get_leaderboard(
         .into_iter()
         .enumerate()
         .map(|(i, (key, value))| {
-            let score = value
-                .get("score")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
+            let score = value.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let name = value
                 .get("name")
                 .and_then(|v| v.as_str())
@@ -394,13 +652,12 @@ async fn handle_spectate_ws(socket: WebSocket, state: GameplayState, game_id: Uu
     let (mut sender, mut receiver) = socket.split();
 
     // First verify game exists in database and get script + max_players
-    let db_game: Option<Game> =
-        sqlx::query_as("SELECT * FROM games WHERE id = $1")
-            .bind(game_id)
-            .fetch_optional(&state.pool)
-            .await
-            .ok()
-            .flatten();
+    let db_game: Option<Game> = sqlx::query_as("SELECT * FROM games WHERE id = $1")
+        .bind(game_id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten();
 
     let Some(db_game) = db_game else {
         let _ = sender
@@ -417,6 +674,7 @@ async fn handle_spectate_ws(socket: WebSocket, state: GameplayState, game_id: Uu
             &state.game_manager,
             game_id,
             db_game.max_players as u32,
+            db_game.observation_radius,
             db_game.script_code.as_deref(),
         );
     }
@@ -507,4 +765,254 @@ async fn handle_spectate_ws(socket: WebSocket, state: GameplayState, game_id: Uu
             }
         }
     }
+}
+
+async fn handle_play_ws(
+    socket: WebSocket,
+    state: GameplayState,
+    game_id: Uuid,
+    requested_name: Option<String>,
+) {
+    const INPUT_TICK_MS: u64 = 16;
+    const MOVE_DEADZONE: f32 = 0.01;
+    const MOVE_TARGET_DISTANCE: f32 = 10.0;
+
+    let (mut sender, mut receiver) = socket.split();
+
+    // First verify game exists in database and get script + max_players
+    let db_game: Option<Game> = sqlx::query_as("SELECT * FROM games WHERE id = $1")
+        .bind(game_id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten();
+
+    let Some(db_game) = db_game else {
+        send_play_error(&mut sender, "Game not found").await;
+        return;
+    };
+
+    // Auto-start the game instance if not running
+    if !game::is_instance_running(&state.game_manager, game_id) {
+        game::find_or_create_instance(
+            &state.game_manager,
+            game_id,
+            db_game.max_players as u32,
+            db_game.observation_radius,
+            db_game.script_code.as_deref(),
+        );
+    }
+
+    let find_result = game::find_or_create_instance(
+        &state.game_manager,
+        game_id,
+        db_game.max_players as u32,
+        db_game.observation_radius,
+        db_game.script_code.as_deref(),
+    );
+
+    let player_id = Uuid::new_v4();
+    let player_name = sanitized_player_name(requested_name.as_deref(), player_id);
+
+    if let Err(err) = game::join_instance(
+        &state.game_manager,
+        find_result.instance_id,
+        game_id,
+        player_id,
+        &player_name,
+    ) {
+        send_play_error(&mut sender, &format!("Failed to join instance: {err}")).await;
+        return;
+    }
+
+    let joined_payload = PlayJoinedMessage {
+        message_type: "joined",
+        player_id,
+        instance_id: find_result.instance_id,
+    };
+    if let Ok(json) = serde_json::to_string(&joined_payload) {
+        if sender.send(Message::Text(json.into())).await.is_err() {
+            let _ = game::leave_instance(&state.game_manager, find_result.instance_id, player_id);
+            return;
+        }
+    }
+
+    let mut intent = PlayIntentState::default();
+    let mut tick_interval = interval(Duration::from_millis(INPUT_TICK_MS));
+
+    loop {
+        tokio::select! {
+            msg = receiver.next() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        if sender.send(Message::Pong(data)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Text(text))) => {
+                        match serde_json::from_str::<PlayClientMessage>(&text) {
+                            Ok(PlayClientMessage::Intent(incoming)) => {
+                                if let Some(move_axis) = incoming.move_axis {
+                                    let (mx, mz) = normalize_clamped_axis(move_axis);
+                                    intent.move_x = mx;
+                                    intent.move_z = mz;
+                                }
+
+                                if incoming.camera_yaw.is_finite() {
+                                    intent.camera_yaw = incoming.camera_yaw;
+                                }
+
+                                if incoming.buttons.jump && !intent.jump_pressed {
+                                    intent.jump_pending = true;
+                                }
+                                intent.jump_pressed = incoming.buttons.jump;
+
+                                if incoming.buttons.dive && !intent.dive_pressed {
+                                    intent.dive_pending = true;
+                                }
+                                intent.dive_pressed = incoming.buttons.dive;
+
+                                if let Some(seq) = incoming.seq {
+                                    let ack = PlayAckMessage {
+                                        message_type: "ack",
+                                        seq,
+                                    };
+                                    if let Ok(json) = serde_json::to_string(&ack) {
+                                        if sender.send(Message::Text(json.into())).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                send_play_error(&mut sender, "Invalid play message").await;
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Binary(data))) => {
+                        if let Ok(text) = String::from_utf8(data.to_vec()) {
+                            match serde_json::from_str::<PlayClientMessage>(&text) {
+                                Ok(PlayClientMessage::Intent(incoming)) => {
+                                    if let Some(move_axis) = incoming.move_axis {
+                                        let (mx, mz) = normalize_clamped_axis(move_axis);
+                                        intent.move_x = mx;
+                                        intent.move_z = mz;
+                                    }
+
+                                    if incoming.camera_yaw.is_finite() {
+                                        intent.camera_yaw = incoming.camera_yaw;
+                                    }
+
+                                    if incoming.buttons.jump && !intent.jump_pressed {
+                                        intent.jump_pending = true;
+                                    }
+                                    intent.jump_pressed = incoming.buttons.jump;
+
+                                    if incoming.buttons.dive && !intent.dive_pressed {
+                                        intent.dive_pending = true;
+                                    }
+                                    intent.dive_pressed = incoming.buttons.dive;
+
+                                    if let Some(seq) = incoming.seq {
+                                        let ack = PlayAckMessage {
+                                            message_type: "ack",
+                                            seq,
+                                        };
+                                        if let Ok(json) = serde_json::to_string(&ack) {
+                                            if sender.send(Message::Text(json.into())).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(_) => {
+                                    send_play_error(&mut sender, "Invalid play message").await;
+                                }
+                            }
+                        } else {
+                            send_play_error(&mut sender, "Play messages must be utf-8 JSON").await;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            _ = tick_interval.tick() => {
+                let moving = intent.move_x.abs() > MOVE_DEADZONE || intent.move_z.abs() > MOVE_DEADZONE;
+
+                if moving {
+                    let obs = match game::get_observation(&state.game_manager, game_id, player_id) {
+                        Ok(o) => o,
+                        Err(err) => {
+                            send_play_error(&mut sender, &format!("Observation failed: {err}")).await;
+                            break;
+                        }
+                    };
+
+                    let [px, py, pz] = obs.player.position;
+                    let (world_x, world_z) = camera_relative_move_to_world(intent.move_x, intent.move_z, intent.camera_yaw);
+                    let len = (world_x * world_x + world_z * world_z).sqrt();
+                    if len > 0.0001 {
+                        let target_x = px + (world_x / len) * MOVE_TARGET_DISTANCE;
+                        let target_z = pz + (world_z / len) * MOVE_TARGET_DISTANCE;
+
+                        if let Err(err) = game::queue_input(
+                            &state.game_manager,
+                            game_id,
+                            player_id,
+                            "MoveTo".to_string(),
+                            serde_json::json!({ "position": [target_x, py, target_z] }),
+                        ) {
+                            send_play_error(&mut sender, &format!("MoveTo failed: {err}")).await;
+                            break;
+                        }
+                        intent.was_moving = true;
+                    }
+                } else if intent.was_moving {
+                    if let Err(err) = game::queue_input(
+                        &state.game_manager,
+                        game_id,
+                        player_id,
+                        "Stop".to_string(),
+                        serde_json::json!({}),
+                    ) {
+                        send_play_error(&mut sender, &format!("Stop failed: {err}")).await;
+                        break;
+                    }
+                    intent.was_moving = false;
+                }
+
+                if intent.jump_pending {
+                    if let Err(err) = game::queue_input(
+                        &state.game_manager,
+                        game_id,
+                        player_id,
+                        "Jump".to_string(),
+                        serde_json::json!({}),
+                    ) {
+                        send_play_error(&mut sender, &format!("Jump failed: {err}")).await;
+                        break;
+                    }
+                    intent.jump_pending = false;
+                }
+
+                if intent.dive_pending {
+                    if let Err(err) = game::queue_input(
+                        &state.game_manager,
+                        game_id,
+                        player_id,
+                        "Dive".to_string(),
+                        serde_json::json!({}),
+                    ) {
+                        send_play_error(&mut sender, &format!("Dive failed: {err}")).await;
+                        break;
+                    }
+                    intent.dive_pending = false;
+                }
+            }
+        }
+    }
+
+    let _ = game::leave_instance(&state.game_manager, find_result.instance_id, player_id);
 }

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Server Map Viewer</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #07090f; }
+    #game { width: 100%; height: 100%; display: block; }
+    #hud {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      z-index: 20;
+      color: #e8edf8;
+      background: rgba(7, 12, 22, 0.75);
+      border: 1px solid rgba(145, 170, 216, 0.35);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font: 12px/1.4 "Segoe UI", system-ui, sans-serif;
+      white-space: pre-line;
+      pointer-events: none;
+    }
+    #crosshair {
+      position: fixed;
+      left: 50%;
+      top: 50%;
+      width: 14px;
+      height: 14px;
+      transform: translate(-50%, -50%);
+      z-index: 10;
+      pointer-events: none;
+      opacity: 0.8;
+    }
+    #crosshair::before, #crosshair::after {
+      content: "";
+      position: absolute;
+      background: #cfe1ff;
+    }
+    #crosshair::before { width: 2px; height: 14px; left: 6px; top: 0; }
+    #crosshair::after { width: 14px; height: 2px; left: 0; top: 6px; }
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div id="crosshair"></div>
+  <div id="hud">Connecting...</div>
+  <script type="module" src="/src/server-map.ts"></script>
+</body>
+</html>

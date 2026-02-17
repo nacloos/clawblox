@@ -121,48 +121,44 @@ impl UserData for Vector3 {
             ))
         });
 
-        methods.add_meta_method(MetaMethod::Mul, |_, this, value: mlua::Value| {
-            match value {
-                mlua::Value::Number(n) => {
-                    let n = n as f32;
-                    Ok(Vector3::new(this.x * n, this.y * n, this.z * n))
-                }
-                mlua::Value::Integer(n) => {
-                    let n = n as f32;
-                    Ok(Vector3::new(this.x * n, this.y * n, this.z * n))
-                }
-                mlua::Value::UserData(ud) => {
-                    let other = ud.borrow::<Vector3>()?;
-                    Ok(Vector3::new(
-                        this.x * other.x,
-                        this.y * other.y,
-                        this.z * other.z,
-                    ))
-                }
-                _ => Err(mlua::Error::runtime("Expected number or Vector3")),
+        methods.add_meta_method(MetaMethod::Mul, |_, this, value: mlua::Value| match value {
+            mlua::Value::Number(n) => {
+                let n = n as f32;
+                Ok(Vector3::new(this.x * n, this.y * n, this.z * n))
             }
+            mlua::Value::Integer(n) => {
+                let n = n as f32;
+                Ok(Vector3::new(this.x * n, this.y * n, this.z * n))
+            }
+            mlua::Value::UserData(ud) => {
+                let other = ud.borrow::<Vector3>()?;
+                Ok(Vector3::new(
+                    this.x * other.x,
+                    this.y * other.y,
+                    this.z * other.z,
+                ))
+            }
+            _ => Err(mlua::Error::runtime("Expected number or Vector3")),
         });
 
-        methods.add_meta_method(MetaMethod::Div, |_, this, value: mlua::Value| {
-            match value {
-                mlua::Value::Number(n) => {
-                    let n = n as f32;
-                    Ok(Vector3::new(this.x / n, this.y / n, this.z / n))
-                }
-                mlua::Value::Integer(n) => {
-                    let n = n as f32;
-                    Ok(Vector3::new(this.x / n, this.y / n, this.z / n))
-                }
-                mlua::Value::UserData(ud) => {
-                    let other = ud.borrow::<Vector3>()?;
-                    Ok(Vector3::new(
-                        this.x / other.x,
-                        this.y / other.y,
-                        this.z / other.z,
-                    ))
-                }
-                _ => Err(mlua::Error::runtime("Expected number or Vector3")),
+        methods.add_meta_method(MetaMethod::Div, |_, this, value: mlua::Value| match value {
+            mlua::Value::Number(n) => {
+                let n = n as f32;
+                Ok(Vector3::new(this.x / n, this.y / n, this.z / n))
             }
+            mlua::Value::Integer(n) => {
+                let n = n as f32;
+                Ok(Vector3::new(this.x / n, this.y / n, this.z / n))
+            }
+            mlua::Value::UserData(ud) => {
+                let other = ud.borrow::<Vector3>()?;
+                Ok(Vector3::new(
+                    this.x / other.x,
+                    this.y / other.y,
+                    this.z / other.z,
+                ))
+            }
+            _ => Err(mlua::Error::runtime("Expected number or Vector3")),
         });
 
         methods.add_meta_method(MetaMethod::Unm, |_, this, ()| {

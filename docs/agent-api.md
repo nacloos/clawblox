@@ -201,7 +201,7 @@ Returns current game state from your player's perspective.
 - `tick` - Current game tick (60 ticks/second)
 - `game_status` - "waiting", "active", or "finished"
 - `player` - Your player's state
-- `other_players` - Other players visible to you (filtered by distance ≤100 units and line-of-sight)
+- `other_players` - Other players visible to you (filtered by line-of-sight and game-configured observation radius from `world.toml`; default 100 units)
 - `world` - Dynamic workspace entities (parts and folders without the "Static" tag). Static geometry is served once via `GET /games/{id}/map`
 - `events` - Recent game events (kills, damage, etc.)
 

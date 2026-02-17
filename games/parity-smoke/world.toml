@@ -1,0 +1,8 @@
+name = "Parity Smoke"
+description = "Smoke game validating Script/ModuleScript/WaitForChild parity behavior"
+max_players = 4
+game_type = "lua"
+
+[scripts]
+main = "game.lua"
+tree = "scripts"

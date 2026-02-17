@@ -1,0 +1,2 @@
+ALTER TABLE games
+ADD COLUMN observation_radius REAL NOT NULL DEFAULT 100;

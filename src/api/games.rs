@@ -22,7 +22,11 @@ pub struct GamesState {
 }
 
 pub fn routes(pool: PgPool, game_manager: GameManagerHandle, api_key_cache: ApiKeyCache) -> Router {
-    let state = GamesState { pool, game_manager, api_key_cache };
+    let state = GamesState {
+        pool,
+        game_manager,
+        api_key_cache,
+    };
 
     Router::new()
         .route("/games", get(list_games).post(create_game))
@@ -41,12 +45,13 @@ async fn get_agent_info_from_api_key(
         return Ok(entry.clone());
     }
 
-    let agent = sqlx::query_as::<_, (Uuid, String)>("SELECT id, name FROM agents WHERE api_key = $1")
-        .bind(api_key)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
+    let agent =
+        sqlx::query_as::<_, (Uuid, String)>("SELECT id, name FROM agents WHERE api_key = $1")
+            .bind(api_key)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))?;
 
     cache.insert(api_key.to_string(), agent.clone());
     Ok(agent)
@@ -94,10 +99,8 @@ async fn list_games(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let running_games = game::list_games(&state.game_manager);
-    let running_map: std::collections::HashMap<Uuid, &game::GameInfo> = running_games
-        .iter()
-        .map(|g| (g.id, g))
-        .collect();
+    let running_map: std::collections::HashMap<Uuid, &game::GameInfo> =
+        running_games.iter().map(|g| (g.id, g)).collect();
 
     let games = db_games
         .into_iter()
@@ -132,6 +135,8 @@ struct CreateGameRequest {
     skill_md: Option<String>,
     #[serde(default = "default_max_players")]
     max_players: i32,
+    #[serde(default = "default_observation_radius")]
+    observation_radius: f32,
 }
 
 fn default_game_type() -> String {
@@ -140,6 +145,14 @@ fn default_game_type() -> String {
 
 fn default_max_players() -> i32 {
     8
+}
+
+fn default_observation_radius() -> f32 {
+    100.0
+}
+
+fn is_valid_observation_radius(value: f32) -> bool {
+    value.is_finite() && value > 0.0
 }
 
 #[derive(Serialize)]
@@ -154,8 +167,17 @@ async fn create_game(
     headers: HeaderMap,
     Json(payload): Json<CreateGameRequest>,
 ) -> Result<Json<CreateGameResponse>, (StatusCode, String)> {
-    let api_key = extract_api_key(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
+    if !is_valid_observation_radius(payload.observation_radius) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "observation_radius must be > 0".to_string(),
+        ));
+    }
+
+    let api_key = extract_api_key(&headers).ok_or((
+        StatusCode::UNAUTHORIZED,
+        "Missing Authorization header".to_string(),
+    ))?;
 
     let agent = sqlx::query_as::<_, (Uuid,)>("SELECT id FROM agents WHERE api_key = $1")
         .bind(&api_key)
@@ -167,8 +189,8 @@ async fn create_game(
     let game_id = Uuid::new_v4();
 
     sqlx::query(
-        "INSERT INTO games (id, name, description, game_type, creator_id, status, script_code, skill_md, max_players)
-         VALUES ($1, $2, $3, $4, $5, 'waiting', $6, $7, $8)",
+        "INSERT INTO games (id, name, description, game_type, creator_id, status, script_code, skill_md, max_players, observation_radius)
+         VALUES ($1, $2, $3, $4, $5, 'waiting', $6, $7, $8, $9)",
     )
     .bind(game_id)
     .bind(&payload.name)
@@ -178,6 +200,7 @@ async fn create_game(
     .bind(&payload.script_code)
     .bind(&payload.skill_md)
     .bind(payload.max_players)
+    .bind(payload.observation_radius)
     .execute(&state.pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -228,6 +251,7 @@ struct UpdateGameRequest {
     script_code: Option<String>,
     skill_md: Option<String>,
     max_players: Option<i32>,
+    observation_radius: Option<f32>,
 }
 
 #[derive(Serialize)]
@@ -242,8 +266,10 @@ async fn update_game(
     headers: HeaderMap,
     Json(payload): Json<UpdateGameRequest>,
 ) -> Result<Json<UpdateGameResponse>, (StatusCode, String)> {
-    let api_key = extract_api_key(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
+    let api_key = extract_api_key(&headers).ok_or((
+        StatusCode::UNAUTHORIZED,
+        "Missing Authorization header".to_string(),
+    ))?;
 
     let agent = sqlx::query_as::<_, (Uuid,)>("SELECT id FROM agents WHERE api_key = $1")
         .bind(&api_key)
@@ -290,6 +316,10 @@ async fn update_game(
         param_idx += 1;
         updates.push(format!("max_players = ${}", param_idx));
     }
+    if payload.observation_radius.is_some() {
+        param_idx += 1;
+        updates.push(format!("observation_radius = ${}", param_idx));
+    }
 
     if updates.is_empty() {
         return Ok(Json(UpdateGameResponse {
@@ -319,6 +349,15 @@ async fn update_game(
     if let Some(max_players) = payload.max_players {
         q = q.bind(max_players);
     }
+    if let Some(observation_radius) = payload.observation_radius {
+        if !is_valid_observation_radius(observation_radius) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "observation_radius must be > 0".to_string(),
+            ));
+        }
+        q = q.bind(observation_radius);
+    }
 
     q.execute(&state.pool)
         .await
@@ -346,13 +385,18 @@ async fn join_game(
     Path(game_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<JoinGameResponse>, (StatusCode, String)> {
-    let api_key = extract_api_key(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
+    let api_key = extract_api_key(&headers).ok_or((
+        StatusCode::UNAUTHORIZED,
+        "Missing Authorization header".to_string(),
+    ))?;
 
-    let (agent_id, agent_name) = get_agent_info_from_api_key(&api_key, &state.api_key_cache, &state.pool).await?;
+    let (agent_id, agent_name) =
+        get_agent_info_from_api_key(&api_key, &state.api_key_cache, &state.pool).await?;
 
     // Kick from old instance of same game (second tab scenario)
-    if let Some(existing_instance_id) = game::get_player_instance(&state.game_manager, agent_id, game_id) {
+    if let Some(existing_instance_id) =
+        game::get_player_instance(&state.game_manager, agent_id, game_id)
+    {
         let _ = game::leave_instance(&state.game_manager, existing_instance_id, agent_id);
     }
 
@@ -371,6 +415,7 @@ async fn join_game(
         &state.game_manager,
         game_id,
         max_players,
+        db_game.observation_radius,
         db_game.script_code.as_deref(),
     );
 
@@ -388,7 +433,7 @@ async fn join_game(
     let pool = state.pool.clone();
     let instance_id = result.instance_id;
     tokio::spawn(async move {
-        let _ = sqlx::query(
+        if let Err(e) = sqlx::query(
             "INSERT INTO game_players (game_id, agent_id, instance_id) VALUES ($1, $2, $3)
              ON CONFLICT (game_id, agent_id) DO UPDATE SET instance_id = $3",
         )
@@ -396,7 +441,13 @@ async fn join_game(
         .bind(agent_id)
         .bind(instance_id)
         .execute(&pool)
-        .await;
+        .await
+        {
+            eprintln!(
+                "[DB WARN] Failed to upsert game_players game={} agent={} instance={}: {}",
+                game_id, agent_id, instance_id, e
+            );
+        }
     });
 
     Ok(Json(JoinGameResponse {
@@ -421,8 +472,10 @@ async fn leave_game(
     Path(game_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<LeaveGameResponse>, (StatusCode, String)> {
-    let api_key = extract_api_key(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
+    let api_key = extract_api_key(&headers).ok_or((
+        StatusCode::UNAUTHORIZED,
+        "Missing Authorization header".to_string(),
+    ))?;
 
     let agent_id = get_agent_id_from_api_key(&api_key, &state.api_key_cache, &state.pool).await?;
 
@@ -431,11 +484,17 @@ async fn leave_game(
 
     let pool = state.pool.clone();
     tokio::spawn(async move {
-        let _ = sqlx::query("DELETE FROM game_players WHERE game_id = $1 AND agent_id = $2")
+        if let Err(e) = sqlx::query("DELETE FROM game_players WHERE game_id = $1 AND agent_id = $2")
             .bind(game_id)
             .bind(agent_id)
             .execute(&pool)
-            .await;
+            .await
+        {
+            eprintln!(
+                "[DB WARN] Failed to delete game_players game={} agent={}: {}",
+                game_id, agent_id, e
+            );
+        }
     });
 
     Ok(Json(LeaveGameResponse {
@@ -443,4 +502,3 @@ async fn leave_game(
         message: "Left game".to_string(),
     }))
 }
-

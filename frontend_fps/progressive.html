@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { overflow: hidden; background: #000; font-family: 'Segoe UI', system-ui, sans-serif; }
+  canvas { display: block; }
+
+  #blocker {
+    position: fixed; inset: 0; z-index: 100;
+    background: rgba(0,0,0,0.85);
+    display: flex; align-items: center; justify-content: center;
+    backdrop-filter: blur(8px);
+  }
+  #menu {
+    text-align: center; color: #fff;
+    animation: fadeIn 0.5s ease;
+  }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+  #menu h1 {
+    font-size: 4rem; font-weight: 900; letter-spacing: -2px;
+    background: linear-gradient(135deg, #ff4444, #ff8800, #ffcc00);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    text-shadow: none; margin-bottom: 0.5rem;
+  }
+  #menu .subtitle { color: #888; font-size: 1.1rem; margin-bottom: 2rem; }
+  #menu .start-hint {
+    color: #aaa; font-size: 1.3rem;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  #menu .controls {
+    margin-top: 2rem; color: #555; font-size: 0.85rem; line-height: 2;
+  }
+  #menu .controls span { color: #888; font-weight: 600; }
+  @keyframes pulse { 0%,100% { opacity: 0.6; } 50% { opacity: 1; } }
+
+  #hud {
+    position: fixed; inset: 0; z-index: 10; pointer-events: none;
+    display: none;
+  }
+
+  #crosshair {
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 24px; height: 24px;
+  }
+  #crosshair::before, #crosshair::after {
+    content: ''; position: absolute; background: rgba(255,255,255,0.8);
+    border-radius: 1px;
+  }
+  #crosshair::before { width: 2px; height: 24px; left: 11px; top: 0; }
+  #crosshair::after { width: 24px; height: 2px; top: 11px; left: 0; }
+  .crosshair-dot {
+    position: absolute; width: 4px; height: 4px;
+    background: rgba(255,80,80,0.9); border-radius: 50%;
+    top: 50%; left: 50%; transform: translate(-50%, -50%);
+  }
+
+  #health-container {
+    position: absolute; bottom: 30px; left: 30px;
+  }
+  #health-label { color: #888; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 4px; }
+  #health-bar-bg {
+    width: 220px; height: 8px; background: rgba(255,255,255,0.1);
+    border-radius: 4px; overflow: hidden;
+  }
+  #health-bar {
+    width: 100%; height: 100%;
+    background: linear-gradient(90deg, #44ff44, #88ff44);
+    border-radius: 4px; transition: width 0.3s ease;
+  }
+  #health-text {
+    color: #fff; font-size: 2rem; font-weight: 700; margin-top: 2px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  #ammo-container {
+    position: absolute; bottom: 30px; right: 30px; text-align: right;
+  }
+  #ammo-label { color: #888; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 4px; }
+  #ammo-text {
+    color: #fff; font-size: 2rem; font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  #ammo-text .mag { color: #ffcc00; }
+  #ammo-text .sep { color: #555; margin: 0 2px; }
+  #ammo-text .reserve { color: #888; font-size: 1.2rem; }
+  #weapon-name { color: #555; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 2px; margin-top: 2px; }
+
+  #score-container {
+    position: absolute; top: 20px; right: 30px; text-align: right;
+  }
+  #score-label { color: #888; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 2px; }
+  #score-text { color: #fff; font-size: 1.8rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  #wave-text { color: #ff8800; font-size: 0.85rem; font-weight: 600; }
+
+  #killfeed {
+    position: absolute; top: 20px; left: 30px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .kill-msg {
+    color: #ccc; font-size: 0.8rem; padding: 4px 10px;
+    background: rgba(0,0,0,0.5); border-radius: 4px;
+    border-left: 3px solid #ff4444;
+    animation: killFade 3s ease forwards;
+  }
+  @keyframes killFade { 0% { opacity: 1; } 70% { opacity: 1; } 100% { opacity: 0; } }
+
+  #damage-overlay {
+    position: fixed; inset: 0;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(255,0,0,0.4) 100%);
+    opacity: 0; transition: opacity 0.1s; pointer-events: none; z-index: 9;
+  }
+
+  #minimap {
+    position: absolute; bottom: 100px; left: 30px;
+    width: 140px; height: 140px;
+    border: 2px solid rgba(255,255,255,0.15);
+    border-radius: 8px; overflow: hidden;
+    background: rgba(0,0,0,0.6);
+  }
+  #minimap-canvas { width: 100%; height: 100%; }
+
+  #gameover {
+    position: fixed; inset: 0; z-index: 200;
+    background: rgba(0,0,0,0.9);
+    display: none; align-items: center; justify-content: center;
+    backdrop-filter: blur(12px);
+  }
+  #gameover-inner { text-align: center; color: #fff; }
+  #gameover-inner h2 { font-size: 3rem; font-weight: 900; color: #ff4444; margin-bottom: 1rem; }
+  #gameover-inner .stats { color: #888; font-size: 1.1rem; line-height: 2; }
+  #gameover-inner .stats b { color: #fff; }
+  #gameover-inner .restart-hint { color: #aaa; font-size: 1.1rem; margin-top: 2rem; animation: pulse 2s ease-in-out infinite; }
+</style>
+</head>
+<body>
+
+<div id="blocker">
+  <div id="menu">
+    <h1>DEADZONE</h1>
+    <div class="subtitle">Arena Survival FPS</div>
+    <div class="start-hint">Click to start</div>
+    <div class="controls">
+      <span>WASD</span> Move &nbsp;&bull;&nbsp;
+      <span>Mouse</span> Aim &nbsp;&bull;&nbsp;
+      <span>Click</span> Shoot &nbsp;&bull;&nbsp;
+      <span>R</span> Reload<br>
+      <span>Shift</span> Sprint &nbsp;&bull;&nbsp;
+      <span>Space</span> Jump &nbsp;&bull;&nbsp;
+      <span>1-3</span> Weapons
+    </div>
+  </div>
+</div>
+
+<div id="hud">
+  <div id="crosshair"><div class="crosshair-dot"></div></div>
+  <div id="health-container">
+    <div id="health-label">Health</div>
+    <div id="health-text">100</div>
+    <div id="health-bar-bg"><div id="health-bar"></div></div>
+  </div>
+  <div id="ammo-container">
+    <div id="ammo-label">Ammo</div>
+    <div id="ammo-text"><span class="mag">30</span><span class="sep">/</span><span class="reserve">120</span></div>
+    <div id="weapon-name">Assault Rifle</div>
+  </div>
+  <div id="score-container">
+    <div id="score-label">Score</div>
+    <div id="score-text">0</div>
+    <div id="wave-text">Wave 1</div>
+  </div>
+  <div id="killfeed"></div>
+  <div id="minimap"><canvas id="minimap-canvas" width="140" height="140"></canvas></div>
+</div>
+
+<div id="damage-overlay"></div>
+
+<div id="gameover">
+  <div id="gameover-inner">
+    <h2>YOU DIED</h2>
+    <div class="stats">
+      Score: <b id="final-score">0</b><br>
+      Kills: <b id="final-kills">0</b><br>
+      Wave: <b id="final-wave">1</b><br>
+      Accuracy: <b id="final-accuracy">0%</b>
+    </div>
+    <div class="restart-hint">Click to restart</div>
+  </div>
+</div>
+
+<script type="module" src="/src/progressive-game.js"></script>
+</body>
+</html>

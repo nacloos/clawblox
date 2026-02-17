@@ -11,6 +11,7 @@
 
 use crossbeam_channel::{Receiver, Sender};
 use sqlx::PgPool;
+use sqlx::SqlitePool;
 use std::sync::Arc;
 use std::thread;
 use tokio::runtime::Runtime;
@@ -48,18 +49,36 @@ pub struct AsyncBridge {
     request_tx: Sender<AsyncRequest>,
 }
 
+#[derive(Clone)]
+pub enum DataStoreDb {
+    Postgres(Arc<PgPool>),
+    Sqlite(Arc<SqlitePool>),
+}
+
 impl AsyncBridge {
     /// Creates a new AsyncBridge and spawns the background tokio processor thread.
     ///
     /// The processor thread runs its own tokio runtime to handle async database operations.
     pub fn new(pool: Arc<PgPool>) -> Self {
+        Self::from_postgres(pool)
+    }
+
+    pub fn from_postgres(pool: Arc<PgPool>) -> Self {
+        Self::from_db(DataStoreDb::Postgres(pool))
+    }
+
+    pub fn from_sqlite(pool: Arc<SqlitePool>) -> Self {
+        Self::from_db(DataStoreDb::Sqlite(pool))
+    }
+
+    pub fn from_db(db: DataStoreDb) -> Self {
         let (request_tx, request_rx) = crossbeam_channel::unbounded::<AsyncRequest>();
 
         // Spawn a dedicated thread with its own tokio runtime to process async requests
         thread::spawn(move || {
             let rt = Runtime::new().expect("Failed to create tokio runtime for AsyncBridge");
             rt.block_on(async move {
-                Self::process_requests(request_rx, pool).await;
+                Self::process_requests(request_rx, db).await;
             });
         });
 
@@ -74,7 +93,7 @@ impl AsyncBridge {
     }
 
     /// Background task that processes incoming requests
-    async fn process_requests(request_rx: Receiver<AsyncRequest>, pool: Arc<PgPool>) {
+    async fn process_requests(request_rx: Receiver<AsyncRequest>, db: DataStoreDb) {
         loop {
             // Block on receiving the next request
             let request = match request_rx.recv() {
@@ -85,8 +104,8 @@ impl AsyncBridge {
                 }
             };
 
-            // Clone pool for the spawned task
-            let pool = Arc::clone(&pool);
+            // Clone backend for the spawned task
+            let db = db.clone();
 
             // Spawn a task for each request to allow concurrent processing
             tokio::spawn(async move {
@@ -97,7 +116,7 @@ impl AsyncBridge {
                         key,
                         response_tx,
                     } => {
-                        let result = Self::db_get(&pool, game_id, &store_name, &key).await;
+                        let result = Self::db_get(&db, game_id, &store_name, &key).await;
                         // Ignore send error - receiver may have been dropped (coroutine cancelled)
                         let _ = response_tx.send(result);
                     }
@@ -108,7 +127,7 @@ impl AsyncBridge {
                         value,
                         response_tx,
                     } => {
-                        let result = Self::db_set(&pool, game_id, &store_name, &key, &value).await;
+                        let result = Self::db_set(&db, game_id, &store_name, &key, &value).await;
                         // Ignore send error - receiver may have been dropped (coroutine cancelled)
                         let _ = response_tx.send(result);
                     }
@@ -119,9 +138,8 @@ impl AsyncBridge {
                         limit,
                         response_tx,
                     } => {
-                        let result =
-                            Self::db_get_sorted(&pool, game_id, &store_name, ascending, limit)
-                                .await;
+                        let result = Self::db_get_sorted(&db, game_id, &store_name, ascending, limit)
+                            .await;
                         // Ignore send error - receiver may have been dropped (coroutine cancelled)
                         let _ = response_tx.send(result);
                     }
@@ -132,100 +150,202 @@ impl AsyncBridge {
 
     /// Performs the actual database GET operation
     async fn db_get(
-        pool: &PgPool,
+        db: &DataStoreDb,
         game_id: Uuid,
         store_name: &str,
         key: &str,
     ) -> Result<Option<serde_json::Value>, String> {
-        let result: Option<(serde_json::Value,)> = sqlx::query_as(
-            r#"
-            SELECT value
-            FROM data_stores
-            WHERE game_id = $1 AND store_name = $2 AND key = $3
-            "#,
-        )
-        .bind(game_id)
-        .bind(store_name)
-        .bind(key)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| format!("Database error in GetAsync: {}", e))?;
+        match db {
+            DataStoreDb::Postgres(pool) => {
+                let result: Option<(serde_json::Value,)> = sqlx::query_as(
+                    r#"
+                    SELECT value
+                    FROM data_stores
+                    WHERE game_id = $1 AND store_name = $2 AND key = $3
+                    "#,
+                )
+                .bind(game_id)
+                .bind(store_name)
+                .bind(key)
+                .fetch_optional(pool.as_ref())
+                .await
+                .map_err(|e| format!("Database error in GetAsync: {}", e))?;
 
-        Ok(result.map(|(v,)| v))
+                Ok(result.map(|(v,)| v))
+            }
+            DataStoreDb::Sqlite(pool) => {
+                let result: Option<(String,)> = sqlx::query_as(
+                    r#"
+                    SELECT value
+                    FROM data_stores
+                    WHERE game_id = ?1 AND store_name = ?2 AND key = ?3
+                    "#,
+                )
+                .bind(game_id.to_string())
+                .bind(store_name)
+                .bind(key)
+                .fetch_optional(pool.as_ref())
+                .await
+                .map_err(|e| format!("Database error in GetAsync: {}", e))?;
+
+                match result {
+                    Some((value_text,)) => {
+                        let value: serde_json::Value = serde_json::from_str(&value_text)
+                            .map_err(|e| format!("Invalid JSON value in sqlite datastore: {}", e))?;
+                        Ok(Some(value))
+                    }
+                    None => Ok(None),
+                }
+            }
+        }
     }
 
     /// Performs the actual database SET operation (upsert)
     async fn db_set(
-        pool: &PgPool,
+        db: &DataStoreDb,
         game_id: Uuid,
         store_name: &str,
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), String> {
-        sqlx::query(
-            r#"
-            INSERT INTO data_stores (game_id, store_name, key, value)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (game_id, store_name, key)
-            DO UPDATE SET value = $4, updated_at = NOW()
-            "#,
-        )
-        .bind(game_id)
-        .bind(store_name)
-        .bind(key)
-        .bind(value)
-        .execute(pool)
-        .await
-        .map_err(|e| format!("Database error in SetAsync: {}", e))?;
+        match db {
+            DataStoreDb::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+                    INSERT INTO data_stores (game_id, store_name, key, value)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (game_id, store_name, key)
+                    DO UPDATE SET value = $4, updated_at = NOW()
+                    "#,
+                )
+                .bind(game_id)
+                .bind(store_name)
+                .bind(key)
+                .bind(value)
+                .execute(pool.as_ref())
+                .await
+                .map_err(|e| format!("Database error in SetAsync: {}", e))?;
+            }
+            DataStoreDb::Sqlite(pool) => {
+                let value_text = serde_json::to_string(value)
+                    .map_err(|e| format!("Failed to serialize value for sqlite datastore: {}", e))?;
+                sqlx::query(
+                    r#"
+                    INSERT INTO data_stores (game_id, store_name, key, value)
+                    VALUES (?1, ?2, ?3, ?4)
+                    ON CONFLICT (game_id, store_name, key)
+                    DO UPDATE SET value = excluded.value, updated_at = datetime('now')
+                    "#,
+                )
+                .bind(game_id.to_string())
+                .bind(store_name)
+                .bind(key)
+                .bind(value_text)
+                .execute(pool.as_ref())
+                .await
+                .map_err(|e| format!("Database error in SetAsync: {}", e))?;
+            }
+        }
 
         Ok(())
     }
 
     /// Performs the actual database GET SORTED operation (for OrderedDataStore leaderboards)
     async fn db_get_sorted(
-        pool: &PgPool,
+        db: &DataStoreDb,
         game_id: Uuid,
         store_name: &str,
         ascending: bool,
         limit: i32,
     ) -> Result<Vec<(String, serde_json::Value)>, String> {
-        // Use different queries based on sort order
-        // The index idx_data_stores_score optimizes these queries
-        let results: Vec<(String, serde_json::Value)> = if ascending {
-            sqlx::query_as(
-                r#"
-                SELECT key, value
-                FROM data_stores
-                WHERE game_id = $1 AND store_name = $2 AND value ? 'score'
-                ORDER BY (value->>'score')::numeric ASC NULLS LAST
-                LIMIT $3
-                "#,
-            )
-            .bind(game_id)
-            .bind(store_name)
-            .bind(limit)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| format!("Database error in GetSortedAsync: {}", e))?
-        } else {
-            sqlx::query_as(
-                r#"
-                SELECT key, value
-                FROM data_stores
-                WHERE game_id = $1 AND store_name = $2 AND value ? 'score'
-                ORDER BY (value->>'score')::numeric DESC NULLS LAST
-                LIMIT $3
-                "#,
-            )
-            .bind(game_id)
-            .bind(store_name)
-            .bind(limit)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| format!("Database error in GetSortedAsync: {}", e))?
-        };
+        match db {
+            DataStoreDb::Postgres(pool) => {
+                // Use different queries based on sort order
+                // The index idx_data_stores_score optimizes these queries
+                let results: Vec<(String, serde_json::Value)> = if ascending {
+                    sqlx::query_as(
+                        r#"
+                        SELECT key, value
+                        FROM data_stores
+                        WHERE game_id = $1 AND store_name = $2 AND value ? 'score'
+                        ORDER BY (value->>'score')::numeric ASC NULLS LAST
+                        LIMIT $3
+                        "#,
+                    )
+                    .bind(game_id)
+                    .bind(store_name)
+                    .bind(limit)
+                    .fetch_all(pool.as_ref())
+                    .await
+                    .map_err(|e| format!("Database error in GetSortedAsync: {}", e))?
+                } else {
+                    sqlx::query_as(
+                        r#"
+                        SELECT key, value
+                        FROM data_stores
+                        WHERE game_id = $1 AND store_name = $2 AND value ? 'score'
+                        ORDER BY (value->>'score')::numeric DESC NULLS LAST
+                        LIMIT $3
+                        "#,
+                    )
+                    .bind(game_id)
+                    .bind(store_name)
+                    .bind(limit)
+                    .fetch_all(pool.as_ref())
+                    .await
+                    .map_err(|e| format!("Database error in GetSortedAsync: {}", e))?
+                };
 
-        Ok(results)
+                Ok(results)
+            }
+            DataStoreDb::Sqlite(pool) => {
+                let rows: Vec<(String, String)> = if ascending {
+                    sqlx::query_as(
+                        r#"
+                        SELECT key, value
+                        FROM data_stores
+                        WHERE game_id = ?1
+                          AND store_name = ?2
+                          AND json_type(value, '$.score') IS NOT NULL
+                        ORDER BY CAST(json_extract(value, '$.score') AS REAL) ASC
+                        LIMIT ?3
+                        "#,
+                    )
+                    .bind(game_id.to_string())
+                    .bind(store_name)
+                    .bind(limit)
+                    .fetch_all(pool.as_ref())
+                    .await
+                    .map_err(|e| format!("Database error in GetSortedAsync: {}", e))?
+                } else {
+                    sqlx::query_as(
+                        r#"
+                        SELECT key, value
+                        FROM data_stores
+                        WHERE game_id = ?1
+                          AND store_name = ?2
+                          AND json_type(value, '$.score') IS NOT NULL
+                        ORDER BY CAST(json_extract(value, '$.score') AS REAL) DESC
+                        LIMIT ?3
+                        "#,
+                    )
+                    .bind(game_id.to_string())
+                    .bind(store_name)
+                    .bind(limit)
+                    .fetch_all(pool.as_ref())
+                    .await
+                    .map_err(|e| format!("Database error in GetSortedAsync: {}", e))?
+                };
+
+                let mut results = Vec::with_capacity(rows.len());
+                for (key, value_text) in rows {
+                    let value: serde_json::Value = serde_json::from_str(&value_text)
+                        .map_err(|e| format!("Invalid JSON value in sqlite datastore: {}", e))?;
+                    results.push((key, value));
+                }
+                Ok(results)
+            }
+        }
     }
 }
 

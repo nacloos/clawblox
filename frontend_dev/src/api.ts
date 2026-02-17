@@ -39,9 +39,19 @@ export interface SpectatorPlayerInfo {
   id: string
   name: string
   position: [number, number, number]
+  root_part_id?: number
   health: number
   attributes?: Record<string, unknown>
   gui?: GuiElement[]
+  active_animations?: PlayerAnimationState[]
+}
+
+export interface PlayerAnimationState {
+  animation_id: string
+  time_position: number
+  speed: number
+  looped: boolean
+  is_playing: boolean
 }
 
 export interface BillboardLabel {

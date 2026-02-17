@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useParams, Link, useSearchParams } from 'react-router-dom'
 import { ArrowLeft, Users } from 'lucide-react'
 import { createGameWebSocket, fetchGameState, SpectatorObservation, SpectatorPlayerInfo, sendGuiClick } from '../api'
 import GameScene from '../components/GameScene'
@@ -8,6 +8,7 @@ import GuiOverlay from '../components/GuiOverlay'
 import ChatPanel from '../components/ChatPanel'
 import { Button } from '@/components/ui/button'
 import { StateBuffer } from '../lib/stateBuffer'
+import { GameRenderAdapter, defaultGameRenderAdapter, loadGameRenderAdapter } from '../lib/gameAdapter'
 
 function arraysEqual<T>(a: T[], b: T[]): boolean {
   if (a.length !== b.length) return false
@@ -19,6 +20,7 @@ function arraysEqual<T>(a: T[], b: T[]): boolean {
 
 export default function Game() {
   const { id } = useParams<{ id: string }>()
+  const [searchParams] = useSearchParams()
   const [error, setError] = useState<string | null>(null)
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting')
   const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null)
@@ -33,6 +35,7 @@ export default function Game() {
   const [entityIds, setEntityIds] = useState<number[]>([])
   const [players, setPlayers] = useState<SpectatorPlayerInfo[]>([])
   const [gameStatus, setGameStatus] = useState<string | null>(null)
+  const [renderAdapter, setRenderAdapter] = useState<GameRenderAdapter>(defaultGameRenderAdapter)
 
   const wsRef = useRef<{ close: () => void } | null>(null)
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -150,6 +153,19 @@ export default function Game() {
   }, [id, selectedPlayerId])
 
   const hasGameData = stateBufferRef.current.hasData()
+  const adapterUrl = searchParams.get('adapter')
+
+  useEffect(() => {
+    let cancelled = false
+    loadGameRenderAdapter(adapterUrl).then((adapter) => {
+      if (!cancelled) {
+        setRenderAdapter(adapter)
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [adapterUrl])
 
   return (
     <div className="h-full flex flex-col bg-background">
@@ -212,6 +228,7 @@ export default function Game() {
                 stateBuffer={stateBufferRef.current}
                 entityIds={entityIds}
                 followPlayerId={selectedPlayerId}
+                renderAdapter={renderAdapter}
               />
               <GuiOverlay
                 stateBuffer={stateBufferRef.current}

@@ -4,10 +4,12 @@ import { Html, useAnimations, useGLTF } from '@react-three/drei'
 import * as THREE from 'three'
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js'
 import { StateBuffer, EntitySnapshot, interpolatePosition, BillboardGui } from '../lib/stateBuffer'
+import { GameRenderAdapter } from '../lib/gameAdapter'
 
 interface EntityProps {
   entityId: number
   stateBuffer: StateBuffer
+  renderAdapter: GameRenderAdapter
 }
 
 function getMaterialProps(material?: string, color?: string) {
@@ -254,9 +256,15 @@ function billboardEqual(a: BillboardGui | null, b: BillboardGui | null): boolean
 function ModelMesh({
   modelUrl,
   targetSize,
+  entityId,
+  stateBuffer,
+  renderAdapter,
 }: {
   modelUrl: string
   targetSize: [number, number, number]
+  entityId: number
+  stateBuffer: StateBuffer
+  renderAdapter: GameRenderAdapter
 }) {
   const { scene, animations } = useGLTF(modelUrl)
   const rootRef = useRef<THREE.Group>(null)
@@ -290,6 +298,7 @@ function ModelMesh({
   const fallbackPhase = useRef(0)
   const targetRotationY = useRef(0)
   const currentRotationY = useRef(0)
+  const lastCommandActive = useRef(false)
   const modelFit = useMemo(() => {
     // Find the actual SkinnedMesh to get accurate bounds (not bones/skeleton)
     let mesh: THREE.SkinnedMesh | THREE.Mesh | null = null
@@ -409,16 +418,30 @@ function ModelMesh({
       idleAction.weight = isMoving ? 0 : 1
     }
 
+    const command = renderAdapter.getEntityAnimationCommand?.({
+      entityId,
+      stateBuffer,
+      nowMs: performance.now(),
+    }) ?? null
+    const commandActive = !!command
+    if (commandActive !== lastCommandActive.current) {
+      console.log(`[renderer] command ${commandActive ? 'on' : 'off'} entity=${entityId}`)
+      lastCommandActive.current = commandActive
+    }
+    const rot = command?.additiveRotation
+    rootRef.current.rotation.x = rot?.[0] ?? 0
+    rootRef.current.rotation.z = rot?.[2] ?? 0
+
     // Fallback walk-like motion for static GLBs with no animation clips.
     if (!walkAction && !idleAction) {
       if (isMoving) {
         fallbackPhase.current += delta * 10
-        rootRef.current.position.y = Math.sin(fallbackPhase.current) * 0.06
+        rootRef.current.position.y = Math.sin(fallbackPhase.current) * 0.06 + (command?.additiveYOffset ?? 0)
       } else {
-        rootRef.current.position.y = THREE.MathUtils.lerp(rootRef.current.position.y, 0, 0.2)
+        rootRef.current.position.y = THREE.MathUtils.lerp(rootRef.current.position.y, command?.additiveYOffset ?? 0, 0.2)
       }
     } else {
-      rootRef.current.position.y = 0
+      rootRef.current.position.y = command?.additiveYOffset ?? 0
     }
   })
 
@@ -434,7 +457,7 @@ function ModelMesh({
 }
 
 // Part entity - renders based on shape property (Roblox-style)
-function PartEntity({ entityId, stateBuffer }: EntityProps) {
+function PartEntity({ entityId, stateBuffer, renderAdapter }: EntityProps) {
   const groupRef = useRef<THREE.Group>(null)
   const meshRef = useRef<THREE.Mesh>(null)
   const modelGroupRef = useRef<THREE.Group>(null)
@@ -448,6 +471,30 @@ function PartEntity({ entityId, stateBuffer }: EntityProps) {
   const materialProps = getMaterialProps(initialEntity?.material, color)
   const shape = initialEntity?.shape || 'Block'
   const modelUrl = sanitizeModelUrl(initialEntity?.model_url)
+
+  // Pre-build wedge geometry (must be at top level to satisfy Rules of Hooks)
+  const wedgeGeometry = useMemo(() => {
+    if (shape !== 'Wedge') return null
+    const hx = size[0] / 2, hy = size[1] / 2, hz = size[2] / 2
+    const geo = new THREE.BufferGeometry()
+    const v = (x: number, y: number, z: number) => [x, y, z]
+    const BLB = v(-hx, -hy, -hz)
+    const BRB = v( hx, -hy, -hz)
+    const BLF = v(-hx, -hy,  hz)
+    const BRF = v( hx, -hy,  hz)
+    const TLB = v(-hx,  hy, -hz)
+    const TLF = v(-hx,  hy,  hz)
+    const positions = new Float32Array([
+      ...BLB, ...BRB, ...BRF,  ...BLB, ...BRF, ...BLF,   // bottom
+      ...BLB, ...TLB, ...BRB,                              // back
+      ...BLF, ...BRF, ...TLF,                              // front
+      ...BLB, ...BLF, ...TLF,  ...BLB, ...TLF, ...TLB,   // left wall
+      ...BRB, ...TLB, ...TLF,  ...BRB, ...TLF, ...BRF,   // slope
+    ])
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    geo.computeVertexNormals()
+    return geo
+  }, [shape, size[0], size[1], size[2]])
   const [billboardGui, setBillboardGui] = useState<BillboardGui | null>(initialEntity?.billboard_gui ?? null)
   const billboardGuiRef = useRef<BillboardGui | null>(billboardGui)
 
@@ -507,9 +554,8 @@ function PartEntity({ entityId, stateBuffer }: EntityProps) {
 
       case 'Wedge':
         return (
-          <mesh {...refProp} castShadow receiveShadow>
-            <boxGeometry args={size as [number, number, number]} />
-            <meshStandardMaterial {...materialProps} />
+          <mesh {...refProp} castShadow receiveShadow geometry={wedgeGeometry!}>
+            <meshStandardMaterial {...materialProps} side={THREE.DoubleSide} />
           </mesh>
         )
 
@@ -532,7 +578,13 @@ function PartEntity({ entityId, stateBuffer }: EntityProps) {
     return (
       <group ref={modelGroupRef}>
         <Suspense fallback={renderPrimitiveMesh(false)}>
-          <ModelMesh modelUrl={modelUrl} targetSize={size as [number, number, number]} />
+          <ModelMesh
+            modelUrl={modelUrl}
+            targetSize={size as [number, number, number]}
+            entityId={entityId}
+            stateBuffer={stateBuffer}
+            renderAdapter={renderAdapter}
+          />
         </Suspense>
       </group>
     )
@@ -548,7 +600,7 @@ function PartEntity({ entityId, stateBuffer }: EntityProps) {
   )
 }
 
-function Entity({ entityId, stateBuffer }: EntityProps) {
+function Entity({ entityId, stateBuffer, renderAdapter }: EntityProps) {
   // Get the entity type from the latest snapshot
   const latest = stateBuffer.getLatest()
   const entity = latest?.entities.get(entityId)
@@ -559,20 +611,24 @@ function Entity({ entityId, stateBuffer }: EntityProps) {
 
   // Special rendering for specific entity types (legacy support)
   if (entity.type === 'pickup') {
-    return <PickupEntity entityId={entityId} stateBuffer={stateBuffer} />
+    return <PickupEntity entityId={entityId} stateBuffer={stateBuffer} renderAdapter={renderAdapter} />
   }
 
   if (entity.type === 'enemy') {
-    return <EnemyEntity entityId={entityId} stateBuffer={stateBuffer} />
+    return <EnemyEntity entityId={entityId} stateBuffer={stateBuffer} renderAdapter={renderAdapter} />
   }
 
   // Default: render as Part based on shape
-  return <PartEntity entityId={entityId} stateBuffer={stateBuffer} />
+  return <PartEntity entityId={entityId} stateBuffer={stateBuffer} renderAdapter={renderAdapter} />
 }
 
 useGLTF.preload('/static/models/player.glb')
 
 // Memoize to prevent unnecessary re-renders
 export default memo(Entity, (prev, next) => {
-  return prev.entityId === next.entityId && prev.stateBuffer === next.stateBuffer
+  return (
+    prev.entityId === next.entityId &&
+    prev.stateBuffer === next.stateBuffer &&
+    prev.renderAdapter === next.renderAdapter
+  )
 })
