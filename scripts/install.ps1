@@ -1,118 +1,81 @@
-# Clawblox installer for Windows PowerShell
-# Usage: irm https://clawblox.com/install.ps1 | iex
-
 $ErrorActionPreference = "Stop"
+$ProgressPreference = 'SilentlyContinue'
 
-$Repo = "nacloos/clawblox"
-$BinaryName = "clawblox"
-$InstallDir = "$env:LOCALAPPDATA\clawblox"
+$ReleasesUrl = "https://releases.clawblox.com"
+$DownloadDir = "$env:USERPROFILE\.clawblox\downloads"
 
-function Write-Info {
-    param([string]$Message)
-    Write-Host "info: " -ForegroundColor Green -NoNewline
-    Write-Host $Message
+# Detect architecture
+$Arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+if ($Arch -eq "Arm64") {
+    $Platform = "win32-arm64"
+} else {
+    $Platform = "win32-x64"
 }
 
-function Write-Warn {
-    param([string]$Message)
-    Write-Host "warn: " -ForegroundColor Yellow -NoNewline
-    Write-Host $Message
-}
+# Create download directory
+New-Item -ItemType Directory -Force -Path $DownloadDir | Out-Null
 
-function Write-Error {
-    param([string]$Message)
-    Write-Host "error: " -ForegroundColor Red -NoNewline
-    Write-Host $Message
+Write-Output "Detecting platform: $Platform"
+
+# Get latest version
+try {
+    $Version = Invoke-RestMethod -Uri "$ReleasesUrl/latest"
+    Write-Output "Latest version: $Version"
+} catch {
+    Write-Error "Failed to get latest version: $_"
     exit 1
 }
 
-function Get-Architecture {
-    $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
-    switch ($arch) {
-        "X64" { return "x86_64" }
-        "Arm64" { return "aarch64" }
-        default { Write-Error "Unsupported architecture: $arch" }
+# Get manifest
+try {
+    $Manifest = Invoke-RestMethod -Uri "$ReleasesUrl/$Version/manifest.json"
+    $Checksum = $Manifest.platforms.$Platform.checksum.Trim()
+
+    if (-not $Checksum) {
+        Write-Error "Platform $Platform not found in manifest"
+        exit 1
     }
+} catch {
+    Write-Error "Failed to get manifest: $_"
+    exit 1
 }
 
-function Get-LatestVersion {
-    $response = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers @{ "User-Agent" = "clawblox-installer" }
-    return $response.tag_name
+# Download binary
+$BinaryPath = "$DownloadDir\clawblox-$Version-$Platform.exe"
+Write-Output "Downloading clawblox..."
+
+try {
+    Invoke-WebRequest -Uri "$ReleasesUrl/$Version/$Platform/clawblox.exe" -OutFile $BinaryPath
+} catch {
+    Write-Error "Failed to download: $_"
+    exit 1
 }
 
-function Get-DownloadUrl {
-    param(
-        [string]$Version,
-        [string]$Arch
-    )
-    $target = "$Arch-pc-windows-msvc"
-    return "https://github.com/$Repo/releases/download/$Version/$BinaryName-$target.zip"
+# Verify checksum
+$ActualChecksum = (Get-FileHash -Path $BinaryPath -Algorithm SHA256).Hash.ToLower()
+
+if ($ActualChecksum -ne $Checksum) {
+    Write-Output "Checksum verification failed!"
+    Write-Output "  Expected: '$Checksum'"
+    Write-Output "  Actual:   '$ActualChecksum'"
+    Remove-Item -Force $BinaryPath
+    exit 1
 }
 
-function Main {
-    Write-Info "Detecting system..."
-
-    $arch = Get-Architecture
-    Write-Info "Architecture: $arch"
-
-    Write-Info "Fetching latest version..."
-    $version = Get-LatestVersion
-
-    if (-not $version) {
-        Write-Error "Failed to get latest version"
-    }
-
-    Write-Info "Latest version: $version"
-
-    $url = Get-DownloadUrl -Version $version -Arch $arch
-    Write-Info "Downloading from: $url"
-
-    # Create temp directory
-    $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString())
-    New-Item -ItemType Directory -Path $tmpDir | Out-Null
-
-    try {
-        $zipPath = Join-Path $tmpDir "$BinaryName.zip"
-
-        # Download
-        Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
-
-        # Extract
-        Expand-Archive -Path $zipPath -DestinationPath $tmpDir -Force
-
-        # Create install directory
-        if (-not (Test-Path $InstallDir)) {
-            New-Item -ItemType Directory -Path $InstallDir | Out-Null
-        }
-
-        # Install binary
-        $binaryPath = Join-Path $InstallDir "$BinaryName.exe"
-        Move-Item -Path (Join-Path $tmpDir "$BinaryName.exe") -Destination $binaryPath -Force
-
-        Write-Info "Installed $BinaryName to $binaryPath"
-
-        # Check if InstallDir is in PATH
-        $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
-        if ($userPath -notlike "*$InstallDir*") {
-            Write-Warn "$InstallDir is not in your PATH"
-            Write-Host ""
-            Write-Host "Adding to PATH..."
-
-            $newPath = "$InstallDir;$userPath"
-            [Environment]::SetEnvironmentVariable("PATH", $newPath, "User")
-            $env:PATH = "$InstallDir;$env:PATH"
-
-            Write-Info "Added $InstallDir to PATH"
-            Write-Host ""
-            Write-Host "Note: Restart your terminal for PATH changes to take effect"
-        }
-
-        Write-Info "Run '$BinaryName --help' to get started"
-    }
-    finally {
-        # Cleanup
-        Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
-    }
+# Run installer
+Write-Output "Installing..."
+try {
+    & $BinaryPath install
+} finally {
+    Start-Sleep -Seconds 1
+    Remove-Item -Force $BinaryPath -ErrorAction SilentlyContinue
 }
 
-Main
+# Refresh PATH in the current session so the command works immediately
+$UserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+$MachinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+$env:PATH = "$UserPath;$MachinePath"
+
+Write-Output ""
+Write-Output "Installation complete!"
+Write-Output "Run 'clawblox --help' to get started."

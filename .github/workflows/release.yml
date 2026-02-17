@@ -170,6 +170,9 @@ jobs:
           rclone copy dist/win32-x64/clawblox.exe r2:clawblox-releases/$VERSION/win32-x64/ --s3-no-check-bucket
           rclone copy dist/win32-arm64/clawblox.exe r2:clawblox-releases/$VERSION/win32-arm64/ --s3-no-check-bucket
           rclone copy dist/manifest.json r2:clawblox-releases/$VERSION/ --s3-no-check-bucket
+          rclone copy scripts/install.sh r2:clawblox-releases/ --s3-no-check-bucket
+          rclone copy scripts/install.ps1 r2:clawblox-releases/ --s3-no-check-bucket
+          rclone copy scripts/install.cmd r2:clawblox-releases/ --s3-no-check-bucket
 
           # Update latest pointer
           echo -n "$VERSION" > latest.txt
@@ -180,3 +183,6 @@ jobs:
         run: |
           curl -fsSL https://releases.clawblox.com/latest
           curl -fsSI https://releases.clawblox.com/${{ steps.version.outputs.version }}/manifest.json
+          curl -fsSI https://releases.clawblox.com/install.sh
+          curl -fsSI https://releases.clawblox.com/install.ps1
+          curl -fsSI https://releases.clawblox.com/install.cmd

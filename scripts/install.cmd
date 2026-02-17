@@ -1,100 +1,70 @@
 @echo off
-REM Clawblox installer for Windows CMD
-REM Usage: curl -fsSL https://clawblox.com/install.cmd -o install.cmd && install.cmd && del install.cmd
-
 setlocal enabledelayedexpansion
 
-set "REPO=nacloos/clawblox"
-set "BINARY_NAME=clawblox"
-set "INSTALL_DIR=%LOCALAPPDATA%\clawblox"
+set "RELEASES_URL=https://releases.clawblox.com"
+set "DOWNLOAD_DIR=%USERPROFILE%\.clawblox\downloads"
 
-echo info: Detecting architecture...
-
-REM Detect architecture
-if "%PROCESSOR_ARCHITECTURE%"=="AMD64" (
-    set "ARCH=x86_64"
-) else if "%PROCESSOR_ARCHITECTURE%"=="ARM64" (
-    set "ARCH=aarch64"
+:: Detect architecture
+if "%PROCESSOR_ARCHITECTURE%"=="ARM64" (
+    set "PLATFORM=win32-arm64"
 ) else (
-    echo error: Unsupported architecture: %PROCESSOR_ARCHITECTURE%
-    exit /b 1
+    set "PLATFORM=win32-x64"
 )
 
-echo info: Architecture: %ARCH%
+if not exist "%DOWNLOAD_DIR%" mkdir "%DOWNLOAD_DIR%"
 
-echo info: Fetching latest version...
+echo Detecting platform: %PLATFORM%
 
-REM Get latest version using curl and basic parsing
-for /f "tokens=*" %%i in ('curl -fsSL "https://api.github.com/repos/%REPO%/releases/latest" ^| findstr /C:"tag_name"') do (
-    set "VERSION_LINE=%%i"
-)
-
-REM Extract version from JSON line
-for /f "tokens=2 delims=:" %%a in ("!VERSION_LINE!") do (
-    set "VERSION=%%a"
-)
-set "VERSION=!VERSION:"=!"
-set "VERSION=!VERSION: =!"
-set "VERSION=!VERSION:,=!"
-
-if "!VERSION!"=="" (
-    echo error: Failed to get latest version
-    exit /b 1
-)
-
-echo info: Latest version: !VERSION!
-
-set "TARGET=%ARCH%-pc-windows-msvc"
-set "URL=https://github.com/%REPO%/releases/download/!VERSION!/%BINARY_NAME%-%TARGET%.zip"
-
-echo info: Downloading from: !URL!
-
-REM Create temp directory
-set "TMP_DIR=%TEMP%\clawblox-install-%RANDOM%"
-mkdir "!TMP_DIR!"
-
-REM Download
-curl -fsSL "!URL!" -o "!TMP_DIR!\%BINARY_NAME%.zip"
+:: Get latest version
+curl -fsSL "%RELEASES_URL%/latest" -o "%DOWNLOAD_DIR%\version.txt"
 if errorlevel 1 (
-    echo error: Download failed
-    rmdir /s /q "!TMP_DIR!" 2>nul
+    echo Error: Failed to get latest version
+    exit /b 1
+)
+set /p VERSION=<"%DOWNLOAD_DIR%\version.txt"
+echo Latest version: %VERSION%
+
+:: Download binary
+echo Downloading clawblox...
+set "BINARY_PATH=%DOWNLOAD_DIR%\clawblox-%VERSION%-%PLATFORM%.exe"
+curl -fsSL "%RELEASES_URL%/%VERSION%/%PLATFORM%/clawblox.exe" -o "%BINARY_PATH%"
+if errorlevel 1 (
+    echo Error: Failed to download binary
     exit /b 1
 )
 
-REM Extract using tar (available on Windows 10+)
-tar -xf "!TMP_DIR!\%BINARY_NAME%.zip" -C "!TMP_DIR!"
+:: Get manifest and verify checksum
+curl -fsSL "%RELEASES_URL%/%VERSION%/manifest.json" -o "%DOWNLOAD_DIR%\manifest.json"
 if errorlevel 1 (
-    echo error: Extraction failed
-    rmdir /s /q "!TMP_DIR!" 2>nul
+    echo Error: Failed to get manifest
     exit /b 1
 )
 
-REM Create install directory
-if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
+:: Verify checksum using PowerShell
+for /f %%h in ('powershell -NoProfile -Command "(Get-FileHash -Path '%BINARY_PATH%' -Algorithm SHA256).Hash.ToLower()"') do set "ACTUAL_CHECKSUM=%%h"
+for /f %%h in ('powershell -NoProfile -Command "(Get-Content '%DOWNLOAD_DIR%\manifest.json' | ConvertFrom-Json).platforms.'%PLATFORM%'.checksum.Trim()"') do set "EXPECTED_CHECKSUM=%%h"
 
-REM Install binary
-move /y "!TMP_DIR!\%BINARY_NAME%.exe" "%INSTALL_DIR%\%BINARY_NAME%.exe" >nul
-if errorlevel 1 (
-    echo error: Installation failed
-    rmdir /s /q "!TMP_DIR!" 2>nul
+if not "%ACTUAL_CHECKSUM%"=="%EXPECTED_CHECKSUM%" (
+    echo Error: Checksum verification failed
+    echo   Expected: '%EXPECTED_CHECKSUM%'
+    echo   Actual:   '%ACTUAL_CHECKSUM%'
+    del "%BINARY_PATH%" 2>nul
+    del "%DOWNLOAD_DIR%\manifest.json" 2>nul
     exit /b 1
 )
 
-echo info: Installed %BINARY_NAME% to %INSTALL_DIR%\%BINARY_NAME%.exe
+:: Run installer
+echo Installing...
+"%BINARY_PATH%" install
 
-REM Cleanup
-rmdir /s /q "!TMP_DIR!" 2>nul
+:: Cleanup
+del "%BINARY_PATH%" 2>nul
+del "%DOWNLOAD_DIR%\version.txt" 2>nul
+del "%DOWNLOAD_DIR%\manifest.json" 2>nul
 
-REM Check PATH
-echo !PATH! | findstr /C:"%INSTALL_DIR%" >nul
-if errorlevel 1 (
-    echo warn: %INSTALL_DIR% is not in your PATH
-    echo.
-    echo To add it, run:
-    echo   setx PATH "%%PATH%%;%INSTALL_DIR%"
-    echo.
-)
+:: Refresh PATH
+set "PATH=%USERPROFILE%\.local\bin;%PATH%"
 
-echo info: Run '%BINARY_NAME% --help' to get started
-
-endlocal
+echo.
+echo Installation complete!
+echo Run 'clawblox --help' to get started.
