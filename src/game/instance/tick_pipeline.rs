@@ -7,11 +7,10 @@ pub(super) fn run_tick_phases(instance: &mut GameInstance, dt: f32) {
     // Sync Lua workspace gravity to physics.
     instance.sync_gravity();
 
-    // Sync new/changed Lua parts to physics (skip character-controlled parts).
-    instance.sync_lua_to_physics(dt);
-
     // Process agent inputs (fire InputReceived events).
     // Do this before syncing MoveTo targets so movement can apply in the same tick.
+    // Also do this before Lua->physics sync so script writes (e.g. Part.CFrame)
+    // are pushed to physics in the same frame.
     if let Some(runtime) = &instance.lua_runtime {
         if let Err(e) = runtime.process_agent_inputs() {
             instance.handle_lua_error("Failed to process agent inputs", &e);
@@ -20,6 +19,9 @@ pub(super) fn run_tick_phases(instance: &mut GameInstance, dt: f32) {
             }
         }
     }
+
+    // Sync new/changed Lua parts to physics (skip character-controlled parts).
+    instance.sync_lua_to_physics(dt);
 
     // Sync script control targets to physics character controllers.
     instance.sync_controller_targets();

@@ -892,6 +892,11 @@ impl GameInstance {
                     part_data.angular_velocity.y = 0.0;
                     part_data.angular_velocity.z = 0.0;
                 } else if !part_data.anchored {
+                    // If Lua wrote Position/CFrame this frame, keep that authoritative value
+                    // until sync_lua_to_physics consumes it.
+                    if part_data.position_dirty {
+                        continue;
+                    }
                     if let Some(handle) = self.physics.get_handle(lua_id) {
                         // Update position from physics
                         if let Some(pos) = self.physics.get_position(handle) {
@@ -2136,6 +2141,88 @@ mod tests {
             "Player should move with Humanoid:Move input. Initial={:?} Final={:?}",
             initial_pos,
             final_pos
+        );
+    }
+
+    #[test]
+    fn test_agent_input_cframe_write_on_unanchored_part_applies_same_tick() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(
+            r#"
+            local AgentInputService = game:GetService("AgentInputService")
+
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(100, 1, 100)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            local p = Instance.new("Part")
+            p.Name = "MoveByInput"
+            p.Anchored = false
+            p.Size = Vector3.new(2, 1, 4)
+            p.Position = Vector3.new(0, 6, 0)
+            p.Parent = Workspace
+
+            if AgentInputService then
+                AgentInputService.InputReceived:Connect(function(_player, inputType, _data)
+                    if inputType ~= "PlaceObject" then
+                        return
+                    end
+                    p.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                    p.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                    p.CFrame = CFrame.new(10, 6, 0) * CFrame.Angles(0, math.rad(30), 0)
+                end)
+            end
+        "#,
+        );
+
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "InputPlayer"));
+        let user_id = *instance
+            .players
+            .get(&agent_id)
+            .expect("Player user id should exist");
+
+        // Initialize physics bodies.
+        instance.tick();
+
+        instance.queue_agent_input(user_id, "PlaceObject".to_string(), serde_json::json!({}));
+        instance.tick();
+
+        let runtime = instance
+            .lua_runtime
+            .as_ref()
+            .expect("Lua runtime should exist");
+        let moved = runtime
+            .workspace()
+            .get_descendants()
+            .into_iter()
+            .find(|inst| inst.name() == "MoveByInput")
+            .expect("MoveByInput should exist");
+
+        let data = moved.data.lock().unwrap();
+        let part = data.part_data.as_ref().expect("MoveByInput should be a part");
+        assert!(
+            (part.position.x - 10.0).abs() < 1e-3,
+            "Expected X≈10 after same-tick input, got {}",
+            part.position.x
+        );
+        assert!(
+            (part.position.y - 6.0).abs() < 0.05,
+            "Expected Y close to 6 after same-tick input, got {}",
+            part.position.y
+        );
+        assert!(
+            part.position.z.abs() < 1e-3,
+            "Expected Z≈0 after same-tick input, got {}",
+            part.position.z
+        );
+        assert!(
+            part.cframe.look_vector().x.abs() > 0.1,
+            "Expected non-zero yaw rotation after CFrame write"
         );
     }
 
