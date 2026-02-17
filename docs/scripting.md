@@ -843,6 +843,7 @@ CFrame.new(pos, lookAt)             -- Look at point
 CFrame.lookAt(pos, target, up?)     -- Look at with up vector
 CFrame.fromEulerAnglesXYZ(rx, ry, rz)
 CFrame.Angles(rx, ry, rz)           -- Alias for above
+CFrame.fromOrientation(rx, ry, rz)  -- YXZ orientation constructor
 ```
 
 #### Properties
@@ -864,6 +865,8 @@ CFrame.Angles(rx, ry, rz)           -- Alias for above
 | `PointToWorldSpace(v3)` | Vector3 | Point to world |
 | `PointToObjectSpace(v3)` | Vector3 | Point to local |
 | `GetComponents()` | (12 numbers) | Matrix components |
+| `ToEulerAnglesXYZ()` | (rx, ry, rz) | Euler angles in XYZ order (radians) |
+| `ToOrientation()` | (rx, ry, rz) | Orientation angles in YXZ order (radians) |
 
 #### Operators
 ```lua

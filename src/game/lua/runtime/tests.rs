@@ -342,6 +342,184 @@ fn test_datetime_from_unix_timestamp_millis_roundtrip() {
 }
 
 #[test]
+fn test_cframe_to_orientation_roundtrip_yxz() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local x, y, z = 0.2, 0.7, -0.4
+            local cf =
+                CFrame.Angles(0, y, 0)
+                * CFrame.Angles(x, 0, 0)
+                * CFrame.Angles(0, 0, z)
+
+            local rx, ry, rz = cf:ToOrientation()
+            local rebuilt =
+                CFrame.Angles(0, ry, 0)
+                * CFrame.Angles(rx, 0, 0)
+                * CFrame.Angles(0, 0, rz)
+
+            local function ang_diff(a, b)
+                return math.atan2(math.sin(a - b), math.cos(a - b))
+            end
+
+            _G.errX = math.abs(ang_diff(rx, x))
+            _G.errY = math.abs(ang_diff(ry, y))
+            _G.errZ = math.abs(ang_diff(rz, z))
+            _G.lookDelta = (rebuilt.LookVector - cf.LookVector).Magnitude
+            _G.upDelta = (rebuilt.UpVector - cf.UpVector).Magnitude
+            _G.rightDelta = (rebuilt.RightVector - cf.RightVector).Magnitude
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let err_x: f64 = globals.get("errX").unwrap();
+    let err_y: f64 = globals.get("errY").unwrap();
+    let err_z: f64 = globals.get("errZ").unwrap();
+    let look_delta: f64 = globals.get("lookDelta").unwrap();
+    let up_delta: f64 = globals.get("upDelta").unwrap();
+    let right_delta: f64 = globals.get("rightDelta").unwrap();
+
+    assert!(err_x < 1e-4);
+    assert!(err_y < 1e-4);
+    assert!(err_z < 1e-4);
+    assert!(look_delta < 1e-4);
+    assert!(up_delta < 1e-4);
+    assert!(right_delta < 1e-4);
+}
+
+#[test]
+fn test_cframe_to_orientation_gimbal_lock_stable() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local x, y, z = math.pi / 2, 0.6, 0.3
+            local cf =
+                CFrame.Angles(0, y, 0)
+                * CFrame.Angles(x, 0, 0)
+                * CFrame.Angles(0, 0, z)
+
+            local rx, ry, rz = cf:ToOrientation()
+            local rebuilt =
+                CFrame.Angles(0, ry, 0)
+                * CFrame.Angles(rx, 0, 0)
+                * CFrame.Angles(0, 0, rz)
+
+            _G.lookDelta = (rebuilt.LookVector - cf.LookVector).Magnitude
+            _G.upDelta = (rebuilt.UpVector - cf.UpVector).Magnitude
+            _G.rightDelta = (rebuilt.RightVector - cf.RightVector).Magnitude
+            _G.rx = rx
+            _G.ry = ry
+            _G.rz = rz
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let look_delta: f64 = globals.get("lookDelta").unwrap();
+    let up_delta: f64 = globals.get("upDelta").unwrap();
+    let right_delta: f64 = globals.get("rightDelta").unwrap();
+    let rx: f64 = globals.get("rx").unwrap();
+    let ry: f64 = globals.get("ry").unwrap();
+    let rz: f64 = globals.get("rz").unwrap();
+
+    assert!(look_delta < 1e-4);
+    assert!(up_delta < 1e-4);
+    assert!(right_delta < 1e-4);
+    assert!(rx.is_finite());
+    assert!(ry.is_finite());
+    assert!(rz.is_finite());
+}
+
+#[test]
+fn test_cframe_to_euler_angles_xyz_roundtrip() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local x, y, z = 0.4, -0.3, 0.9
+            local cf = CFrame.Angles(x, y, z)
+            local rx, ry, rz = cf:ToEulerAnglesXYZ()
+            local rebuilt = CFrame.Angles(rx, ry, rz)
+
+            local function ang_diff(a, b)
+                return math.atan2(math.sin(a - b), math.cos(a - b))
+            end
+
+            _G.errX = math.abs(ang_diff(rx, x))
+            _G.errY = math.abs(ang_diff(ry, y))
+            _G.errZ = math.abs(ang_diff(rz, z))
+            _G.lookDelta = (rebuilt.LookVector - cf.LookVector).Magnitude
+            _G.upDelta = (rebuilt.UpVector - cf.UpVector).Magnitude
+            _G.rightDelta = (rebuilt.RightVector - cf.RightVector).Magnitude
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let err_x: f64 = globals.get("errX").unwrap();
+    let err_y: f64 = globals.get("errY").unwrap();
+    let err_z: f64 = globals.get("errZ").unwrap();
+    let look_delta: f64 = globals.get("lookDelta").unwrap();
+    let up_delta: f64 = globals.get("upDelta").unwrap();
+    let right_delta: f64 = globals.get("rightDelta").unwrap();
+
+    assert!(err_x < 1e-4);
+    assert!(err_y < 1e-4);
+    assert!(err_z < 1e-4);
+    assert!(look_delta < 1e-4);
+    assert!(up_delta < 1e-4);
+    assert!(right_delta < 1e-4);
+}
+
+#[test]
+fn test_cframe_from_orientation_matches_yxz_and_roundtrips() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local x, y, z = 0.35, -0.8, 0.5
+            local cf = CFrame.fromOrientation(x, y, z)
+            local manual =
+                CFrame.Angles(0, y, 0)
+                * CFrame.Angles(x, 0, 0)
+                * CFrame.Angles(0, 0, z)
+
+            local rx, ry, rz = cf:ToOrientation()
+
+            local function ang_diff(a, b)
+                return math.atan2(math.sin(a - b), math.cos(a - b))
+            end
+
+            _G.lookDelta = (cf.LookVector - manual.LookVector).Magnitude
+            _G.upDelta = (cf.UpVector - manual.UpVector).Magnitude
+            _G.rightDelta = (cf.RightVector - manual.RightVector).Magnitude
+            _G.errX = math.abs(ang_diff(rx, x))
+            _G.errY = math.abs(ang_diff(ry, y))
+            _G.errZ = math.abs(ang_diff(rz, z))
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let look_delta: f64 = globals.get("lookDelta").unwrap();
+    let up_delta: f64 = globals.get("upDelta").unwrap();
+    let right_delta: f64 = globals.get("rightDelta").unwrap();
+    let err_x: f64 = globals.get("errX").unwrap();
+    let err_y: f64 = globals.get("errY").unwrap();
+    let err_z: f64 = globals.get("errZ").unwrap();
+
+    assert!(look_delta < 1e-4);
+    assert!(up_delta < 1e-4);
+    assert!(right_delta < 1e-4);
+    assert!(err_x < 1e-4);
+    assert!(err_y < 1e-4);
+    assert!(err_z < 1e-4);
+}
+
+#[test]
 fn test_workspace_raycast_hits_rotated_thin_part() {
     let mut runtime = test_runtime();
     runtime

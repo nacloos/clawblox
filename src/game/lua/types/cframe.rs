@@ -98,6 +98,14 @@ impl CFrame {
         }
     }
 
+    /// Build a rotation from orientation angles using Roblox's YXZ order.
+    pub fn from_orientation(rx: f32, ry: f32, rz: f32) -> Self {
+        let y = Self::from_euler_angles_xyz(0.0, ry, 0.0);
+        let x = Self::from_euler_angles_xyz(rx, 0.0, 0.0);
+        let z = Self::from_euler_angles_xyz(0.0, 0.0, rz);
+        y.multiply(&x).multiply(&z)
+    }
+
     pub fn look_vector(&self) -> Vector3 {
         Vector3::new(
             -self.rotation[0][2],
@@ -251,6 +259,49 @@ impl CFrame {
         self.inverse().multiply(cf)
     }
 
+    /// Extract Euler angles for XYZ rotation order.
+    pub fn to_euler_angles_xyz(&self) -> (f32, f32, f32) {
+        let r = &self.rotation;
+        let sy = r[0][2].clamp(-1.0, 1.0);
+        let ry = sy.asin();
+        let cy = ry.cos();
+
+        if cy.abs() > 1e-6 {
+            let rx = (-r[1][2]).atan2(r[2][2]);
+            let rz = (-r[0][1]).atan2(r[0][0]);
+            (rx, ry, rz)
+        } else {
+            // Gimbal lock: choose rz = 0 and solve remaining yaw from matrix.
+            let rz = 0.0;
+            let ry = if sy >= 0.0 {
+                std::f32::consts::FRAC_PI_2
+            } else {
+                -std::f32::consts::FRAC_PI_2
+            };
+            let rx = r[1][0].atan2(r[1][1]);
+            (rx, ry, rz)
+        }
+    }
+
+    /// Extract orientation angles (YXZ decomposition), matching Roblox ToOrientation semantics.
+    pub fn to_orientation(&self) -> (f32, f32, f32) {
+        let r = &self.rotation;
+        let sx = (-r[1][2]).clamp(-1.0, 1.0);
+        let rx = sx.asin();
+        let cx = rx.cos();
+
+        if cx.abs() > 1e-6 {
+            let ry = r[0][2].atan2(r[2][2]);
+            let rz = r[1][0].atan2(r[1][1]);
+            (rx, ry, rz)
+        } else {
+            // Gimbal lock: choose rz = 0 and solve remaining yaw from matrix.
+            let rz = 0.0;
+            let ry = (-r[2][0]).atan2(r[0][0]);
+            (rx, ry, rz)
+        }
+    }
+
     /// Convert rotation matrix to quaternion [x, y, z, w]
     pub fn to_quaternion(&self) -> [f32; 4] {
         let r = &self.rotation;
@@ -375,6 +426,14 @@ impl UserData for CFrame {
                 c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11],
             ))
         });
+        methods.add_method("ToEulerAnglesXYZ", |_, this, ()| {
+            let (rx, ry, rz) = this.to_euler_angles_xyz();
+            Ok((rx, ry, rz))
+        });
+        methods.add_method("ToOrientation", |_, this, ()| {
+            let (rx, ry, rz) = this.to_orientation();
+            Ok((rx, ry, rz))
+        });
 
         methods.add_meta_method(
             MetaMethod::Mul,
@@ -478,6 +537,13 @@ pub fn register_cframe(lua: &Lua) -> Result<()> {
         "Angles",
         lua.create_function(|_, (rx, ry, rz): (f32, f32, f32)| {
             Ok(CFrame::from_euler_angles_xyz(rx, ry, rz))
+        })?,
+    )?;
+
+    cframe_table.set(
+        "fromOrientation",
+        lua.create_function(|_, (rx, ry, rz): (f32, f32, f32)| {
+            Ok(CFrame::from_orientation(rx, ry, rz))
         })?,
     )?;
 
