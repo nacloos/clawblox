@@ -428,7 +428,7 @@ skill = "SKILL.md"
 name = "Default Game Renderer"
 mode = "module"
 api_version = 1
-entry = "index.js"
+entry = "dist/renderer.bundle.js"
 capabilities = []
 
 [observation]
@@ -591,10 +591,26 @@ Move to a position on the map.
     // Create assets/ directory for game assets (GLB models, images, audio)
     std::fs::create_dir_all(project_dir.join("assets")).expect("Failed to create assets directory");
 
-    // Create renderer/ directory for game-specific frontend modules
+    // Create renderer/ package for game-specific frontend modules
     let renderer_dir = project_dir.join("renderer");
-    std::fs::create_dir_all(&renderer_dir).expect("Failed to create renderer directory");
-    let renderer_js = r#"import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js'
+    std::fs::create_dir_all(renderer_dir.join("src")).expect("Failed to create renderer directory");
+    let renderer_package_json = format!(
+        r#"{{
+  "name": "@clawblox-renderers/{project_name}",
+  "private": true,
+  "type": "module",
+  "clawbloxRenderer": {{
+    "apiVersion": 1,
+    "entry": "./src/index.js",
+    "outFile": "./dist/renderer.bundle.js",
+    "capabilities": []
+  }}
+}}
+"#
+    );
+    std::fs::write(renderer_dir.join("package.json"), renderer_package_json)
+        .expect("Failed to create renderer/package.json");
+    let renderer_js = r#"import * as THREE from 'https://esm.sh/three@0.160.0'
 
 export function createRenderer(ctx) {
   const scene = new THREE.Scene()
@@ -693,8 +709,8 @@ export function createRenderer(ctx) {
   }
 }
 "#;
-    std::fs::write(renderer_dir.join("index.js"), renderer_js)
-        .expect("Failed to create renderer/index.js");
+    std::fs::write(renderer_dir.join("src/index.js"), renderer_js)
+        .expect("Failed to create renderer/src/index.js");
 
     // Create .gitignore
     let gitignore = ".clawblox/\n.clawblox.log\n";
@@ -1168,6 +1184,30 @@ struct LocalRendererManifest {
     capabilities: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RendererPackageJson {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    scripts: HashMap<String, String>,
+    #[serde(rename = "clawbloxRenderer", default)]
+    clawblox_renderer: Option<RendererPackageMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RendererPackageMetadata {
+    #[serde(rename = "apiVersion", default)]
+    api_version: Option<u32>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    entry: Option<String>,
+    #[serde(default)]
+    capabilities: Vec<String>,
+    #[serde(rename = "outFile", default)]
+    out_file: Option<String>,
+}
+
 fn sanitize_renderer_entry(raw: &str) -> Option<String> {
     let normalized = raw.replace('\\', "/");
     if normalized.is_empty() || normalized.starts_with('/') {
@@ -1182,46 +1222,25 @@ fn sanitize_renderer_entry(raw: &str) -> Option<String> {
     Some(normalized)
 }
 
-fn build_local_renderer_manifest(
-    game_dir: &Path,
-    config: &clawblox::config::RendererConfig,
-    entry_override: Option<&str>,
-) -> LocalRendererManifest {
-    let entry_candidate = entry_override.or(config.entry.as_deref());
-    let entry_url = entry_candidate
-        .and_then(sanitize_renderer_entry)
-        .and_then(|entry| {
-            let local_path = game_dir.join("renderer").join(&entry);
-            if local_path.is_file() {
-                Some(format!("/renderer-files/{}", entry))
-            } else {
-                eprintln!(
-                    "Warning: renderer entry '{}' not found at {}. Falling back to embedded default renderer.",
-                    entry,
-                    local_path.display()
-                );
-                None
-            }
-        });
-
-    LocalRendererManifest {
-        schema_version: 1,
-        api_version: config.api_version,
-        name: config.name.clone(),
-        mode: config.mode.clone(),
-        entry_url,
-        capabilities: config.capabilities.clone(),
+fn normalize_renderer_rel_path(raw: &str) -> Option<String> {
+    let mut normalized = raw.replace('\\', "/");
+    while normalized.starts_with("./") {
+        normalized = normalized[2..].to_string();
     }
+    sanitize_renderer_entry(&normalized)
 }
 
-fn is_renderer_source_path(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    lower.ends_with(".ts")
-        || lower.ends_with(".tsx")
-        || lower.ends_with(".js")
-        || lower.ends_with(".jsx")
-        || lower.ends_with(".mjs")
-        || lower.ends_with(".cjs")
+fn read_renderer_package(game_dir: &Path) -> Result<Option<RendererPackageJson>, String> {
+    let package_json_path = game_dir.join("renderer").join("package.json");
+    if !package_json_path.is_file() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(&package_json_path)
+        .map_err(|e| format!("Failed to read {}: {}", package_json_path.display(), e))?;
+    let parsed: RendererPackageJson = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse {}: {}", package_json_path.display(), e))?;
+    Ok(Some(parsed))
 }
 
 fn detect_renderer_source_entry(game_dir: &Path) -> Option<String> {
@@ -1313,50 +1332,122 @@ fn bundle_renderer_with_esbuild(
     Ok(())
 }
 
-fn maybe_bundle_renderer_entry(
+fn bundle_renderer_package_with_esbuild(
+    game_dir: &Path,
+    source_rel: &str,
+    out_rel: &str,
+) -> Result<(), String> {
+    let renderer_dir = game_dir.join("renderer");
+    let source = renderer_dir.join(source_rel);
+    if !source.is_file() {
+        return Err(format!(
+            "Renderer package entry '{}' not found at {}",
+            source_rel,
+            source.display()
+        ));
+    }
+    bundle_renderer_with_esbuild(game_dir, source_rel, out_rel)
+}
+
+fn maybe_build_renderer_package(
     game_dir: &Path,
     config: &clawblox::config::RendererConfig,
-) -> Option<String> {
-    if config.mode != "module" {
-        return None;
-    }
-
-    let source_rel = config
-        .source
-        .as_deref()
-        .and_then(sanitize_renderer_entry)
-        .or_else(|| {
-            config
-                .entry
-                .as_deref()
-                .and_then(sanitize_renderer_entry)
-                .filter(|entry| is_renderer_source_path(entry))
-        })
-        .or_else(|| detect_renderer_source_entry(game_dir));
-
-    let Some(source_rel) = source_rel else {
-        return None;
+) -> Result<LocalRendererManifest, String> {
+    let Some(package) = read_renderer_package(game_dir)? else {
+        return Err(
+            "Renderer package required: missing renderer/package.json. Run `clawblox init` for package scaffold or add a renderer package.".to_string(),
+        );
     };
 
-    let source_path = game_dir.join("renderer").join(&source_rel);
-    if !source_path.is_file() {
-        return None;
+    let metadata = package.clawblox_renderer.unwrap_or(RendererPackageMetadata {
+        api_version: None,
+        name: None,
+        entry: None,
+        capabilities: vec![],
+        out_file: None,
+    });
+
+    let entry_rel = metadata
+        .entry
+        .as_deref()
+        .and_then(normalize_renderer_rel_path)
+        .or_else(|| detect_renderer_source_entry(game_dir))
+        .ok_or_else(|| {
+            "Renderer package has no detectable entry. Set renderer/package.json -> clawbloxRenderer.entry (e.g. ./src/index.ts).".to_string()
+        })?;
+
+    let out_rel = metadata
+        .out_file
+        .as_deref()
+        .and_then(normalize_renderer_rel_path)
+        .unwrap_or_else(|| "dist/renderer.bundle.js".to_string());
+
+    let renderer_dir = game_dir.join("renderer");
+    if package.scripts.contains_key("build") {
+        if !command_exists("npm") {
+            return Err(
+                "Renderer package declares a build script, but npm is not available in PATH."
+                    .to_string(),
+            );
+        }
+        let output = Command::new("npm")
+            .args(["run", "build"])
+            .current_dir(&renderer_dir)
+            .output()
+            .map_err(|e| format!("Failed to run renderer build script: {}", e))?;
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "Renderer package build failed (npm run build)\nstdout:\n{}\nstderr:\n{}",
+                stdout, stderr
+            ));
+        }
+    } else {
+        bundle_renderer_package_with_esbuild(game_dir, &entry_rel, &out_rel)?;
     }
 
-    let bundle_rel = "dist/renderer.bundle.js";
-    match bundle_renderer_with_esbuild(game_dir, &source_rel, bundle_rel) {
-        Ok(()) => {
-            println!(
-                "Renderer bundle: renderer/{} -> renderer/{}",
-                source_rel, bundle_rel
-            );
-            Some(bundle_rel.to_string())
-        }
-        Err(e) => {
-            eprintln!("Warning: renderer bundle skipped: {}", e);
-            None
-        }
+    let output_path = renderer_dir.join(&out_rel);
+    if !output_path.is_file() {
+        return Err(format!(
+            "Renderer build did not produce expected output: {}",
+            output_path.display()
+        ));
     }
+
+    let built_source = std::fs::read_to_string(&output_path)
+        .map_err(|e| format!("Failed reading renderer output {}: {}", output_path.display(), e))?;
+    if !built_source.contains("createRenderer") {
+        return Err(format!(
+            "Renderer output {} does not appear to export createRenderer.",
+            output_path.display()
+        ));
+    }
+
+    println!(
+        "Renderer package bundle: renderer/{} -> renderer/{}",
+        entry_rel, out_rel
+    );
+
+    let name = metadata
+        .name
+        .or(package.name)
+        .unwrap_or_else(|| config.name.clone());
+    let api_version = metadata.api_version.unwrap_or(config.api_version);
+    let capabilities = if metadata.capabilities.is_empty() {
+        config.capabilities.clone()
+    } else {
+        metadata.capabilities
+    };
+
+    Ok(LocalRendererManifest {
+        schema_version: 1,
+        api_version,
+        name,
+        mode: "module".to_string(),
+        entry_url: Some(format!("/renderer-files/{}", out_rel)),
+        capabilities,
+    })
 }
 
 fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
@@ -1382,9 +1473,10 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
         .skill
         .as_ref()
         .and_then(|skill_file| std::fs::read_to_string(path.join(skill_file)).ok());
-    let bundled_entry = maybe_bundle_renderer_entry(&path, &config.renderer);
-    let renderer_manifest =
-        build_local_renderer_manifest(&path, &config.renderer, bundled_entry.as_deref());
+    let renderer_manifest = maybe_build_renderer_package(&path, &config.renderer).unwrap_or_else(|e| {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    });
 
     let pid_file = pid_path(port);
 
