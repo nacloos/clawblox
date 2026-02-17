@@ -714,6 +714,7 @@ impl GameInstance {
                         part_data.anchored,
                         part_data.can_collide,
                         part_data.shape,
+                        Some(part_data.current_physical_properties()),
                     );
 
                     // Apply initial velocity for dynamic parts
@@ -736,6 +737,7 @@ impl GameInstance {
                     part_data.can_collide_dirty = false;
                     part_data.velocity_dirty = false;
                     part_data.shape_dirty = false;
+                    part_data.custom_physical_properties_dirty = false;
                 } else {
                     // Existing part - process dirty flags
                     if part_data.anchored_dirty {
@@ -773,6 +775,13 @@ impl GameInstance {
                             [part_data.size.x, part_data.size.y, part_data.size.z],
                         );
                         part_data.shape_dirty = false;
+                    }
+                    if part_data.custom_physical_properties_dirty {
+                        self.physics.set_physical_properties(
+                            lua_id,
+                            Some(part_data.current_physical_properties()),
+                        );
+                        part_data.custom_physical_properties_dirty = false;
                     }
 
                     // Position/CFrame writes from Lua should move both anchored and dynamic parts.
@@ -1573,31 +1582,27 @@ impl GameInstance {
     }
 
     /// Reads a model URL from instance attributes.
-    /// Supports both `ModelUrl` and `model_url`.
+    /// Roblox-style canonical attribute: `ModelUrl`.
     fn extract_model_url(
         attributes: &std::collections::HashMap<String, AttributeValue>,
     ) -> Option<String> {
-        for key in ["ModelUrl", "model_url"] {
-            if let Some(AttributeValue::String(url)) = attributes.get(key) {
-                let trimmed = url.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_string());
-                }
+        if let Some(AttributeValue::String(url)) = attributes.get("ModelUrl") {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
             }
         }
         None
     }
 
     /// Reads model local yaw correction (degrees) from instance attributes.
-    /// Supports both `ModelYawOffsetDeg` and `model_yaw_offset_deg`.
+    /// Roblox-style canonical attribute: `ModelYawOffsetDeg`.
     fn extract_model_yaw_offset_deg(
         attributes: &std::collections::HashMap<String, AttributeValue>,
     ) -> Option<f32> {
-        for key in ["ModelYawOffsetDeg", "model_yaw_offset_deg"] {
-            if let Some(AttributeValue::Number(value)) = attributes.get(key) {
-                if value.is_finite() {
-                    return Some(*value as f32);
-                }
+        if let Some(AttributeValue::Number(value)) = attributes.get("ModelYawOffsetDeg") {
+            if value.is_finite() {
+                return Some(*value as f32);
             }
         }
         None

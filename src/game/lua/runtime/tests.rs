@@ -2131,6 +2131,64 @@ fn test_physical_properties_and_custom_physical_properties() {
 }
 
 #[test]
+fn test_basepart_physical_property_aliases_update_custom_physical_properties() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local p = Instance.new("Part")
+            p.Parent = Workspace
+
+            p.Density = 1.2
+            p.Friction = 0.85
+            p.Elasticity = 0.1
+            p.FrictionWeight = 0.6
+            p.ElasticityWeight = 0.4
+
+            local cpp = p.CustomPhysicalProperties
+            local cur = p.CurrentPhysicalProperties
+            _G.ok = cpp ~= nil
+                and math.abs(cpp.Density - 1.2) < 1e-4
+                and math.abs(cpp.Friction - 0.85) < 1e-4
+                and math.abs(cpp.Elasticity - 0.1) < 1e-4
+                and math.abs(cpp.FrictionWeight - 0.6) < 1e-4
+                and math.abs(cpp.ElasticityWeight - 0.4) < 1e-4
+                and cur ~= nil
+                and math.abs(cur.Density - 1.2) < 1e-4
+                and math.abs(cur.Friction - 0.85) < 1e-4
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let ok: bool = globals.get("ok").unwrap();
+    assert!(ok);
+}
+
+#[test]
+fn test_get_mass_uses_effective_density() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local p = Instance.new("Part")
+            p.Size = Vector3.new(2, 2, 2) -- volume 8 for block
+            p.CustomPhysicalProperties = PhysicalProperties.new(1.25, 0.3, 0.5, 1, 1)
+            _G.mass = p:GetMass()
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let mass: f32 = globals.get("mass").unwrap();
+    assert!(
+        (mass - 10.0).abs() < 1e-3,
+        "expected mass ~= 10.0, got {}",
+        mass
+    );
+}
+
+#[test]
 fn test_ancestry_changed_signal_exists_and_fires() {
     let mut runtime = test_runtime();
     runtime

@@ -118,9 +118,20 @@ export function createRenderer(ctx) {
 - `createEntityStore(scene, options?)` (upsert/prune/dispose)
 - `disposeObject3D(object3d)`
 - `createModelTemplateCache()`
+- `createModelEntityController(THREE, options?)`
 - `classifyAnimationTracks(player)`
 - `applyRendererPreset(THREE, renderer, preset)`
 - `applyLightingPreset(THREE, scene, preset)`
+
+### Model Helper (`createModelEntityController`)
+
+Use `runtime.three.createModelEntityController(...)` for model entities instead of manual GLTF fitting. It handles:
+
+- GLTF loading/caching
+- scaling model height to match `entity.size[1]`
+- centering/alignment of model bounds to entity transform
+- optional `model_yaw_offset_deg`
+- basic walk/idle animation blending hooks
 
 ### Local input bridge (`runtime.input`)
 

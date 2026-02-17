@@ -2439,11 +2439,9 @@ fn resolve_local_asset_url(url: &mut String) {
 }
 
 fn resolve_local_model_url_attr(attrs: &mut std::collections::HashMap<String, serde_json::Value>) {
-    for key in ["ModelUrl", "model_url"] {
-        if let Some(value) = attrs.get_mut(key) {
-            if let Some(path) = value.as_str().and_then(|url| url.strip_prefix("asset://")) {
-                *value = serde_json::Value::String(format!("/assets/{}", path));
-            }
+    if let Some(value) = attrs.get_mut("ModelUrl") {
+        if let Some(path) = value.as_str().and_then(|url| url.strip_prefix("asset://")) {
+            *value = serde_json::Value::String(format!("/assets/{}", path));
         }
     }
 }

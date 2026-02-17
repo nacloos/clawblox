@@ -184,17 +184,15 @@ fn resolve_model_url_attrs(
     game_id: Uuid,
     asset_version: i32,
 ) {
-    for key in ["ModelUrl", "model_url"] {
-        if let Some(value) = attrs.get_mut(key) {
-            if let Some(path) = value.as_str().and_then(|url| url.strip_prefix("asset://")) {
-                *value = serde_json::Value::String(format!(
-                    "{}/games/{}/v{}/{}",
-                    r2_public_url.trim_end_matches('/'),
-                    game_id,
-                    asset_version,
-                    path
-                ));
-            }
+    if let Some(value) = attrs.get_mut("ModelUrl") {
+        if let Some(path) = value.as_str().and_then(|url| url.strip_prefix("asset://")) {
+            *value = serde_json::Value::String(format!(
+                "{}/games/{}/v{}/{}",
+                r2_public_url.trim_end_matches('/'),
+                game_id,
+                asset_version,
+                path
+            ));
         }
     }
 }

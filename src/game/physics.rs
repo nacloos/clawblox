@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::constants::humanoid as humanoid_consts;
 use super::constants::physics as consts;
-use super::lua::types::PartType;
+use super::lua::types::{PartType, PhysicalProperties};
 
 /// Converts a 3x3 rotation matrix to a UnitQuaternion (Shepperd's method).
 pub fn rotation_matrix_to_quaternion(m: &[[f32; 3]; 3]) -> UnitQuaternion<f32> {
@@ -81,6 +81,8 @@ pub struct PhysicsWorld {
     pub body_to_lua: HashMap<RigidBodyHandle, u64>,
     /// Maps Lua instance ID to its PartType shape (for collider rebuilds)
     pub lua_to_shape: HashMap<u64, PartType>,
+    /// Maps Lua instance ID to current collider physical properties.
+    pub lua_to_physical_properties: HashMap<u64, Option<PhysicalProperties>>,
     /// Character controllers for player movement
     pub character_controllers: HashMap<u64, CharacterControllerState>,
     /// Maps Rapier collider handle to Lua instance ID (for touch detection)
@@ -120,6 +122,20 @@ fn build_collider(size: [f32; 3], shape: PartType, can_collide: bool) -> Collide
         .build()
 }
 
+fn build_collider_with_physical_properties(
+    size: [f32; 3],
+    shape: PartType,
+    can_collide: bool,
+    physical_properties: Option<PhysicalProperties>,
+) -> Collider {
+    let props = physical_properties.unwrap_or(PhysicalProperties::new(0.7, 0.3, 0.5, 1.0, 1.0));
+    let mut collider = build_collider(size, shape, can_collide);
+    collider.set_friction(props.friction.max(0.0));
+    collider.set_restitution(props.elasticity.max(0.0));
+    collider.set_density(props.density.max(0.0));
+    collider
+}
+
 impl PhysicsWorld {
     /// Creates a new physics world with default gravity
     pub fn new() -> Self {
@@ -139,6 +155,7 @@ impl PhysicsWorld {
             lua_to_body: HashMap::new(),
             body_to_lua: HashMap::new(),
             lua_to_shape: HashMap::new(),
+            lua_to_physical_properties: HashMap::new(),
             character_controllers: HashMap::new(),
             collider_to_lua: HashMap::new(),
             kinematic_linear_velocities: HashMap::new(),
@@ -182,6 +199,7 @@ impl PhysicsWorld {
         anchored: bool,
         can_collide: bool,
         shape: PartType,
+        physical_properties: Option<PhysicalProperties>,
     ) -> RigidBodyHandle {
         let quat = rotation_matrix_to_quaternion(rotation);
 
@@ -198,7 +216,12 @@ impl PhysicsWorld {
         let handle = self.rigid_body_set.insert(body);
 
         // Create collider with correct shape
-        let collider = build_collider(size, shape, can_collide);
+        let collider = build_collider_with_physical_properties(
+            size,
+            shape,
+            can_collide,
+            physical_properties,
+        );
 
         let collider_handle =
             self.collider_set
@@ -208,6 +231,8 @@ impl PhysicsWorld {
         self.lua_to_body.insert(lua_id, handle);
         self.body_to_lua.insert(handle, lua_id);
         self.lua_to_shape.insert(lua_id, shape);
+        self.lua_to_physical_properties
+            .insert(lua_id, physical_properties);
         self.collider_to_lua.insert(collider_handle, lua_id);
 
         handle
@@ -218,6 +243,7 @@ impl PhysicsWorld {
         if let Some(handle) = self.lua_to_body.remove(&lua_id) {
             self.body_to_lua.remove(&handle);
             self.lua_to_shape.remove(&lua_id);
+            self.lua_to_physical_properties.remove(&lua_id);
             self.kinematic_linear_velocities.remove(&handle);
             // Remove collider->lua mappings before destroying the body
             if let Some(body) = self.rigid_body_set.get(handle) {
@@ -375,6 +401,11 @@ impl PhysicsWorld {
             .get(&lua_id)
             .copied()
             .unwrap_or(PartType::Block);
+        let physical_properties = self
+            .lua_to_physical_properties
+            .get(&lua_id)
+            .copied()
+            .unwrap_or(None);
         if let Some(&handle) = self.lua_to_body.get(&lua_id) {
             if let Some(body) = self.rigid_body_set.get(handle) {
                 let colliders: Vec<_> = body.colliders().iter().cloned().collect();
@@ -396,7 +427,12 @@ impl PhysicsWorld {
                     );
                 }
 
-                let collider = build_collider(size, shape, can_collide);
+                let collider = build_collider_with_physical_properties(
+                    size,
+                    shape,
+                    can_collide,
+                    physical_properties,
+                );
                 let new_ch = self.collider_set.insert_with_parent(
                     collider,
                     handle,
@@ -424,6 +460,11 @@ impl PhysicsWorld {
     /// Updates the shape of a part's collider, rebuilding it with the current size
     pub fn set_shape(&mut self, lua_id: u64, shape: PartType, size: [f32; 3]) {
         self.lua_to_shape.insert(lua_id, shape);
+        let physical_properties = self
+            .lua_to_physical_properties
+            .get(&lua_id)
+            .copied()
+            .unwrap_or(None);
         if let Some(&handle) = self.lua_to_body.get(&lua_id) {
             if let Some(body) = self.rigid_body_set.get(handle) {
                 let colliders: Vec<_> = body.colliders().iter().cloned().collect();
@@ -444,13 +485,42 @@ impl PhysicsWorld {
                     );
                 }
 
-                let collider = build_collider(size, shape, can_collide);
+                let collider = build_collider_with_physical_properties(
+                    size,
+                    shape,
+                    can_collide,
+                    physical_properties,
+                );
                 let new_ch = self.collider_set.insert_with_parent(
                     collider,
                     handle,
                     &mut self.rigid_body_set,
                 );
                 self.collider_to_lua.insert(new_ch, lua_id);
+            }
+        }
+    }
+
+    /// Updates collider physical properties for a Lua part.
+    pub fn set_physical_properties(
+        &mut self,
+        lua_id: u64,
+        physical_properties: Option<PhysicalProperties>,
+    ) {
+        self.lua_to_physical_properties
+            .insert(lua_id, physical_properties);
+        if let Some(&handle) = self.lua_to_body.get(&lua_id) {
+            if let Some(body) = self.rigid_body_set.get(handle) {
+                let props = physical_properties
+                    .unwrap_or(PhysicalProperties::new(0.7, 0.3, 0.5, 1.0, 1.0));
+                let colliders: Vec<_> = body.colliders().iter().cloned().collect();
+                for collider_handle in colliders {
+                    if let Some(collider) = self.collider_set.get_mut(collider_handle) {
+                        collider.set_friction(props.friction.max(0.0));
+                        collider.set_restitution(props.elasticity.max(0.0));
+                        collider.set_density(props.density.max(0.0));
+                    }
+                }
             }
         }
     }
@@ -1019,6 +1089,7 @@ mod tests {
             true, // anchored
             true, // can_collide
             PartType::Block,
+            None,
         );
 
         assert!(world.has_part(1));
@@ -1038,6 +1109,7 @@ mod tests {
             false, // not anchored - should fall
             true,
             PartType::Block,
+            None,
         );
 
         let initial_pos = world.get_position(handle).unwrap();
@@ -1066,6 +1138,7 @@ mod tests {
             true,
             true,
             PartType::Block,
+            None,
         );
 
         // Add character above floor
@@ -1123,6 +1196,7 @@ mod tests {
             true,
             true,
             PartType::Block,
+            None,
         );
 
         let char_id = 200;
@@ -1153,6 +1227,7 @@ mod tests {
             true,
             true,
             PartType::Block,
+            None,
         );
 
         // Non-collidable "trigger" directly in the movement path.
@@ -1164,6 +1239,7 @@ mod tests {
             true,
             false, // sensor
             PartType::Block,
+            None,
         );
 
         let char_id = 300;
@@ -1197,6 +1273,7 @@ mod tests {
             true,
             true,
             PartType::Block,
+            None,
         );
 
         let char_id = 301;
@@ -1233,6 +1310,7 @@ mod tests {
             true,
             true,
             PartType::Block,
+            None,
         );
 
         let char_id = 302;
@@ -1274,6 +1352,7 @@ mod tests {
             true,
             true,
             PartType::Block,
+            None,
         );
 
         // Thin platform at Y=0.1 (like base platform in tsunami game)
@@ -1285,6 +1364,7 @@ mod tests {
             true,
             true,
             PartType::Block,
+            None,
         );
 
         // Character spawns at Y=3 (above platform)
@@ -1334,6 +1414,7 @@ mod tests {
             true,
             true,
             PartType::Block,
+            None,
         );
 
         // Character with radius=1.0, height=5.0 (same as game)
@@ -1425,6 +1506,7 @@ mod tests {
             true,
             true,
             PartType::Block,
+            None,
         );
 
         // Small obstacle (0.3 studs tall, should be steppable with max_height=0.5)
@@ -1436,6 +1518,7 @@ mod tests {
             true,
             true,
             PartType::Block,
+            None,
         );
 
         // Character starts at X=0, grounded
@@ -1488,6 +1571,7 @@ mod tests {
             true,
             true,
             PartType::Block,
+            None,
         );
 
         // Tall obstacle (1.0 stud tall, should block with max_height=0.5)
@@ -1499,6 +1583,7 @@ mod tests {
             true,
             true,
             PartType::Block,
+            None,
         );
 
         let char_id = 100;
@@ -1540,6 +1625,7 @@ mod tests {
             true,
             true,
             PartType::Block,
+            None,
         );
 
         // Raised platform (like tsunami base) - sits ON TOP of ground
@@ -1551,6 +1637,7 @@ mod tests {
             true,
             true,
             PartType::Block,
+            None,
         );
 
         // Character starts on ground (left side), will try to step up onto platform

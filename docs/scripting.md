@@ -180,18 +180,42 @@ Base class for all physical parts. Inherits from Instance.
 | `Size` | Vector3 | (4,1,2) | Part dimensions |
 | `Anchored` | bool | false | Immovable by physics |
 | `CanCollide` | bool | true | Physical collision enabled |
+| `CanQuery` | bool | true | Included in spatial queries/raycast overlap tests |
 | `CanTouch` | bool | true | Touched events enabled |
 | `Transparency` | number | 0 | 0 = opaque, 1 = invisible |
 | `Color` | Color3 | (0.6,0.6,0.6) | Part color |
 | `Material` | Enum.Material | Plastic | Surface material |
 | `Velocity` | Vector3 | (0,0,0) | Linear velocity |
 | `AssemblyLinearVelocity` | Vector3 | (0,0,0) | Assembly velocity |
+| `CustomPhysicalProperties` | PhysicalProperties? | nil | Optional override for density/friction/elasticity |
 
 #### Events
 | Event | Parameters | Description |
 |-------|------------|-------------|
 | `Touched` | (otherPart: BasePart) | Part touched another part |
 | `TouchEnded` | (otherPart: BasePart) | Parts stopped touching |
+
+#### Physics Properties (Roblox parity)
+
+In Roblox-style APIs, `Friction`, `Density`, and `Elasticity` are not direct `BasePart` fields.
+Use `CustomPhysicalProperties` instead.
+
+```lua
+local part = Instance.new("Part")
+part.CustomPhysicalProperties = PhysicalProperties.new(
+    1.0, -- density
+    0.9, -- friction
+    0.05, -- elasticity
+    1.0, -- friction weight
+    1.0 -- elasticity weight
+)
+```
+
+To clear the override:
+
+```lua
+part.CustomPhysicalProperties = nil
+```
 
 ---
 

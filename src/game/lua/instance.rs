@@ -140,6 +140,7 @@ pub struct PartData {
     pub bottom_surface: String,
     pub velocity: Vector3,
     pub custom_physical_properties: Option<PhysicalProperties>,
+    pub custom_physical_properties_dirty: bool,
     pub shape: PartType,
     pub position_dirty: bool,
     pub size_dirty: bool,
@@ -170,6 +171,7 @@ impl Default for PartData {
             bottom_surface: "Smooth".to_string(),
             velocity: Vector3::zero(),
             custom_physical_properties: None,
+            custom_physical_properties_dirty: false,
             shape: PartType::Block,
             position_dirty: false,
             size_dirty: false,
@@ -180,6 +182,41 @@ impl Default for PartData {
             touched: create_signal("Touched"),
             touch_ended: create_signal("TouchEnded"),
         }
+    }
+}
+
+impl PartData {
+    fn default_density_for_material(material: Material) -> f32 {
+        match material {
+            Material::Wood => 0.35,
+            Material::Metal => 0.7,
+            Material::Glass => 0.6,
+            Material::Neon => 0.7,
+            Material::Concrete => 0.7,
+            Material::Brick => 0.7,
+            Material::Granite => 0.7,
+            Material::Grass => 0.7,
+            Material::Ice => 0.65,
+            Material::Sand => 0.65,
+            Material::Fabric => 0.3,
+            Material::Marble => 0.7,
+            Material::Slate => 0.7,
+            Material::SmoothPlastic => 0.7,
+            Material::ForceField => 0.0,
+            Material::Plastic => 0.7,
+        }
+    }
+
+    pub fn current_physical_properties(&self) -> PhysicalProperties {
+        self.custom_physical_properties.unwrap_or_else(|| {
+            PhysicalProperties::new(
+                Self::default_density_for_material(self.material),
+                0.3,
+                0.5,
+                1.0,
+                1.0,
+            )
+        })
     }
 }
 
@@ -1708,6 +1745,10 @@ impl UserData for Instance {
             let mut data = this.data.lock().unwrap();
             if let Some(part) = &mut data.part_data {
                 part.material = material;
+                // Keep CurrentPhysicalProperties in sync with material defaults when not overridden.
+                if part.custom_physical_properties.is_none() {
+                    part.custom_physical_properties_dirty = true;
+                }
             }
             Ok(())
         });
@@ -1787,16 +1828,131 @@ impl UserData for Instance {
                 .as_ref()
                 .and_then(|p| p.custom_physical_properties))
         });
+        fields.add_field_method_get("CurrentPhysicalProperties", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.part_data.as_ref().map(|p| p.current_physical_properties()))
+        });
         fields.add_field_method_set(
             "CustomPhysicalProperties",
             |_, this, value: Option<PhysicalProperties>| {
                 let mut data = this.data.lock().unwrap();
                 if let Some(part) = &mut data.part_data {
                     part.custom_physical_properties = value;
+                    part.custom_physical_properties_dirty = true;
                 }
                 Ok(())
             },
         );
+        fields.add_field_method_get("Density", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data
+                .part_data
+                .as_ref()
+                .map(|p| p.current_physical_properties().density))
+        });
+        fields.add_field_method_set("Density", |_, this, density: f32| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(part) = &mut data.part_data {
+                let props = part.current_physical_properties();
+                part.custom_physical_properties = Some(PhysicalProperties::new(
+                    density,
+                    props.friction,
+                    props.elasticity,
+                    props.friction_weight,
+                    props.elasticity_weight,
+                ));
+                part.custom_physical_properties_dirty = true;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("Friction", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data
+                .part_data
+                .as_ref()
+                .map(|p| p.current_physical_properties().friction))
+        });
+        fields.add_field_method_set("Friction", |_, this, friction: f32| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(part) = &mut data.part_data {
+                let props = part.current_physical_properties();
+                part.custom_physical_properties = Some(PhysicalProperties::new(
+                    props.density,
+                    friction,
+                    props.elasticity,
+                    props.friction_weight,
+                    props.elasticity_weight,
+                ));
+                part.custom_physical_properties_dirty = true;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("Elasticity", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data
+                .part_data
+                .as_ref()
+                .map(|p| p.current_physical_properties().elasticity))
+        });
+        fields.add_field_method_set("Elasticity", |_, this, elasticity: f32| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(part) = &mut data.part_data {
+                let props = part.current_physical_properties();
+                part.custom_physical_properties = Some(PhysicalProperties::new(
+                    props.density,
+                    props.friction,
+                    elasticity,
+                    props.friction_weight,
+                    props.elasticity_weight,
+                ));
+                part.custom_physical_properties_dirty = true;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("FrictionWeight", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data
+                .part_data
+                .as_ref()
+                .map(|p| p.current_physical_properties().friction_weight))
+        });
+        fields.add_field_method_set("FrictionWeight", |_, this, friction_weight: f32| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(part) = &mut data.part_data {
+                let props = part.current_physical_properties();
+                part.custom_physical_properties = Some(PhysicalProperties::new(
+                    props.density,
+                    props.friction,
+                    props.elasticity,
+                    friction_weight,
+                    props.elasticity_weight,
+                ));
+                part.custom_physical_properties_dirty = true;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("ElasticityWeight", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data
+                .part_data
+                .as_ref()
+                .map(|p| p.current_physical_properties().elasticity_weight))
+        });
+        fields.add_field_method_set("ElasticityWeight", |_, this, elasticity_weight: f32| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(part) = &mut data.part_data {
+                let props = part.current_physical_properties();
+                part.custom_physical_properties = Some(PhysicalProperties::new(
+                    props.density,
+                    props.friction,
+                    props.elasticity,
+                    props.friction_weight,
+                    elasticity_weight,
+                ));
+                part.custom_physical_properties_dirty = true;
+            }
+            Ok(())
+        });
 
         fields.add_field_method_get("MaxForce", |_, this| {
             let data = this.data.lock().unwrap();
@@ -3457,24 +3613,7 @@ impl UserData for Instance {
                 ));
             };
 
-            let density = match part.material {
-                Material::Wood => 0.35,
-                Material::Metal => 0.7,
-                Material::Glass => 0.6,
-                Material::Neon => 0.7,
-                Material::Concrete => 0.7,
-                Material::Brick => 0.7,
-                Material::Granite => 0.7,
-                Material::Grass => 0.7,
-                Material::Ice => 0.65,
-                Material::Sand => 0.65,
-                Material::Fabric => 0.3,
-                Material::Marble => 0.7,
-                Material::Slate => 0.7,
-                Material::SmoothPlastic => 0.7,
-                Material::ForceField => 0.0,
-                Material::Plastic => 0.7,
-            };
+            let density = part.current_physical_properties().density;
 
             let sx = part.size.x.max(0.0);
             let sy = part.size.y.max(0.0);
