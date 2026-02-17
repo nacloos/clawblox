@@ -187,6 +187,7 @@ Base class for all physical parts. Inherits from Instance.
 | `Material` | Enum.Material | Plastic | Surface material |
 | `Velocity` | Vector3 | (0,0,0) | Linear velocity |
 | `AssemblyLinearVelocity` | Vector3 | (0,0,0) | Assembly velocity |
+| `AssemblyAngularVelocity` | Vector3 | (0,0,0) | Assembly angular velocity |
 | `CustomPhysicalProperties` | PhysicalProperties? | nil | Optional override for density/friction/elasticity |
 
 #### Events

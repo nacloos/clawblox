@@ -728,6 +728,14 @@ impl GameInstance {
                                     part_data.velocity.z,
                                 ],
                             );
+                            self.physics.set_angular_velocity(
+                                handle,
+                                [
+                                    part_data.angular_velocity.x,
+                                    part_data.angular_velocity.y,
+                                    part_data.angular_velocity.z,
+                                ],
+                            );
                         }
                     }
 
@@ -736,6 +744,7 @@ impl GameInstance {
                     part_data.anchored_dirty = false;
                     part_data.can_collide_dirty = false;
                     part_data.velocity_dirty = false;
+                    part_data.angular_velocity_dirty = false;
                     part_data.shape_dirty = false;
                     part_data.custom_physical_properties_dirty = false;
                 } else {
@@ -767,6 +776,19 @@ impl GameInstance {
                             );
                         }
                         part_data.velocity_dirty = false;
+                    }
+                    if part_data.angular_velocity_dirty {
+                        if let Some(handle) = self.physics.get_handle(lua_id) {
+                            self.physics.set_angular_velocity(
+                                handle,
+                                [
+                                    part_data.angular_velocity.x,
+                                    part_data.angular_velocity.y,
+                                    part_data.angular_velocity.z,
+                                ],
+                            );
+                        }
+                        part_data.angular_velocity_dirty = false;
                     }
                     if part_data.shape_dirty {
                         self.physics.set_shape(
@@ -866,6 +888,9 @@ impl GameInstance {
                         part_data.velocity.y = vel[1];
                         part_data.velocity.z = vel[2];
                     }
+                    part_data.angular_velocity.x = 0.0;
+                    part_data.angular_velocity.y = 0.0;
+                    part_data.angular_velocity.z = 0.0;
                 } else if !part_data.anchored {
                     if let Some(handle) = self.physics.get_handle(lua_id) {
                         // Update position from physics
@@ -886,6 +911,13 @@ impl GameInstance {
                             part_data.velocity.x = vel[0];
                             part_data.velocity.y = vel[1];
                             part_data.velocity.z = vel[2];
+                        }
+
+                        // Update angular velocity from physics
+                        if let Some(ang_vel) = self.physics.get_angular_velocity(handle) {
+                            part_data.angular_velocity.x = ang_vel[0];
+                            part_data.angular_velocity.y = ang_vel[1];
+                            part_data.angular_velocity.z = ang_vel[2];
                         }
                     }
                 }

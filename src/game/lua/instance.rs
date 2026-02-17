@@ -139,6 +139,7 @@ pub struct PartData {
     pub top_surface: String,
     pub bottom_surface: String,
     pub velocity: Vector3,
+    pub angular_velocity: Vector3,
     pub custom_physical_properties: Option<PhysicalProperties>,
     pub custom_physical_properties_dirty: bool,
     pub shape: PartType,
@@ -147,6 +148,7 @@ pub struct PartData {
     pub anchored_dirty: bool,
     pub can_collide_dirty: bool,
     pub velocity_dirty: bool,
+    pub angular_velocity_dirty: bool,
     pub shape_dirty: bool,
 
     pub touched: RBXScriptSignal,
@@ -170,6 +172,7 @@ impl Default for PartData {
             top_surface: "Smooth".to_string(),
             bottom_surface: "Smooth".to_string(),
             velocity: Vector3::zero(),
+            angular_velocity: Vector3::zero(),
             custom_physical_properties: None,
             custom_physical_properties_dirty: false,
             shape: PartType::Block,
@@ -178,6 +181,7 @@ impl Default for PartData {
             anchored_dirty: false,
             can_collide_dirty: false,
             velocity_dirty: false,
+            angular_velocity_dirty: false,
             shape_dirty: false,
             touched: create_signal("Touched"),
             touch_ended: create_signal("TouchEnded"),
@@ -2075,6 +2079,26 @@ impl UserData for Instance {
         fields.add_field_method_get("AssemblyLinearVelocity", |_, this| {
             let data = this.data.lock().unwrap();
             Ok(data.part_data.as_ref().map(|p| p.velocity))
+        });
+        fields.add_field_method_set("AssemblyLinearVelocity", |_, this, velocity: Vector3| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(part) = &mut data.part_data {
+                part.velocity = velocity;
+                part.velocity_dirty = true;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("AssemblyAngularVelocity", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.part_data.as_ref().map(|p| p.angular_velocity))
+        });
+        fields.add_field_method_set("AssemblyAngularVelocity", |_, this, angular_velocity: Vector3| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(part) = &mut data.part_data {
+                part.angular_velocity = angular_velocity;
+                part.angular_velocity_dirty = true;
+            }
+            Ok(())
         });
 
         fields.add_field_method_get("Shape", |_, this| {

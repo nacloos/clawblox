@@ -332,6 +332,18 @@ impl PhysicsWorld {
         }
     }
 
+    /// Sets the angular velocity of a dynamic part
+    pub fn set_angular_velocity(&mut self, handle: RigidBodyHandle, angular_velocity: [f32; 3]) {
+        if let Some(body) = self.rigid_body_set.get_mut(handle) {
+            if body.is_dynamic() {
+                body.set_angvel(
+                    vector![angular_velocity[0], angular_velocity[1], angular_velocity[2]],
+                    true,
+                );
+            }
+        }
+    }
+
     /// Gets the position of a rigid body
     pub fn get_position(&self, handle: RigidBodyHandle) -> Option<[f32; 3]> {
         self.rigid_body_set.get(handle).map(|body| {
@@ -359,6 +371,14 @@ impl PhysicsWorld {
     pub fn get_velocity(&self, handle: RigidBodyHandle) -> Option<[f32; 3]> {
         self.rigid_body_set.get(handle).map(|body| {
             let vel = body.linvel();
+            [vel.x, vel.y, vel.z]
+        })
+    }
+
+    /// Gets the angular velocity of a rigid body
+    pub fn get_angular_velocity(&self, handle: RigidBodyHandle) -> Option<[f32; 3]> {
+        self.rigid_body_set.get(handle).map(|body| {
+            let vel = body.angvel();
             [vel.x, vel.y, vel.z]
         })
     }

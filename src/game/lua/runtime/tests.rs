@@ -1958,6 +1958,92 @@ fn test_body_velocity_applies_to_parent_part_velocity() {
 }
 
 #[test]
+fn test_basepart_assembly_velocity_properties_are_writable() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local p = Instance.new("Part")
+            p.Parent = Workspace
+
+            p.AssemblyLinearVelocity = Vector3.new(1, 2, 3)
+            p.AssemblyAngularVelocity = Vector3.new(0.5, 1.5, -2.5)
+
+            _G.linX = p.AssemblyLinearVelocity.X
+            _G.linY = p.AssemblyLinearVelocity.Y
+            _G.linZ = p.AssemblyLinearVelocity.Z
+            _G.velX = p.Velocity.X
+            _G.velY = p.Velocity.Y
+            _G.velZ = p.Velocity.Z
+            _G.angX = p.AssemblyAngularVelocity.X
+            _G.angY = p.AssemblyAngularVelocity.Y
+            _G.angZ = p.AssemblyAngularVelocity.Z
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let lin_x: f64 = globals.get("linX").unwrap();
+    let lin_y: f64 = globals.get("linY").unwrap();
+    let lin_z: f64 = globals.get("linZ").unwrap();
+    let vel_x: f64 = globals.get("velX").unwrap();
+    let vel_y: f64 = globals.get("velY").unwrap();
+    let vel_z: f64 = globals.get("velZ").unwrap();
+    let ang_x: f64 = globals.get("angX").unwrap();
+    let ang_y: f64 = globals.get("angY").unwrap();
+    let ang_z: f64 = globals.get("angZ").unwrap();
+
+    assert!((lin_x - 1.0).abs() < 1e-6);
+    assert!((lin_y - 2.0).abs() < 1e-6);
+    assert!((lin_z - 3.0).abs() < 1e-6);
+    assert!((vel_x - 1.0).abs() < 1e-6);
+    assert!((vel_y - 2.0).abs() < 1e-6);
+    assert!((vel_z - 3.0).abs() < 1e-6);
+    assert!((ang_x - 0.5).abs() < 1e-6);
+    assert!((ang_y - 1.5).abs() < 1e-6);
+    assert!((ang_z + 2.5).abs() < 1e-6);
+}
+
+#[test]
+fn test_basepart_assembly_angular_velocity_remains_accessible_after_ticks() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local p = Instance.new("Part")
+            p.Name = "SpinPart"
+            p.Anchored = false
+            p.Size = Vector3.new(2, 4, 1)
+            p.Position = Vector3.new(0, 20, 0)
+            p.AssemblyAngularVelocity = Vector3.new(0, 3, 0)
+            p.Parent = Workspace
+
+            _G.spinPart = p
+        "#,
+        )
+        .expect("Failed to run script");
+
+    for _ in 0..20 {
+        runtime.tick(1.0 / 60.0).expect("Failed to tick");
+    }
+
+    let (ang_x, ang_y, ang_z): (f64, f64, f64) = runtime
+        .lua()
+        .load(
+            r#"
+            local p = _G.spinPart
+            return p.AssemblyAngularVelocity.X, p.AssemblyAngularVelocity.Y, p.AssemblyAngularVelocity.Z
+        "#,
+        )
+        .eval()
+        .expect("Failed to evaluate Lua");
+
+    assert!(ang_x.is_finite());
+    assert!(ang_y.is_finite());
+    assert!(ang_z.is_finite());
+}
+
+#[test]
 fn test_body_force_class_and_force_property() {
     let mut runtime = test_runtime();
     runtime
