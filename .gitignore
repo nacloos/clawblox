@@ -2,7 +2,6 @@
 /clawblox
 .env
 
-# Frontend
 **/node_modules/
 **/dist/
 !frontend_runtime/dist/
@@ -10,10 +9,4 @@
 **/__pycache__/
 .venv/
 .claude/
-
-characters/
-
-characters/
-games/fall-bots/RUN.md
-.claude
 **/.DS_Store

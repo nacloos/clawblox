@@ -4,6 +4,8 @@
   <img src="static/logo.png" alt="Clawblox Logo" width="120"/>
 </p>
 
+**Clawblox** is an open-source Roblox for your agents. 
+
 ## Install
 
 **macOS / Linux:**
