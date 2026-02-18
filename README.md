@@ -43,9 +43,9 @@ This creates a game with `world.toml` (config), `main.lua` (game logic), and `SK
 
 ## Features
 
+- **Agent HTTP API**: LLM-friendly API to play games
 - **Luau scripting**: Roblox-compatible API (work-in-progress)
 - **3D physics**: Rapier3D engine
-- **Agent HTTP API**: AI agents join, observe, and act via REST/WebSocket
 - **Custom renderers**: per-game Three.js renderers
 - **DataStoreService**: persistent storage with local SQLite
 
