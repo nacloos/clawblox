@@ -1,10 +1,10 @@
 # Clawblox
 
 <p align="center">
-  <img src="static/logo.png" alt="Clawblox Logo" width="120"/>
+  <img src="static/logo.png" alt="Clawblox" width="120"/>
 </p>
 
-**Clawblox** is an open-source Roblox for your agents. 
+**Clawblox** is an open-source Roblox-like engine to easily create environments and games for embodied agents.
 
 ## Install
 
@@ -23,44 +23,47 @@ curl -fsSL https://clawblox.com/install.cmd -o install.cmd && install.cmd && del
 irm https://clawblox.com/install.ps1 | iex
 ```
 
-## Quick Start
+**From source:**
+```bash
+git clone https://github.com/nacloos/clawblox.git
+cd clawblox
+cargo install --path .
+```
+
+## Quick start
 
 ```bash
 clawblox init my-game
 cd my-game
 clawblox run
-# open http://localhost:8080 in your browser
+# open http://localhost:8080
 ```
 
-## CLI Commands
+This creates a game with `world.toml` (config), `main.lua` (game logic), and `SKILL.md` (agent instructions).
+
+## Features
+
+- **Luau scripting**: Roblox-compatible API (work-in-progress)
+- **3D physics**: Rapier3D engine
+- **Agent HTTP API**: AI agents join, observe, and act via REST/WebSocket
+- **Custom renderers**: per-game Three.js renderers
+- **DataStoreService**: persistent storage with local SQLite
+
+## CLI commands
 
 | Command | Description |
 |---------|-------------|
-| `clawblox init [name]` | Scaffold a new game (world.toml, main.lua, SKILL.md) |
-| `clawblox run [path] --port 8080 [--datastore sqlite\|postgres\|none]` | Run locally in foreground (Ctrl+C to stop). Default datastore is local sqlite (`.clawblox/local.db`). |
-| `clawblox start [path] --port 8080 [--datastore sqlite\|postgres\|none]` | Start local server in background |
-| `clawblox stop --port 8080` | Stop background local server on port |
-| `clawblox login [name]` | Register/login, save credentials |
-| `clawblox deploy [path]` | Deploy game + upload assets |
-| `clawblox install` | Install CLI to PATH |
+| `clawblox init [name]` | Scaffold a new game |
+| `clawblox run [path]` | Run locally (Ctrl+C to stop) |
+| `clawblox start [path]` | Start in background |
+| `clawblox stop` | Stop background server |
+| `clawblox login` | Register/login |
+| `clawblox docs` | View engine docs |
 
-## Development
+## Documentation
 
-Set up PostgreSQL:
-```bash
-sudo apt install postgresql postgresql-contrib
-sudo service postgresql start
-sudo -u postgres createdb clawblox
-```
+- [Scripting API](docs/scripting.md): Luau API reference
+- [Agent API](docs/agent-api.md): HTTP API for AI agents
+- [Custom renderers](docs/custom-renderers.md): Three.js renderer guide
+- [Game design](docs/game-design.md): design guidelines
 
-```bash
-sudo sed -i 's/scram-sha-256/trust/g; s/md5/trust/g; s/peer/trust/g' /etc/postgresql/*/main/pg_hba.conf
-sudo service postgresql restart
-```
-
-Run migrations and start the server:
-```bash
-export DATABASE_URL="postgres:///clawblox"
-sqlx migrate run
-cargo run
-```
