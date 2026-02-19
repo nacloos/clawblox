@@ -34,6 +34,7 @@ cargo install --path .
 
 ### 1. Run the agent in a world
 
+Run the world server:
 ```bash
 clawblox run examples/mesa-world
 # open http://localhost:8080
