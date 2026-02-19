@@ -1,6 +1,6 @@
 import { Agent } from "/home/nacloos/Code/pi-mono/packages/agent/dist/index.js";
 import { getModel } from "/home/nacloos/Code/pi-mono/packages/ai/dist/index.js";
-import { createCodingTools } from "/home/nacloos/Code/pi-mono/packages/coding-agent/dist/index.js";
+import { createCodingTools, calculateContextTokens, shouldCompact } from "/home/nacloos/Code/pi-mono/packages/coding-agent/dist/index.js";
 import { ProcessTerminal, TUI, Input, truncateToWidth, visibleWidth } from "/home/nacloos/Code/pi-mono/packages/tui/dist/index.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -628,6 +628,8 @@ let actionIdleTimer = null;
 const ACTION_IDLE_MS = 2000;
 // const ACTION_IDLE_MS = 10000;
 let speechIntentBuffer = [];
+let actionContextFlushPending = false;
+const FLUSH_PROMPT = "[SYSTEM] Context nearly full. Save anything important to your workspace files, then confirm ready.";
 
 function startActionIdleTimer() {
 	stopActionIdleTimer();
@@ -938,9 +940,32 @@ actionAgent.subscribe((event) => {
 	if (event.type === "message_end" && event.message.role === "assistant") {
 		const txt = event.message.content.filter((c) => c.type === "text").map((c) => c.text).join("").trim();
 		if (txt) addActionLine(`assistant> ${txt}`);
+		const err = event.message.errorMessage;
+		if (err) addActionLine(`[error] ${err}`);
+
+		if (event.message.usage && !actionContextFlushPending) {
+			const tokens = calculateContextTokens(event.message.usage);
+			const contextWindow = actionAgent.state.model.contextWindow;
+			if (shouldCompact(tokens, contextWindow, { enabled: true, reserveTokens: 16384, keepRecentTokens: 0 })) {
+				actionContextFlushPending = true;
+				addActionLine("[context] Approaching limit. Flushing memories...");
+				actionAgent.followUp({
+					role: "user",
+					content: [{ type: "text", text: FLUSH_PROMPT }],
+					timestamp: Date.now(),
+				});
+			}
+		}
+
 		state.actionLiveLine = "";
 		state.actionPinnedUser = "";
 		tui.requestRender();
+	}
+	if (event.type === "agent_end" && actionContextFlushPending) {
+		actionContextFlushPending = false;
+		actionAgent.reset();
+		actionAgent.setSystemPrompt(buildActionSystemPrompt());
+		addActionLine("[context] Action session reset.");
 	}
 });
 
@@ -964,6 +989,7 @@ async function handleCommand(line) {
 		lastObservation = null;
 		actionStreamText = "";
 		lastActionActivityAt = 0;
+		actionContextFlushPending = false;
 		stopActionIdleTimer();
 		speechIntentBuffer = [];
 		addSpeechLine("Context cleared.");
