@@ -628,6 +628,7 @@ let actionIdleTimer = null;
 const ACTION_IDLE_MS = 2000;
 // const ACTION_IDLE_MS = 10000;
 let speechIntentBuffer = [];
+let speechContextFlushPending = false;
 let actionContextFlushPending = false;
 const FLUSH_PROMPT = "[SYSTEM] Context nearly full. Save anything important to your workspace files, then confirm ready.";
 
@@ -885,6 +886,20 @@ speechAgent.subscribe((event) => {
 		const err = event.message.errorMessage;
 		if (err) addSpeechLine(`[error] ${err}`);
 
+		if (event.message.usage && !speechContextFlushPending) {
+			const tokens = calculateContextTokens(event.message.usage);
+			const contextWindow = speechAgent.state.model.contextWindow;
+			if (shouldCompact(tokens, contextWindow, { enabled: true, reserveTokens: 16384, keepRecentTokens: 0 })) {
+				speechContextFlushPending = true;
+				addSpeechLine("[context] Approaching limit. Flushing memories...");
+				speechAgent.followUp({
+					role: "user",
+					content: [{ type: "text", text: FLUSH_PROMPT }],
+					timestamp: Date.now(),
+				});
+			}
+		}
+
 		const spoken = extractSpeakSegments(fullText);
 		for (const seg of spoken) {
 			addSpeechLine(`[speak] ${seg}`);
@@ -904,6 +919,12 @@ speechAgent.subscribe((event) => {
 			injectSpeechForAction(intents);
 			if (!state.actionBusy) void runActionContinue();
 		}
+	}
+	if (event.type === "agent_end" && speechContextFlushPending) {
+		speechContextFlushPending = false;
+		speechAgent.reset();
+		speechAgent.setSystemPrompt(speechSystemPrompt);
+		addSpeechLine("[context] Speech session reset.");
 	}
 });
 
@@ -989,6 +1010,7 @@ async function handleCommand(line) {
 		lastObservation = null;
 		actionStreamText = "";
 		lastActionActivityAt = 0;
+		speechContextFlushPending = false;
 		actionContextFlushPending = false;
 		stopActionIdleTimer();
 		speechIntentBuffer = [];
