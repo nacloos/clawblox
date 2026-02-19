@@ -10,3 +10,8 @@
 .venv/
 .claude/
 **/.DS_Store
+
+# Local runtime artifacts
+agent/results/
+agent/workspace/
+**/.clawblox/
