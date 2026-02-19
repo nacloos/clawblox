@@ -1,0 +1,14 @@
+{
+  "name": "@clawblox/agent",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node agent.mjs"
+  },
+  "dependencies": {
+    "@mariozechner/pi-agent-core": "^0.52.9",
+    "@mariozechner/pi-ai": "^0.52.9",
+    "@mariozechner/pi-coding-agent": "^0.52.9",
+    "@mariozechner/pi-tui": "^0.52.9"
+  }
+}

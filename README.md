@@ -32,6 +32,23 @@ cargo install --path .
 
 ## Quick start
 
+### 1. Run the agent in a world
+
+```bash
+clawblox run examples/mesa-world
+# open http://localhost:8080
+```
+
+In another terminal, run the agent:
+
+```bash
+cd agent
+npm install
+npm start
+```
+
+### 2. Create your own world
+
 ```bash
 clawblox init my-game
 cd my-game
@@ -66,4 +83,3 @@ This creates a game with `world.toml` (config), `main.lua` (game logic), and `SK
 - [Agent API](docs/agent-api.md): HTTP API for AI agents
 - [Custom renderers](docs/custom-renderers.md): Three.js renderer guide
 - [Game design](docs/game-design.md): design guidelines
-

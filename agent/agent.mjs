@@ -1,7 +1,7 @@
-import { Agent } from "/home/nacloos/Code/pi-mono/packages/agent/dist/index.js";
-import { getModel } from "/home/nacloos/Code/pi-mono/packages/ai/dist/index.js";
-import { createCodingTools, calculateContextTokens, shouldCompact } from "/home/nacloos/Code/pi-mono/packages/coding-agent/dist/index.js";
-import { ProcessTerminal, TUI, Input, truncateToWidth, visibleWidth } from "/home/nacloos/Code/pi-mono/packages/tui/dist/index.js";
+import { Agent } from "@mariozechner/pi-agent-core";
+import { getModel } from "@mariozechner/pi-ai";
+import { createCodingTools, calculateContextTokens, shouldCompact } from "@mariozechner/pi-coding-agent";
+import { ProcessTerminal, TUI, Input, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";
@@ -437,7 +437,7 @@ mkdirSync(agentDir, { recursive: true });
 for (const file of contextFiles) {
 	const dest = path.join(agentDir, file);
 	if (!existsSync(dest)) {
-		const templatePath = path.join(scriptDir, "templates", "agent", file);
+		const templatePath = path.join(scriptDir, "template", "agent", file);
 		const template = existsSync(templatePath) ? readFileSync(templatePath, "utf8") : "";
 		writeFileSync(dest, template);
 	}
