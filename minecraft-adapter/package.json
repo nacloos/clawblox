@@ -1,0 +1,20 @@
+{
+  "name": "minecraft-adapter",
+  "version": "0.1.0",
+  "description": "Clawblox HTTP API adapter for Minecraft via mineflayer",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "fastify": "^4.28.1",
+    "mineflayer": "^4.23.0",
+    "mineflayer-pathfinder": "^2.4.5",
+    "prismarine-entity": "^2.3.0",
+    "uuid": "^9.0.1"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

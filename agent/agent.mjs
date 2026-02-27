@@ -5,6 +5,7 @@ import { ProcessTerminal, TUI, Input, truncateToWidth, visibleWidth } from "@mar
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 function loadDotEnvIntoProcessEnv(envPath) {
 	if (!existsSync(envPath)) return;
@@ -419,7 +420,7 @@ async function fetchJson(url, init = {}) {
 	return await res.json();
 }
 
-const scriptPath = new URL(import.meta.url).pathname;
+const scriptPath = fileURLToPath(import.meta.url);
 const scriptDir = path.dirname(scriptPath);
 const scriptName = path.basename(scriptPath, path.extname(scriptPath));
 loadDotEnvIntoProcessEnv(path.resolve(scriptDir, "..", ".env"));
@@ -569,8 +570,45 @@ writeFileSync(actionSystemPromptPath, actionSystemPrompt);
 const codexAccessToken = loadCodexAccessToken(scriptDir);
 const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
 const modelProvider = process.env.PI_PROVIDER || "anthropic";
-const modelName = process.env.PI_MODEL || (modelProvider === "openai-codex" ? "gpt-5.3-codex" : "claude-opus-4-6");
-const model = getModel(modelProvider, modelName);
+
+let defaultModelName;
+if (modelProvider === "openai-codex") defaultModelName = "gpt-5.3-codex";
+else if (modelProvider === "ollama") defaultModelName = "lfm2.5-thinking:1.2b-bf16";
+else defaultModelName = "claude-opus-4-6";
+const modelName = process.env.PI_MODEL || defaultModelName;
+
+let model;
+if (modelProvider === "ollama") {
+	const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || "http://localhost:11434/v1";
+	model = {
+		id: modelName,
+		name: modelName,
+		api: "openai-completions",
+		provider: "ollama",
+		baseUrl: ollamaBaseUrl,
+		reasoning: modelName.includes("thinking"),
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 32768,
+		maxTokens: 8192,
+		headers: {},
+		compat: {
+			supportsStore: false,
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: false,
+			supportsUsageInStreaming: false,
+			maxTokensField: "max_tokens",
+			requiresToolResultName: false,
+			requiresAssistantAfterToolResult: false,
+			requiresThinkingAsText: false,
+			requiresMistralToolIds: false,
+			thinkingFormat: "openai",
+			supportsStrictMode: false,
+		},
+	};
+} else {
+	model = getModel(modelProvider, modelName);
+}
 
 if (modelProvider === "openai-codex" && !codexAccessToken) {
 	throw new Error("Missing Codex OAuth token. Run: npx @mariozechner/pi-ai login openai-codex");
@@ -589,6 +627,7 @@ const speechAgent = new Agent({
 	getApiKey: (provider) => {
 		if (provider === "openai-codex") return codexAccessToken;
 		if (provider === "anthropic") return anthropicApiKey;
+		if (provider === "ollama") return "ollama";
 		return undefined;
 	},
 });
@@ -604,6 +643,7 @@ const actionAgent = new Agent({
 	getApiKey: (provider) => {
 		if (provider === "openai-codex") return codexAccessToken;
 		if (provider === "anthropic") return anthropicApiKey;
+		if (provider === "ollama") return "ollama";
 		return undefined;
 	},
 });
