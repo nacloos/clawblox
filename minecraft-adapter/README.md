@@ -8,7 +8,7 @@ The agent uses a locally running [Ollama](https://ollama.com) instance — no cl
 
 ## Prerequisites
 
-- **Node.js 22+**
+- **Node.js 22+** (see installation below)
 - **Ollama** installed and running locally
 - A running **Minecraft Java Edition server** (version 1.21.4 recommended)
 
@@ -16,7 +16,32 @@ The agent uses a locally running [Ollama](https://ollama.com) instance — no cl
 
 ## Install
 
-### 1. Install Ollama
+### 1. Install Node.js 22 via nvm
+
+[nvm](https://github.com/nvm-sh/nvm) is the recommended way to manage Node.js versions.
+
+```bash
+NOTE: you might need to install npm with apt first
+sudo apt install npm
+
+# Install nvm
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+
+# Reload your shell (or open a new terminal)
+source ~/.bashrc
+
+# Install and activate Node.js 22
+nvm install 22
+nvm use 22
+
+# Make v22 the default for all future shells
+nvm alias default 22
+
+# Verify
+node --version   # should print v22.x.x
+```
+
+### 2. Install Ollama
 
 Download and install from [ollama.com](https://ollama.com), then pull the model:
 
@@ -31,21 +56,51 @@ ollama list
 # should show lfm2.5-thinking:1.2b-bf16
 ```
 
-### 2. Install adapter dependencies
+### 3. Install Piper TTS (optional, for voice narration)
+
+[Piper](https://github.com/rhasspy/piper) is a fast local text-to-speech engine. The speech agent will narrate in-game events as text regardless, but Piper enables audio output.
+
+> **Note:** Do not use `sudo apt install piper` — that installs a mouse configuration tool, not the TTS engine.
+
+```bash
+# Download the piper binary into the agent folder
+mkdir -p agent/piper
+cd agent/piper
+wget https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz
+tar -xzf piper_linux_x86_64.tar.gz
+rm piper_linux_x86_64.tar.gz
+cd ../..
+
+# Download a voice model (~63MB)
+mkdir -p ~/.local/share/piper
+cd ~/.local/share/piper
+wget https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx
+wget https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json
+```
+
+Test it works:
+
+```bash
+echo "hello world" | agent/piper/piper \
+  --model ~/.local/share/piper/en_US-lessac-medium.onnx \
+  --output_raw | ffplay -f s16le -ar 22050 -ac 1 -nodisp -autoexit -i pipe:0
+```
+
+### 4. Install adapter dependencies
 
 ```bash
 cd minecraft-adapter
 npm install
 ```
 
-### 3. Install agent dependencies
+### 5. Install agent dependencies
 
 ```bash
 cd ../agent
 npm install
 ```
 
-### 4. Configure the `.env` file
+### 6. Configure the `.env` file
 
 The `.env` file lives at the **repo root** (`clawblox/.env`). It should already exist with the right values if you followed the main setup. Verify it contains:
 
@@ -53,6 +108,14 @@ The `.env` file lives at the **repo root** (`clawblox/.env`). It should already 
 PI_PROVIDER=ollama
 PI_MODEL=lfm2.5-thinking:1.2b-bf16
 # OLLAMA_BASE_URL=http://localhost:11434/v1  # default, uncomment to override
+
+# Optional: bot name shown in-game (defaults to script name + process ID)
+WORLD_AGENT_NAME=MyBot
+
+# Optional: Piper TTS for audio narration
+PIPER_BINARY=/path/to/clawblox/agent/piper/piper
+PIPER_MODEL=/home/<user>/.local/share/piper/en_US-lessac-medium.onnx
+# PIPER_SAMPLE_RATE=22050
 ```
 
 ---

@@ -198,166 +198,38 @@ class TwoPaneLogs {
 	}
 }
 
-class ElevenLabsRealtimePlayer {
-	constructor({ apiKey, voiceId, modelId = "eleven_flash_v2_5", outputFormat = "pcm_16000" }) {
-		this.apiKey = apiKey;
-		this.voiceId = voiceId;
-		this.modelId = modelId;
-		this.outputFormat = outputFormat;
-		this.ws = null;
-		this.ffplay = null;
-		this.keepaliveTimer = null;
+class PiperPlayer {
+	constructor({ binary, model, sampleRate = 22050 }) {
+		this.binary = binary;
+		this.model = model;
+		this.sampleRate = sampleRate;
 		this.queue = [];
 		this.processing = false;
-		this.msgQueue = [];
-		this.msgWaiter = null;
 		this.closed = false;
-	}
-
-	startFfplay() {
-		this.ffplay = spawn(
-			"ffplay",
-			[
-				"-hide_banner",
-				"-loglevel",
-				"error",
-				"-autoexit",
-				"-nodisp",
-				"-probesize",
-				"32",
-				"-analyzeduration",
-				"0",
-				"-fflags",
-				"nobuffer",
-				"-flags",
-				"low_delay",
-				"-f",
-				"s16le",
-				"-ar",
-				"16000",
-				"-ac",
-				"1",
-				"-i",
-				"pipe:0",
-			],
-			{ stdio: ["pipe", "ignore", "ignore"] },
-		);
-	}
-
-	cleanupConnection() {
-		if (this.keepaliveTimer) clearInterval(this.keepaliveTimer);
-		this.keepaliveTimer = null;
-		if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-			try {
-				this.ws.close();
-			} catch {}
-		}
-		this.ws = null;
-		if (this.ffplay) {
-			try {
-				this.ffplay.kill("SIGKILL");
-			} catch {}
-		}
-		this.ffplay = null;
-		this.msgQueue = [];
-		this.msgWaiter = null;
-	}
-
-	async connect() {
-		this.cleanupConnection();
-		this.startFfplay();
-		const wsUrl =
-			`wss://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}/stream-input` +
-			`?model_id=${encodeURIComponent(this.modelId)}&output_format=${encodeURIComponent(this.outputFormat)}`;
-		this.ws = new WebSocket(wsUrl);
-		const ws = this.ws;
-
-		await new Promise((resolve, reject) => {
-			const onOpen = () => {
-				cleanup();
-				resolve();
-			};
-			const onError = (err) => {
-				cleanup();
-				reject(err instanceof Error ? err : new Error("WebSocket connection error"));
-			};
-			const cleanup = () => {
-				ws.removeEventListener("open", onOpen);
-				ws.removeEventListener("error", onError);
-			};
-			ws.addEventListener("open", onOpen);
-			ws.addEventListener("error", onError);
-		});
-
-		ws.addEventListener("message", (event) => {
-			let msg;
-			try {
-				msg = JSON.parse(String(event.data));
-			} catch {
-				return;
-			}
-			this.msgQueue.push(msg);
-			if (this.msgWaiter) {
-				const waiter = this.msgWaiter;
-				this.msgWaiter = null;
-				waiter();
-			}
-		});
-
-		ws.send(
-			JSON.stringify({
-				text: " ",
-				voice_settings: { stability: 0.45, similarity_boost: 0.8, use_speaker_boost: true },
-				generation_config: { chunk_length_schedule: [120, 160, 250, 290] },
-				xi_api_key: this.apiKey,
-			}),
-		);
-
-		this.keepaliveTimer = setInterval(() => {
-			if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-				this.ws.send(JSON.stringify({ text: " " }));
-			}
-		}, 15000);
-	}
-
-	async ensureConnected() {
-		if (this.closed) return;
-		if (this.ws && this.ws.readyState === WebSocket.OPEN && this.ffplay?.stdin?.writable) return;
-		await this.connect();
-	}
-
-	nextMessage(timeoutMs = 2500) {
-		if (this.msgQueue.length > 0) return Promise.resolve(this.msgQueue.shift());
-		return new Promise((resolve) => {
-			const timer = setTimeout(() => {
-				if (this.msgWaiter) this.msgWaiter = null;
-				resolve(null);
-			}, timeoutMs);
-			this.msgWaiter = () => {
-				clearTimeout(timer);
-				resolve(this.msgQueue.shift() ?? null);
-			};
-		});
+		this.current = null;
 	}
 
 	async speakOne(text) {
-		await this.ensureConnected();
-		if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-		this.msgQueue = [];
-		this.ws.send(JSON.stringify({ text, flush: true }));
-		while (!this.closed) {
-			const msg = await this.nextMessage(2500);
-			if (!msg) break;
-			if (msg.error) { console.error("[audio] ElevenLabs error:", msg); break; }
-			if (msg.audio && this.ffplay?.stdin?.writable) {
-				try {
-					this.ffplay.stdin.write(Buffer.from(msg.audio, "base64"));
-				} catch {
-					break;
-				}
-			}
-			if (msg.isFinal === true) break;
-		}
+		await new Promise((resolve, reject) => {
+			const piper = spawn(this.binary, ["--model", this.model, "--output_raw"], {
+				stdio: ["pipe", "pipe", "ignore"],
+			});
+			const ffplay = spawn("ffplay", [
+				"-hide_banner", "-loglevel", "error", "-autoexit", "-nodisp",
+				"-f", "s16le", "-ar", String(this.sampleRate), "-ac", "1", "-i", "pipe:0",
+			], { stdio: ["pipe", "ignore", "ignore"] });
+
+			this.current = ffplay;
+			piper.stdout.pipe(ffplay.stdin);
+			piper.stdin.write(text);
+			piper.stdin.end();
+
+			const onError = (err) => { piper.kill(); ffplay.kill(); reject(err); };
+			ffplay.on("close", resolve);
+			piper.on("error", onError);
+			ffplay.on("error", onError);
+		});
+		this.current = null;
 	}
 
 	async processQueue() {
@@ -366,9 +238,10 @@ class ElevenLabsRealtimePlayer {
 		try {
 			while (this.queue.length > 0 && !this.closed) {
 				const text = this.queue.shift();
-				if (!text) continue;
-				await this.speakOne(text);
+				if (text) await this.speakOne(text);
 			}
+		} catch (err) {
+			console.error("[audio] processQueue error:", err);
 		} finally {
 			this.processing = false;
 		}
@@ -382,14 +255,12 @@ class ElevenLabsRealtimePlayer {
 		this.processQueue().catch((err) => { console.error("[audio] processQueue error:", err); });
 	}
 
-	async start() {
-		await this.ensureConnected();
-	}
+	start() { return Promise.resolve(); }
 
 	close() {
 		this.closed = true;
 		this.queue = [];
-		this.cleanupConnection();
+		try { this.current?.kill("SIGKILL"); } catch {}
 	}
 }
 
@@ -688,20 +559,10 @@ function stopActionIdleTimer() {
 	actionIdleTimer = null;
 }
 
-const elevenLabsApiKey = process.env.ELEVENLABS_API_KEY || "";
-const elevenLabsVoiceId =
-	process.env.AGENT_VOICE_ID || process.env.ELEVENLABS_VOICE_ID || "iP95p4xoKVk53GoZ742B";
-const elevenLabsModelId = process.env.ELEVENLABS_MODEL_ID || "eleven_flash_v2_5";
-const elevenLabsOutputFormat = process.env.ELEVENLABS_OUTPUT_FORMAT || "pcm_16000";
-const audioPlayer =
-	elevenLabsApiKey && elevenLabsVoiceId
-		? new ElevenLabsRealtimePlayer({
-				apiKey: elevenLabsApiKey,
-				voiceId: elevenLabsVoiceId,
-				modelId: elevenLabsModelId,
-				outputFormat: elevenLabsOutputFormat,
-			})
-		: null;
+const piperBinary = process.env.PIPER_BINARY || "piper";
+const piperModel = process.env.PIPER_MODEL || "";
+const piperSampleRate = parseInt(process.env.PIPER_SAMPLE_RATE || "22050", 10);
+const audioPlayer = piperModel ? new PiperPlayer({ binary: piperBinary, model: piperModel, sampleRate: piperSampleRate }) : null;
 
 const terminal = new ProcessTerminal();
 const tui = new TUI(terminal, true);
@@ -1181,10 +1042,10 @@ addSpeechLine("Commands: /reset, /quit, /session, /observe on|off|status|once, /
 if (audioPlayer) {
 	audioPlayer
 		.start()
-		.then(() => addSpeechLine(`ElevenLabs audio enabled (voice=${elevenLabsVoiceId}).`))
+		.then(() => addSpeechLine(`Piper audio enabled (model=${piperModel}).`))
 		.catch((err) => addSpeechLine(`[audio] failed to start: ${err instanceof Error ? err.message : String(err)}`));
 } else {
-	addSpeechLine("ElevenLabs audio disabled (set ELEVENLABS_API_KEY + AGENT_A_VOICE_ID/AGENT_VOICE_ID).");
+	addSpeechLine("Audio disabled (set PIPER_MODEL=/path/to/voice.onnx to enable Piper TTS).");
 }
 
 // startObserveLoop();  // Disabled: speech agent now receives observations via action agent tool call injection
