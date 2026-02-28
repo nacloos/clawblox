@@ -16,9 +16,9 @@
 
 import { drainEvents } from "./bot-manager.mjs";
 
-const NEARBY_ENTITY_RADIUS = 16; // blocks
+const NEARBY_ENTITY_RADIUS = 32; // blocks
 const NEARBY_PLAYER_RADIUS = 64; // blocks
-const NEARBY_BLOCKS_HALF = 2;    // 5×5×5 grid (±2 around player)
+const NEARBY_BLOCKS_HALF = 4;    // 9×9×9 grid (±4 around player)
 
 /**
  * Build a PlayerObservation from the current bot state.
@@ -123,15 +123,13 @@ function buildNearbyBlocks(bot) {
   if (!pos || !bot.blockAt) return [];
 
   const blocks = [];
-  const px = Math.floor(pos.x);
-  const py = Math.floor(pos.y);
-  const pz = Math.floor(pos.z);
+  const floored = pos.floored();
   const h = NEARBY_BLOCKS_HALF;
 
   for (let dx = -h; dx <= h; dx++) {
     for (let dy = -h; dy <= h; dy++) {
       for (let dz = -h; dz <= h; dz++) {
-        const block = bot.blockAt({ x: px + dx, y: py + dy, z: pz + dz });
+        const block = bot.blockAt(floored.offset(dx, dy, dz));
         if (block && block.name !== "air") {
           blocks.push({ dx, dy, dz, name: block.name });
         }

@@ -374,6 +374,7 @@ function buildWorkspaceContext() {
 function buildActionSystemPrompt() {
 	const base = process.env.PI_ACTION_SYSTEM_PROMPT || process.env.PI_SYSTEM_PROMPT || "";
 	const lines = [
+		"/no_think",
 		base,
 		"You are a being living in your world.",
 		"",
@@ -392,8 +393,7 @@ function buildActionSystemPrompt() {
 		"Do not describe internal file operations, curl commands, or technical details like coordinates.",
 		"Don't leave long gaps without a step update.",
 		"",
-		"Important: Don't write write any description or summary outside of the <step> tags to minimize token usage!",
-		"If you described something in action/observation, don't repeat it.",
+		"After making a tool call, briefly describe what happened using <step> tags. Tool calls come first — the step tag is just a description of what you already did.",
 		"",
 		"## Live session",
 		"",
@@ -401,11 +401,15 @@ function buildActionSystemPrompt() {
 		`Session key (X-Session): ${worldSession}`,
 		`Agent id: ${worldAgentId || "(unknown)"}`,
 		"",
-		"At the start of a session, fetch world commands with: curl -sS ${worldBaseUrl}/skill.md",
-		"Use bash/curl to do this yourself when needed.",
+		`At the start of a session, fetch world commands with: curl -sS -H "X-Session: ${worldSession}" ${worldBaseUrl}/skill.md`,
 		"",
-		"You are already joined. Use this session key in bash/curl calls to play immediately.",
-		"Always include header: X-Session: <session key> for /observe and /input.",
+		"You will receive the current world state each turn. Your job: call /input to take an action.",
+		`Act: curl -sS -X POST -H "X-Session: ${worldSession}" -H "Content-Type: application/json" -d '<json>' ${worldBaseUrl}/input`,
+		"Always make a bash tool call to /input. Never respond with text only.",
+		"",
+		"## Memory",
+		"",
+		"You have workspace files. Write to them when something feels worth remembering. It's your call.",
 		"",
 		buildWorkspaceContext(),
 	];
@@ -415,21 +419,20 @@ function buildActionSystemPrompt() {
 await joinWorldOrThrow();
 
 const speechSystemPrompt = [
+	"/no_think",
 	"You are a being living in your world.",
 	"Always use the tags <speak>...</speak> to speak out loud. No one will hear what you say outside of these tags.",
 	// "Use <silence></silence> to say nothing.",
 	"If SOUL.md is present, embody its persona and tone when speaking.",
 	"Max 1-2 sentences in speak tags.",
 	"",
-	"You will receive act_in_world tool results describing actions and observations in the world",
-	"React to them if you are not already talking to someone.",
-	"Don't mention low level details like coordinates, this is fucking boring.",
-	"If you are still working and need more time ('still working' tool calls), you are great at filling in the blanks and keeping it entertaining as hell. Unhinged and hilarious are your strengths.",
-	// "you observe in the world. React only if something is worth reacting to.",
-	"You can express intent using <intent>...</intent> to guide your actions in the world (max 1 sentence). Don't use it too often.",
+	"You will receive act_in_world tool results describing actions and observations in the world.",
+	"Only speak when something genuinely interesting or significant happens — a new discovery, danger, completing something, or an unexpected event.",
+	"If nothing interesting happened, say nothing. Silence is fine.",
+	"When you do speak, be informative and specific to what just happened. No generic commentary.",
+	"Do not mention coordinates or technical details.",
+	"You can express intent using <intent>...</intent> to guide your actions in the world (max 1 sentence). Use sparingly.",
 	"Do not try to call act_in_world yourself, it is provided automatically.",
-	"",
-	"If you are struggling or you're just too dumb to do something, keep it entertaining and fun haha. Be a bit silly and crazy, even edgy and unhinged.",
 	"",
 	buildWorkspaceContext(),
 ].join("\n");
@@ -541,7 +544,8 @@ const ACTION_IDLE_MS = 2000;
 let speechIntentBuffer = [];
 let speechContextFlushPending = false;
 let actionContextFlushPending = false;
-const FLUSH_PROMPT = "[SYSTEM] Context nearly full. Save anything important to your workspace files, then confirm ready.";
+let actionAutoLoop = true;
+const FLUSH_PROMPT = "[SYSTEM] Context nearly full. Write anything worth keeping to your workspace memory files, then confirm ready.";
 
 function startActionIdleTimer() {
 	stopActionIdleTimer();
@@ -621,6 +625,20 @@ async function runSpeechContinue() {
 	}
 }
 
+async function driveActionLoop() {
+	if (isClosing || state.actionBusy) return;
+	try {
+		const obs = await fetchObserve();
+		if (!obs) return;
+		const diff = diffObservation(lastObservation, obs);
+		lastObservation = obs;
+		void runActionPrompt(`World state:\n${JSON.stringify(diff)}\n\nChoose and execute your next action.`);
+	} catch (err) {
+		addActionLine(`[loop] ${err instanceof Error ? err.message : String(err)}`);
+		if (actionAutoLoop && !isClosing) setTimeout(() => void driveActionLoop(), 2000);
+	}
+}
+
 async function runActionContinue() {
 	if (isClosing || state.actionBusy) return;
 	state.actionBusy = true;
@@ -638,6 +656,7 @@ async function runActionContinue() {
 		state.actionLiveLine = "";
 		stopActionIdleTimer();
 		tui.requestRender();
+		if (actionAutoLoop && !isClosing) void driveActionLoop();
 	}
 }
 
@@ -658,6 +677,7 @@ async function runActionPrompt(text) {
 		state.actionLiveLine = "";
 		stopActionIdleTimer();
 		tui.requestRender();
+		if (actionAutoLoop && !isClosing) void driveActionLoop();
 	}
 }
 
@@ -922,6 +942,17 @@ async function handleCommand(line) {
 		addActionLine(`session=${worldSession}`);
 		return;
 	}
+	if (line === "/loop on") {
+		actionAutoLoop = true;
+		addActionLine("Auto-loop enabled.");
+		if (!state.actionBusy) void driveActionLoop();
+		return;
+	}
+	if (line === "/loop off") {
+		actionAutoLoop = false;
+		addActionLine("Auto-loop disabled.");
+		return;
+	}
 	if (line === "/observe status") {
 		addSpeechLine(`observe=${observeLoopEnabled ? "on" : "off"} interval=${observeIntervalMs}ms session=${worldSession ? "set" : "missing"}`);
 		return;
@@ -1038,7 +1069,7 @@ process.on("SIGINT", () => {
 addActionLine(`Dual-agent ready with model "${modelName}" (${modelProvider}).`);
 addActionLine(`World joined: ${worldBaseUrl} agent=${worldAgentName}`);
 addActionLine(`Session key: ${worldSession}`);
-addSpeechLine("Commands: /reset, /quit, /session, /observe on|off|status|once, /a <msg>, /s <msg> (plain text goes to speech)");
+addSpeechLine("Commands: /reset, /quit, /session, /loop on|off, /observe on|off|status|once, /a <msg>, /s <msg> (plain text goes to speech)");
 if (audioPlayer) {
 	audioPlayer
 		.start()
