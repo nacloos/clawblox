@@ -15,6 +15,7 @@
 agent/results/
 agent/workspace/
 **/.clawblox/
+mc-server/
 
 # Piper TTS binary (download separately, not versioned)
 agent/piper/
