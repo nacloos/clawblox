@@ -5,9 +5,11 @@
   "type": "module",
   "main": "server.mjs",
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "start:eval": "node server_eval.mjs"
   },
   "dependencies": {
+    "@fastify/websocket": "^11.2.0",
     "fastify": "^5.7.4",
     "mineflayer": "^4.23.0",
     "mineflayer-pathfinder": "^2.4.5",

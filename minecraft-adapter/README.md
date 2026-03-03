@@ -153,6 +153,31 @@ MC_HOST=192.168.1.10 MC_PORT=25565 MC_VERSION=1.21.4 npm start
 | `MC_VERSION` | `1.21.4`      | Minecraft protocol version           |
 | `MC_AUTH`    | `offline`     | Auth mode: `offline` or `microsoft`  |
 
+### Optional: Thin eval adapter (no hardcoded action handlers)
+
+If you want the thinnest possible adapter, start eval mode:
+
+```bash
+cd minecraft-adapter
+npm run start:eval
+```
+
+In eval mode, `/input` accepts raw JS:
+
+```bash
+curl -sS -X POST \
+  -H "X-Session: <session>" \
+  -H "Content-Type: application/json" \
+  -d '{"code":"await bot.chat(\"hello\")"}' \
+  http://localhost:8081/input
+```
+
+Skill guide for eval mode:
+
+```bash
+curl -sS http://localhost:8081/skill.md
+```
+
 ### Terminal 3 — Start the agent
 
 ```bash
