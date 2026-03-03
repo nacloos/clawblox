@@ -1,0 +1,15 @@
+name = "Minecraft Viewer World"
+description = "Minimal Clawblox renderer that embeds Prismarine Viewer."
+
+[runtime]
+mode = "external"
+
+[run]
+command = ["bash", "./run-stack.sh"]
+
+[renderer]
+name = "Minecraft Viewer Renderer"
+mode = "module"
+api_version = 1
+entry = "dist/renderer.bundle.js"
+capabilities = ["three-sdk"]

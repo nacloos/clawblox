@@ -28,9 +28,16 @@ const PORT = parseInt(process.env.PORT || "8081", 10);
 const EVAL_TIMEOUT_MS = parseInt(process.env.EVAL_TIMEOUT_MS || "30000", 10);
 const INTERRUPT_TIMEOUT_MS = parseInt(process.env.INTERRUPT_TIMEOUT_MS || "5000", 10);
 const { goals } = pathfinderPkg;
+const VIEWER_ENABLED = (process.env.MC_VIEWER || "1") !== "0";
+const VIEWER_PORT = parseInt(process.env.MC_VIEWER_PORT || "3007", 10);
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-const fastify = Fastify({ logger: true });
+const fastify = Fastify({
+  logger: true,
+  // Keep useful logs but remove noisy per-request "incoming request" lines.
+  disableRequestLogging: true,
+});
+let viewerStarted = false;
 
 await fastify.register(websocket);
 
@@ -148,6 +155,26 @@ function broadcastEvent(sessionToken, event) {
   }
 }
 
+async function maybeStartViewer(session) {
+  if (!VIEWER_ENABLED || viewerStarted) return;
+  try {
+    const mod = await import("prismarine-viewer");
+    const viewer =
+      mod.mineflayer ||
+      mod.default?.mineflayer ||
+      (typeof mod.default === "function" ? mod.default : null);
+    if (typeof viewer !== "function") {
+      fastify.log.warn("prismarine-viewer loaded but mineflayer export not found");
+      return;
+    }
+    viewer(session.bot, { port: VIEWER_PORT, firstPerson: false });
+    viewerStarted = true;
+    fastify.log.info(`Minecraft viewer available at http://127.0.0.1:${VIEWER_PORT}`);
+  } catch (err) {
+    fastify.log.warn({ err }, "Failed to start prismarine-viewer");
+  }
+}
+
 /**
  * Wire mineflayer events to WebSocket broadcast for a session.
  * Forwards raw bot events — no game logic here.
@@ -210,6 +237,7 @@ fastify.post("/join", async (request, reply) => {
     const { sessionToken, agentId } = await createSession(name);
     const session = getSession(sessionToken);
     wireWsBroadcast(session);
+    await maybeStartViewer(session);
     reply.code(200).send({ session: sessionToken, agent_id: agentId });
   } catch (err) {
     fastify.log.error(err, "Failed to join Minecraft server");

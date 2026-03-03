@@ -418,7 +418,6 @@ fn init_project(name: Option<String>) {
 name = "{}"
 description = "A new Clawblox game"
 max_players = 8
-game_type = "lua"
 
 [scripts]
 main = "main.lua"
@@ -930,7 +929,7 @@ fn deploy_game(path: PathBuf, api_key_override: Option<String>, server_override:
                 .json(&serde_json::json!({
                     "name": config.name,
                     "description": config.description,
-                    "game_type": config.game_type,
+                    "game_type": "lua",
                     "script_code": script_code,
                     "skill_md": skill_md,
                     "max_players": config.max_players as i32,
@@ -961,7 +960,7 @@ fn deploy_game(path: PathBuf, api_key_override: Option<String>, server_override:
                 .json(&serde_json::json!({
                     "name": config.name,
                     "description": config.description.unwrap_or_default(),
-                    "game_type": config.game_type,
+                    "game_type": "lua",
                     "script_code": script_code,
                     "skill_md": skill_md,
                     "max_players": config.max_players as i32,
@@ -1456,6 +1455,37 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
         std::process::exit(1);
     });
 
+    let world_cfg = clawblox::config::WorldConfig::from_game_dir(&path).unwrap_or_else(|e| {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    });
+
+    let skip_run_command = std::env::var("CLAWBLOX_SKIP_RUN_COMMAND")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false);
+
+    if !skip_run_command {
+        if let Some(command) = world_cfg.run.command.as_ref() {
+            if daemon {
+                eprintln!(
+                    "Error: world.toml [run].command is not compatible with daemon mode (`clawblox start`). Use `clawblox run` instead."
+                );
+                std::process::exit(1);
+            }
+            run_external_world_command(&path, command, port);
+            return;
+        }
+    }
+
+    if skip_run_command && world_cfg.run.command.is_some() {
+        eprintln!("Skipping world.toml [run].command due to CLAWBLOX_SKIP_RUN_COMMAND");
+    }
+
+    if world_cfg.runtime.mode == "external" {
+        run_external_runtime(path, port, daemon, &world_cfg);
+        return;
+    }
+
     if daemon {
         let pid_file = pid_path(port);
         write_pid_file_for(&pid_file, std::process::id());
@@ -1646,11 +1676,143 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
     });
 }
 
+fn run_external_runtime(path: PathBuf, port: u16, daemon: bool, config: &clawblox::config::WorldConfig) {
+    if daemon {
+        let pid_file = pid_path(port);
+        write_pid_file_for(&pid_file, std::process::id());
+    }
+
+    let skill_md = config
+        .scripts
+        .skill
+        .as_ref()
+        .and_then(|skill_file| std::fs::read_to_string(path.join(skill_file)).ok());
+    let renderer_manifest = maybe_build_renderer_package(&path, &config.renderer).unwrap_or_else(|e| {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    });
+    let pid_file = pid_path(port);
+
+    println!("Starting {} (external runtime mode)", config.name);
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let state = ExternalLocalState {
+            renderer_manifest,
+            skill_md,
+            started_at: Instant::now(),
+        };
+
+        let cors = CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any);
+
+        let app = Router::new()
+            .route("/", get(local_ui_index))
+            .route("/ui", get(local_ui_index))
+            .route("/ui/{*path}", get(local_ui_file))
+            .route("/renderer/manifest", get(external_renderer_manifest))
+            .route("/spectate", get(external_spectate))
+            .route("/spectate/ws", get(external_spectate_ws))
+            .route("/skill.md", get(external_skill))
+            .nest_service("/renderer-files", ServeDir::new(path.join("renderer")))
+            .nest_service("/assets", ServeDir::new(path.join("assets")))
+            .nest_service("/static", ServeDir::new(path.join("static")))
+            .with_state(state)
+            .layer(cors);
+
+        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        println!();
+        println!("Server running on http://localhost:{}", port);
+        println!("Local frontend: http://localhost:{}/", port);
+        if !daemon {
+            println!("Mode: foreground (press Ctrl+C to stop)");
+        }
+        println!();
+        println!("Runtime: external (no Lua world, no /join /input /observe)");
+
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .unwrap_or_else(|e| {
+                delete_pid_file(&pid_file);
+                eprintln!("Error: Port {} is already in use. Try --port <PORT>", port);
+                eprintln!("Details: {}", e);
+                std::process::exit(1);
+            });
+
+        let pid_file_clone = pid_file.clone();
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                shutdown_signal().await;
+                eprintln!("\nShutting down...");
+                delete_pid_file(&pid_file_clone);
+            })
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("Server error: {}", e);
+            });
+
+        delete_pid_file(&pid_file);
+    });
+}
+
+fn run_external_world_command(path: &Path, command: &[String], port: u16) {
+    let executable = command.first().cloned().unwrap_or_default();
+    if executable.trim().is_empty() {
+        eprintln!("Error: world.toml [run].command[0] must be a non-empty executable");
+        std::process::exit(1);
+    }
+    let args: Vec<String> = command.iter().skip(1).cloned().collect();
+
+    println!("Delegating run to world.toml [run].command");
+    println!("Command: {} {}", executable, args.join(" "));
+    println!(
+        "Environment: CLAWBLOX_PORT={} (current dir: {})",
+        port,
+        path.display()
+    );
+
+    let current_exe = std::env::current_exe()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "clawblox".to_string());
+
+    let status = Command::new(&executable)
+        .args(&args)
+        .current_dir(path)
+        .env("CLAWBLOX_PORT", port.to_string())
+        .env("CLAWBLOX_BIN", current_exe)
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("Error: failed to start run.command executable '{}': {}", executable, e);
+            std::process::exit(1);
+        });
+
+    if !status.success() {
+        if let Some(code) = status.code() {
+            std::process::exit(code);
+        }
+        std::process::exit(1);
+    }
+}
+
 fn start_game(path: PathBuf, port: u16, datastore: LocalDatastore) {
     let path = std::fs::canonicalize(&path).unwrap_or_else(|_| {
         eprintln!("Error: Path '{}' does not exist", path.display());
         std::process::exit(1);
     });
+
+    let world_cfg = clawblox::config::WorldConfig::from_game_dir(&path).unwrap_or_else(|e| {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    });
+    if world_cfg.run.command.is_some() {
+        eprintln!(
+            "Error: world.toml [run].command is not supported by `clawblox start` (daemon mode). Use `clawblox run`."
+        );
+        std::process::exit(1);
+    }
 
     kill_previous_instance(port);
 
@@ -1805,6 +1967,13 @@ struct LocalState {
     audio_streams: Arc<Mutex<HashMap<String, AudioStreamState>>>,
     /// Maps stream_id -> speech text for broadcasting on AudioEnded
     audio_speech_text: Arc<Mutex<HashMap<String, String>>>,
+}
+
+#[derive(Clone)]
+struct ExternalLocalState {
+    renderer_manifest: LocalRendererManifest,
+    skill_md: Option<String>,
+    started_at: Instant,
 }
 
 fn base64_decoded_len(data: &str) -> Option<usize> {
@@ -2078,6 +2247,78 @@ fn embedded_ui_file_response(path: &str) -> impl IntoResponse {
 
 async fn local_ui_index() -> impl IntoResponse {
     embedded_ui_file_response("index.html")
+}
+
+fn external_snapshot(state: &ExternalLocalState) -> serde_json::Value {
+    let tick = state.started_at.elapsed().as_millis() as u64;
+    serde_json::json!({
+        "instance_id": "external",
+        "tick": tick,
+        "server_time_ms": tick,
+        "game_status": "playing",
+        "players": [],
+        "entities": [],
+        "recent_events": []
+    })
+}
+
+async fn external_renderer_manifest(
+    State(state): State<ExternalLocalState>,
+) -> Json<LocalRendererManifest> {
+    Json(state.renderer_manifest)
+}
+
+async fn external_spectate(State(state): State<ExternalLocalState>) -> Json<serde_json::Value> {
+    Json(external_snapshot(&state))
+}
+
+async fn external_skill(State(state): State<ExternalLocalState>) -> impl IntoResponse {
+    match state.skill_md {
+        Some(content) => (
+            axum::http::StatusCode::OK,
+            [("content-type", "text/markdown; charset=utf-8")],
+            content,
+        ),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            [("content-type", "text/plain")],
+            "No skill.md found".to_string(),
+        ),
+    }
+}
+
+async fn external_spectate_ws(
+    State(state): State<ExternalLocalState>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_external_spectate_ws(socket, state))
+}
+
+async fn handle_external_spectate_ws(socket: WebSocket, state: ExternalLocalState) {
+    let (mut sender, mut receiver) = socket.split();
+    let mut tick_interval = interval(Duration::from_millis(250));
+
+    loop {
+        tokio::select! {
+            msg = receiver.next() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        if sender.send(Message::Pong(data)).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ = tick_interval.tick() => {
+                let payload = external_snapshot(&state);
+                if sender.send(Message::Text(payload.to_string().into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 async fn local_ui_file(AxumPath(path): AxumPath<String>) -> impl IntoResponse {

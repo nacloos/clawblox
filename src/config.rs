@@ -29,6 +29,35 @@ impl Default for ScriptsConfig {
     }
 }
 
+/// Runtime mode for local execution.
+///
+/// - `clawblox` (default): run the built-in Lua simulation.
+/// - `external`: serve frontend/renderer only (no Lua runtime).
+#[derive(Debug, Clone, Deserialize)]
+pub struct RuntimeConfig {
+    #[serde(default = "default_runtime_mode")]
+    pub mode: String,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_runtime_mode(),
+        }
+    }
+}
+
+/// Optional external run command configuration.
+///
+/// When configured, `clawblox run` can delegate process startup to this command.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct RunConfig {
+    /// Command to execute, argv-style.
+    /// Example: ["node", "play.js"]
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
+}
+
 /// Renderer configuration section.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RendererConfig {
@@ -93,26 +122,25 @@ pub struct WorldConfig {
     /// Maximum number of players per instance
     #[serde(default = "default_max_players")]
     pub max_players: u32,
-    /// Game type (e.g., "lua")
-    #[serde(default = "default_game_type")]
-    pub game_type: String,
     /// Scripts configuration
     #[serde(default)]
     pub scripts: ScriptsConfig,
+    /// Runtime mode selection
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
     /// Frontend renderer configuration
     #[serde(default)]
     pub renderer: RendererConfig,
     /// Observation configuration
     #[serde(default)]
     pub observation: ObservationConfig,
+    /// Optional external runtime command
+    #[serde(default)]
+    pub run: RunConfig,
 }
 
 fn default_max_players() -> u32 {
     8
-}
-
-fn default_game_type() -> String {
-    "lua".to_string()
 }
 
 fn default_renderer_name() -> String {
@@ -129,6 +157,10 @@ fn default_renderer_api_version() -> u32 {
 
 fn default_observation_radius() -> f32 {
     100.0
+}
+
+fn default_runtime_mode() -> String {
+    "clawblox".to_string()
 }
 
 impl WorldConfig {
@@ -156,6 +188,20 @@ impl WorldConfig {
                 path.to_path_buf(),
                 "observation.radius must be a finite number > 0".to_string(),
             ));
+        }
+        if let Some(cmd) = self.run.command.as_ref() {
+            if cmd.is_empty() {
+                return Err(WorldConfigError::ValidationError(
+                    path.to_path_buf(),
+                    "run.command must contain at least one token".to_string(),
+                ));
+            }
+            if cmd[0].trim().is_empty() {
+                return Err(WorldConfigError::ValidationError(
+                    path.to_path_buf(),
+                    "run.command[0] must be a non-empty executable".to_string(),
+                ));
+            }
         }
         Ok(())
     }
@@ -199,7 +245,7 @@ mod tests {
         let config: WorldConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.name, "Test Game");
         assert_eq!(config.max_players, 8);
-        assert_eq!(config.game_type, "lua");
+        assert_eq!(config.runtime.mode, "clawblox");
         assert_eq!(config.observation.radius, 100.0);
     }
 
@@ -209,7 +255,8 @@ mod tests {
             name = "Test Game"
             description = "A test game"
             max_players = 16
-            game_type = "lua"
+            [runtime]
+            mode = "external"
 
             [scripts]
             main = "main.lua"
@@ -226,11 +273,15 @@ mod tests {
 
             [observation]
             radius = 64
+
+            [run]
+            command = ["custom-runner", "--flag"]
         "#;
         let config: WorldConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.name, "Test Game");
         assert_eq!(config.description, Some("A test game".to_string()));
         assert_eq!(config.max_players, 16);
+        assert_eq!(config.runtime.mode, "external");
         assert_eq!(config.scripts.main, "main.lua");
         assert_eq!(config.scripts.tree, Some("scripts".to_string()));
         assert_eq!(config.renderer.mode, "module");
@@ -238,6 +289,10 @@ mod tests {
         assert_eq!(config.renderer.source.as_deref(), Some("src/index.ts"));
         assert_eq!(config.renderer.api_version, 1);
         assert_eq!(config.observation.radius, 64.0);
+        assert_eq!(
+            config.run.command.as_ref().map(|c| c.as_slice()),
+            Some(["custom-runner", "--flag"].as_slice())
+        );
     }
 
     #[test]
