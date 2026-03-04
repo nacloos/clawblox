@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ADAPTER_URL="${WORLD_BASE_URL:-http://localhost:8081}"
 BOT_NAME="${WORLD_AGENT_NAME:-}"
-WORKSPACE_DIR="${WORKSPACE_DIR:-$SCRIPT_DIR/workspace/agent}"
+WORKSPACE_DIR="${WORKSPACE_DIR:-}"
 TEMPLATE_DIR="$SCRIPT_DIR/template/agent"
 PI_EXTENSION_PATH="${PI_EXTENSION_PATH:-$SCRIPT_DIR/extensions/minecraft-events.ts}"
 PI_NO_GLOBAL_EXTENSIONS="${PI_NO_GLOBAL_EXTENSIONS:-1}"
@@ -22,6 +22,15 @@ generate_bot_name() {
 
 if [[ -z "$BOT_NAME" ]]; then
   BOT_NAME="$(generate_bot_name)"
+fi
+
+sanitize_name() {
+  printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
+}
+
+if [[ -z "$WORKSPACE_DIR" ]]; then
+  SAFE_BOT_NAME="$(sanitize_name "$BOT_NAME")"
+  WORKSPACE_DIR="$SCRIPT_DIR/workspace/$SAFE_BOT_NAME"
 fi
 
 mkdir -p "$WORKSPACE_DIR"

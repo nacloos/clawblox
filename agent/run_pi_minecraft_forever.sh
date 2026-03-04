@@ -4,11 +4,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ADAPTER_URL="${WORLD_BASE_URL:-http://localhost:8081}"
 BOT_NAME="${WORLD_AGENT_NAME:-}"
-WORKSPACE_DIR="${WORKSPACE_DIR:-$SCRIPT_DIR/workspace/agent}"
+WORKSPACE_DIR="${WORKSPACE_DIR:-}"
 TEMPLATE_DIR="$SCRIPT_DIR/template/agent"
 ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/.env}"
 RENEW_INTERVAL_SECONDS="${RENEW_INTERVAL_SECONDS:-3600}"
-LOGFILE="${LOGFILE:-$WORKSPACE_DIR/pi_forever.log}"
+LOGFILE="${LOGFILE:-}"
 PI_EXTENSION_PATH="${PI_EXTENSION_PATH:-$SCRIPT_DIR/extensions/minecraft-events.ts}"
 PI_NO_GLOBAL_EXTENSIONS="${PI_NO_GLOBAL_EXTENSIONS:-1}"
 
@@ -23,6 +23,10 @@ generate_bot_name() {
   printf '%s' "${first}${second}${suffix}" | cut -c1-16
 }
 
+sanitize_name() {
+  printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
+}
+
 if [[ -f "$ENV_FILE" ]]; then
   set -a
   # shellcheck disable=SC1090
@@ -33,6 +37,13 @@ fi
 if [[ -z "$BOT_NAME" ]]; then
   BOT_NAME="$(generate_bot_name)"
 fi
+
+if [[ -z "$WORKSPACE_DIR" ]]; then
+  SAFE_BOT_NAME="$(sanitize_name "$BOT_NAME")"
+  WORKSPACE_DIR="$SCRIPT_DIR/workspace/$SAFE_BOT_NAME"
+fi
+
+LOGFILE="${LOGFILE:-$WORKSPACE_DIR/pi_forever.log}"
 
 mkdir -p "$WORKSPACE_DIR"
 for file in SOUL.md IDENTITY.md SEMANTIC_MEMORY.md EPISODIC_MEMORY.md; do
