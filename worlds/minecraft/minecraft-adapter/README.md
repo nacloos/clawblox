@@ -20,7 +20,7 @@ This repo now has **two adapter modes**:
 ## Install
 
 ```bash
-cd minecraft-adapter
+cd worlds/minecraft/minecraft-adapter
 npm install
 ```
 
@@ -38,7 +38,7 @@ npm install
 ### Start
 
 ```bash
-cd minecraft-adapter
+cd worlds/minecraft/minecraft-adapter
 npm run start:eval
 ```
 
@@ -80,7 +80,7 @@ Returns:
 ### Start
 
 ```bash
-cd minecraft-adapter
+cd worlds/minecraft/minecraft-adapter
 npm start
 ```
 
@@ -146,4 +146,3 @@ Usually caused by bot username or protocol mismatch:
 ```bash
 npm run start:eval
 ```
-

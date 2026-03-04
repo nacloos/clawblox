@@ -4,22 +4,21 @@ set -euo pipefail
 GAME_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$GAME_DIR/../.." && pwd)"
 
-CLAWBLOX_BIN="${CLAWBLOX_BIN:-clawblox}"
-CLAWBLOX_PORT="${CLAWBLOX_PORT:-8080}"
-
 MC_DIR="${MC_DIR:-$ROOT_DIR/mc-server}"
 MC_JAR="${MC_JAR:-$MC_DIR/server.jar}"
 MC_HOST="${MC_HOST:-127.0.0.1}"
 MC_PORT="${MC_PORT:-25565}"
-MC_VERSION="${MC_VERSION:-1.20.1}"
+MC_VERSION="${MC_VERSION:-1.21.1}"
 MC_USE_LAN="${MC_USE_LAN:-0}"
+MC_ONLINE_MODE="${MC_ONLINE_MODE:-false}"
 
-ADAPTER_DIR="$ROOT_DIR/minecraft-adapter"
+ADAPTER_DIR="${ADAPTER_DIR:-$GAME_DIR/minecraft-adapter}"
 ADAPTER_PORT="${ADAPTER_PORT:-8081}"
 VIEWER_PORT="${VIEWER_PORT:-3007}"
 
 MC_PID=""
 ADAPTER_PID=""
+JAVA_BIN="${JAVA_BIN:-java}"
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -32,7 +31,7 @@ require_cmd node
 require_cmd npm
 require_cmd curl
 if [[ "$MC_USE_LAN" != "1" ]]; then
-  require_cmd java
+  require_cmd "$JAVA_BIN"
 fi
 
 download_paper_jar() {
@@ -51,11 +50,68 @@ download_paper_jar() {
 }
 
 jar_mc_version() {
-  # Read Minecraft version from server jar's version.json ("id": "x.y.z").
-  # Returns empty string if not readable.
   unzip -p "$MC_JAR" version.json 2>/dev/null \
     | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{const o=JSON.parse(d);process.stdout.write(String(o.id||""));}catch(_){}})' \
     || true
+}
+
+jar_required_java_version() {
+  unzip -p "$MC_JAR" version.json 2>/dev/null \
+    | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{const o=JSON.parse(d);process.stdout.write(String(o.java_version||""));}catch(_){}})' \
+    || true
+}
+
+java_major() {
+  local bin="$1"
+  "$bin" -version 2>&1 \
+    | awk -F '"' '/version/ {print $2}' \
+    | awk -F. '{if ($1=="1") print $2; else print $1}' \
+    | head -n1
+}
+
+install_local_jdk() {
+  local major="$1"
+  local arch
+  case "$(uname -m)" in
+    x86_64|amd64) arch="x64" ;;
+    aarch64|arm64) arch="aarch64" ;;
+    *)
+      echo "Unsupported architecture for auto-JDK install: $(uname -m)"
+      exit 1
+      ;;
+  esac
+
+  local base="$HOME/.local/jdk"
+  local target="$base/jdk-$major"
+  local tgz="$base/jdk${major}.tar.gz"
+  mkdir -p "$base"
+
+  if [[ ! -x "$target/bin/java" ]]; then
+    curl -fL "https://api.adoptium.net/v3/binary/latest/${major}/ga/linux/${arch}/jdk/hotspot/normal/eclipse" -o "$tgz"
+    mkdir -p "$target"
+    tar -xzf "$tgz" -C "$target" --strip-components=1
+  fi
+
+  JAVA_BIN="$target/bin/java"
+  export JAVA_HOME="$target"
+  export PATH="$JAVA_HOME/bin:$PATH"
+  echo "Using JAVA_HOME=$JAVA_HOME"
+  "$JAVA_BIN" --version | head -n1 || true
+}
+
+ensure_java_for_jar() {
+  local required current
+  required="$(jar_required_java_version)"
+  [[ -n "$required" ]] || return 0
+
+  current="$(java_major "$JAVA_BIN" 2>/dev/null || true)"
+  if [[ -n "$current" ]] && (( current >= required )); then
+    return 0
+  fi
+
+  echo "Java $required+ is required for Minecraft $MC_VERSION (current: ${current:-unknown})."
+  echo "Installing user-local JDK $required (no sudo)..."
+  install_local_jdk "$required"
 }
 
 wait_for_port() {
@@ -121,14 +177,25 @@ if [[ "$MC_USE_LAN" != "1" ]]; then
   if [[ ! -f "$MC_DIR/eula.txt" ]]; then
     echo "eula=true" >"$MC_DIR/eula.txt"
   fi
+  if [[ -f "$MC_DIR/server.properties" ]]; then
+    if grep -q '^online-mode=' "$MC_DIR/server.properties"; then
+      sed -i "s/^online-mode=.*/online-mode=${MC_ONLINE_MODE}/" "$MC_DIR/server.properties"
+    else
+      printf '\nonline-mode=%s\n' "$MC_ONLINE_MODE" >>"$MC_DIR/server.properties"
+    fi
+  else
+    printf 'online-mode=%s\n' "$MC_ONLINE_MODE" >"$MC_DIR/server.properties"
+  fi
+
+  ensure_java_for_jar
 
   echo "Starting Minecraft server..."
   if command -v setsid >/dev/null 2>&1; then
-    setsid bash -lc "cd '$MC_DIR' && exec java -Xms1G -Xmx2G -jar '$MC_JAR' nogui" \
+    setsid bash -c "cd '$MC_DIR' && exec '$JAVA_BIN' -Xms1G -Xmx2G -jar '$MC_JAR' nogui" \
       > >(sed -u 's/^/[mc-server] /') \
       2> >(sed -u 's/^/[mc-server] /' >&2) &
   else
-    (cd "$MC_DIR" && exec java -Xms1G -Xmx2G -jar "$MC_JAR" nogui) \
+    (cd "$MC_DIR" && exec "$JAVA_BIN" -Xms1G -Xmx2G -jar "$MC_JAR" nogui) \
       > >(sed -u 's/^/[mc-server] /') \
       2> >(sed -u 's/^/[mc-server] /' >&2) &
   fi
@@ -141,7 +208,7 @@ fi
 
 echo "Starting Minecraft adapter..."
 if command -v setsid >/dev/null 2>&1; then
-  setsid bash -lc "cd '$ADAPTER_DIR' && exec env PORT='$ADAPTER_PORT' MC_HOST='$MC_HOST' MC_PORT='$MC_PORT' MC_VERSION='$MC_VERSION' MC_VIEWER=1 MC_VIEWER_PORT='$VIEWER_PORT' npm run start:eval" \
+  setsid bash -c "cd '$ADAPTER_DIR' && exec env PORT='$ADAPTER_PORT' MC_HOST='$MC_HOST' MC_PORT='$MC_PORT' MC_VERSION='$MC_VERSION' MC_VIEWER=1 MC_VIEWER_PORT='$VIEWER_PORT' npm run start:eval" \
     > >(sed -u 's/^/[mc-adapter] /') \
     2> >(sed -u 's/^/[mc-adapter] /' >&2) &
 else
@@ -151,7 +218,6 @@ else
 fi
 ADAPTER_PID="$!"
 
-# Fail fast if adapter crashes immediately (for example EADDRINUSE or bad config).
 sleep 0.4
 if ! kill -0 "$ADAPTER_PID" 2>/dev/null; then
   echo "Minecraft adapter exited immediately."
@@ -167,10 +233,18 @@ if [[ "$MC_USE_LAN" == "1" ]]; then
   echo "  Server:   ${MC_HOST}:${MC_PORT} (LAN/remote)"
 else
   echo "  Server:   ${MC_HOST}:${MC_PORT} (local Paper)"
+  echo "  Auth:     online-mode=${MC_ONLINE_MODE}"
 fi
 echo "  Adapter:  http://127.0.0.1:${ADAPTER_PORT}"
 echo "  Viewer:   http://127.0.0.1:${VIEWER_PORT}/"
-echo "  Clawblox: http://127.0.0.1:${CLAWBLOX_PORT}/"
 echo
+echo "Join a bot to activate viewer:"
+echo "  curl -X POST \"http://127.0.0.1:${ADAPTER_PORT}/join?name=pi\""
+echo
+echo "Press Ctrl+C to stop."
 
-env CLAWBLOX_SKIP_RUN_COMMAND=1 WORLD_BASE_URL="http://127.0.0.1:${ADAPTER_PORT}" "$CLAWBLOX_BIN" run . --port "$CLAWBLOX_PORT"
+set +e
+wait -n "$ADAPTER_PID" ${MC_PID:+ "$MC_PID"}
+status=$?
+set -e
+exit "$status"

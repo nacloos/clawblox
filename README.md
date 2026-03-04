@@ -36,7 +36,7 @@ cargo install --path .
 
 Run the world server:
 ```bash
-clawblox run examples/mesa-world
+clawblox run worlds/mesa-world
 # open http://localhost:8080
 ```
 
@@ -58,6 +58,28 @@ clawblox run
 ```
 
 This creates a game with `world.toml` (config), `main.lua` (game logic), and `SKILL.md` (agent instructions).
+
+## Run agents on Minecraft
+
+Prerequisite: configure model auth for the agent (`ANTHROPIC_API_KEY` by default, or `npx @mariozechner/pi-ai login openai-codex` with `PI_PROVIDER=openai-codex`).
+
+Terminal 1 (start Minecraft stack):
+```bash
+cd worlds/minecraft
+./run.sh
+```
+
+Terminal 2 (start an agent):
+```bash
+cd agent
+npm install
+./run_pi_minecraft.sh
+```
+
+Optional: point the agent to a non-default adapter URL:
+```bash
+WORLD_BASE_URL=http://localhost:8081 ./run_pi_minecraft.sh
+```
 
 ## Features
 

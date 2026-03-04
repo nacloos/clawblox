@@ -1,7 +1,6 @@
 name = "Mesa World"
 description = "A simple mesa world with a player and ground."
 max_players = 1
-game_type = "lua"
 
 [scripts]
 main = "main.lua"

@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Clawblox Monitor</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm/css/xterm.css" />
+    <style>
+      :root {
+        --bg: #09090b;
+        --panel: #111113;
+        --panel-2: #18181b;
+        --line: #27272a;
+        --text: #f4f4f5;
+        --muted: #a1a1aa;
+        --accent: #22c55e;
+        --warn: #f59e0b;
+        --danger: #ef4444;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        color: var(--text);
+        background: radial-gradient(circle at 0% 0%, #131722 0, transparent 28%), var(--bg);
+        font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .app {
+        height: 100vh;
+        display: grid;
+        grid-template-rows: 64px 1fr;
+        gap: 12px;
+        padding: 12px;
+      }
+      .top {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--panel);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 14px;
+      }
+      .brand { font-weight: 700; letter-spacing: 0.01em; }
+      .status-row { display: flex; align-items: center; gap: 8px; }
+      .pill {
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 6px 10px;
+        font-size: 12px;
+        color: var(--muted);
+        background: var(--panel-2);
+      }
+      .pill.ok { color: #86efac; border-color: #14532d; }
+      .pill.bad { color: #fca5a5; border-color: #7f1d1d; }
+      .grid {
+        min-height: 0;
+        display: grid;
+        grid-template-columns: 340px 1fr;
+        gap: 12px;
+      }
+      .card {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--panel);
+        min-height: 0;
+      }
+      .card-head {
+        border-bottom: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        padding: 10px 12px;
+      }
+      .card-body { padding: 12px; }
+      .left {
+        display: grid;
+        grid-template-rows: auto auto 1fr;
+        gap: 12px;
+        min-height: 0;
+      }
+      .session {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 8px;
+      }
+      input, button {
+        width: 100%;
+        border-radius: 10px;
+        border: 1px solid var(--line);
+        background: var(--panel-2);
+        color: var(--text);
+        padding: 10px;
+        font: inherit;
+      }
+      button {
+        width: auto;
+        cursor: pointer;
+        background: #1f2937;
+      }
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 8px;
+      }
+      .stat {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 10px;
+        background: #0f1013;
+      }
+      .k { color: var(--muted); font-size: 12px; }
+      .v { font-size: 16px; margin-top: 4px; font-weight: 600; }
+      #events {
+        height: 100%;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #0d0e11;
+        padding: 8px;
+      }
+      .event {
+        border-left: 3px solid var(--line);
+        border-radius: 8px;
+        font-size: 12px;
+        padding: 6px 8px;
+        margin-bottom: 6px;
+        background: #14161b;
+      }
+      .event.chat { border-left-color: var(--accent); }
+      .event.health { border-left-color: var(--warn); }
+      .event.hurt, .event.death, .event.kicked { border-left-color: var(--danger); }
+      .right {
+        min-height: 0;
+        display: grid;
+        grid-template-rows: auto 1fr;
+      }
+      .tabs { display: flex; gap: 8px; padding: 8px 12px 0 12px; }
+      .tab {
+        padding: 7px 12px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        color: var(--muted);
+        cursor: pointer;
+        font-size: 12px;
+        background: transparent;
+      }
+      .tab.active { color: var(--text); background: var(--panel-2); }
+      .views { min-height: 0; padding: 10px 12px 12px 12px; }
+      .view {
+        height: 100%;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        overflow: hidden;
+        background: #0b0d12;
+      }
+      #term { width: 100%; height: 100%; }
+      #viewerFrame {
+        width: 100%;
+        height: 100%;
+        border: 0;
+        display: block;
+        background: #0b0d12;
+      }
+      .hidden { display: none; }
+      @media (max-width: 1100px) {
+        .grid { grid-template-columns: 1fr; }
+        .left { grid-template-rows: auto auto minmax(220px, 1fr); }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <div class="top">
+        <div class="brand">Clawblox Monitor</div>
+        <div class="status-row">
+          <span class="pill" id="eventsStatus">Events offline</span>
+          <span class="pill" id="termStatus">Terminal offline</span>
+        </div>
+      </div>
+
+      <div class="grid">
+        <div class="left">
+          <div class="card">
+            <div class="card-head">Agent Session</div>
+            <div class="card-body">
+              <div class="session">
+                <input id="sessionToken" placeholder="Paste X-Session token" />
+                <button id="connectEvents">Connect</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">Live Stats</div>
+            <div class="card-body stats">
+              <div class="stat"><div class="k">Health</div><div class="v" id="health">-</div></div>
+              <div class="stat"><div class="k">Food</div><div class="v" id="food">-</div></div>
+              <div class="stat"><div class="k">Position</div><div class="v" id="pos">-</div></div>
+              <div class="stat"><div class="k">Last Event</div><div class="v" id="lastEvt">-</div></div>
+            </div>
+          </div>
+
+          <div class="card" style="min-height: 0;">
+            <div class="card-head">Event Feed</div>
+            <div class="card-body" style="height: calc(100% - 38px);">
+              <div id="events"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card right">
+          <div class="tabs">
+            <button class="tab active" id="tabTerminal">Terminal</button>
+            <button class="tab" id="tabWorld">World View</button>
+          </div>
+          <div class="views">
+            <div id="terminalView" class="view"><div id="term"></div></div>
+            <div id="worldView" class="view hidden"><iframe id="viewerFrame" title="Minecraft Viewer"></iframe></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script type="module">
+      import { Terminal } from "https://cdn.jsdelivr.net/npm/@xterm/xterm/+esm";
+      import { FitAddon } from "https://cdn.jsdelivr.net/npm/@xterm/addon-fit/+esm";
+
+      const eventsStatus = document.getElementById("eventsStatus");
+      const termStatus = document.getElementById("termStatus");
+      const sessionTokenInput = document.getElementById("sessionToken");
+      const healthEl = document.getElementById("health");
+      const foodEl = document.getElementById("food");
+      const posEl = document.getElementById("pos");
+      const lastEvtEl = document.getElementById("lastEvt");
+      const eventsEl = document.getElementById("events");
+      const terminalView = document.getElementById("terminalView");
+      const worldView = document.getElementById("worldView");
+      const viewerFrame = document.getElementById("viewerFrame");
+
+      const term = new Terminal({
+        convertEol: true,
+        cursorBlink: true,
+        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+        fontSize: 13,
+        scrollback: 8000,
+        theme: { background: "#0b0d12", foreground: "#e4e4e7" },
+      });
+      const fitAddon = new FitAddon();
+      term.loadAddon(fitAddon);
+      term.open(document.getElementById("term"));
+      fitAddon.fit();
+
+      let adapterHttp = "http://127.0.0.1:8081";
+      let viewerUrl = "http://127.0.0.1:3007/";
+      let termWs = null;
+      let eventsWs = null;
+
+      function setPill(el, text, ok) {
+        el.textContent = text;
+        el.className = `pill ${ok ? "ok" : "bad"}`;
+      }
+
+      function appendEvent(type, data) {
+        const row = document.createElement("div");
+        row.className = `event ${type}`;
+        row.textContent = `[${new Date().toLocaleTimeString()}] ${type}: ${JSON.stringify(data)}`;
+        eventsEl.prepend(row);
+        while (eventsEl.children.length > 120) eventsEl.removeChild(eventsEl.lastChild);
+        lastEvtEl.textContent = type;
+      }
+
+      function updateStats(type, data) {
+        if (type === "connected" || type === "health") {
+          if (typeof data.health !== "undefined") healthEl.textContent = String(data.health);
+          if (typeof data.food !== "undefined") foodEl.textContent = String(data.food);
+        }
+        if ((type === "connected" || type === "move") && data.pos) {
+          posEl.textContent = `${Math.round(data.pos.x)}, ${Math.round(data.pos.y)}, ${Math.round(data.pos.z)}`;
+        }
+      }
+
+      async function loadConfig() {
+        const cfg = await fetch("/api/config").then((r) => r.json());
+        if (cfg.defaultAdapterHttp) adapterHttp = cfg.defaultAdapterHttp;
+        if (cfg.viewerUrl) viewerUrl = cfg.viewerUrl;
+        viewerFrame.src = viewerUrl;
+      }
+
+      async function pickTmuxSession() {
+        const res = await fetch("/api/tmux/sessions").then((r) => r.json());
+        const sessions = res.sessions || [];
+        const preferred = ["mc-agent", "mc-agent2", "agent", "0"];
+        for (const name of preferred) if (sessions.includes(name)) return name;
+        return sessions[0] || "0";
+      }
+
+      async function connectTerminal() {
+        const session = await pickTmuxSession();
+        const proto = location.protocol === "https:" ? "wss" : "ws";
+        const wsUrl = `${proto}://${location.host}/term?session=${encodeURIComponent(session)}&readonly=1`;
+
+        if (termWs) termWs.close();
+        term.clear();
+        term.writeln(`Connecting terminal: ${session} ...`);
+
+        termWs = new WebSocket(wsUrl);
+        termWs.onopen = () => {
+          setPill(termStatus, `Terminal ${session}`, true);
+          const size = fitAddon.proposeDimensions();
+          if (size) termWs.send(JSON.stringify({ type: "resize", cols: size.cols, rows: size.rows }));
+        };
+        termWs.onmessage = (e) => {
+          if (typeof e.data === "string" && e.data.startsWith("{")) {
+            try {
+              const msg = JSON.parse(e.data);
+              if (msg.type === "meta") return;
+            } catch {}
+          }
+          term.write(e.data);
+        };
+        termWs.onclose = () => setPill(termStatus, "Terminal offline", false);
+      }
+
+      function connectEvents() {
+        const token = sessionTokenInput.value.trim();
+        if (!token) {
+          appendEvent("error", { message: "Missing session token" });
+          return;
+        }
+        if (eventsWs) eventsWs.close();
+
+        const wsBase = adapterHttp.replace(/^http/, "ws");
+        eventsWs = new WebSocket(`${wsBase}/ws?session=${encodeURIComponent(token)}`);
+        eventsWs.onopen = () => setPill(eventsStatus, "Events connected", true);
+        eventsWs.onclose = () => setPill(eventsStatus, "Events offline", false);
+        eventsWs.onmessage = (e) => {
+          try {
+            const evt = JSON.parse(e.data);
+            appendEvent(evt.type || "event", evt.data || {});
+            updateStats(evt.type, evt.data || {});
+          } catch {
+            appendEvent("raw", { data: String(e.data).slice(0, 300) });
+          }
+        };
+      }
+
+      function setTab(world) {
+        document.getElementById("tabTerminal").classList.toggle("active", !world);
+        document.getElementById("tabWorld").classList.toggle("active", world);
+        terminalView.classList.toggle("hidden", world);
+        worldView.classList.toggle("hidden", !world);
+        if (!world) {
+          fitAddon.fit();
+          if (termWs && termWs.readyState === 1) {
+            const size = fitAddon.proposeDimensions();
+            if (size) termWs.send(JSON.stringify({ type: "resize", cols: size.cols, rows: size.rows }));
+          }
+        }
+      }
+
+      document.getElementById("connectEvents").onclick = connectEvents;
+      document.getElementById("tabTerminal").onclick = () => setTab(false);
+      document.getElementById("tabWorld").onclick = () => setTab(true);
+      sessionTokenInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") connectEvents();
+      });
+
+      window.addEventListener("resize", () => {
+        fitAddon.fit();
+        if (termWs && termWs.readyState === 1) {
+          const size = fitAddon.proposeDimensions();
+          if (size) termWs.send(JSON.stringify({ type: "resize", cols: size.cols, rows: size.rows }));
+        }
+      });
+
+      await loadConfig();
+      await connectTerminal();
+      setPill(eventsStatus, "Events offline", false);
+      setPill(termStatus, "Terminal connecting...", true);
+    </script>
+  </body>
+</html>

@@ -14,6 +14,7 @@ const PORT = parseInt(process.env.MONITOR_PORT || process.env.PORT || "3000", 10
 const HOST = process.env.MONITOR_HOST || "127.0.0.1";
 const DEFAULT_ADAPTER_WS = process.env.ADAPTER_WS_URL || "ws://127.0.0.1:8081/ws";
 const DEFAULT_ADAPTER_HTTP = process.env.ADAPTER_HTTP_URL || "http://127.0.0.1:8081";
+const VIEWER_URL = process.env.VIEWER_URL || "http://127.0.0.1:3007/";
 
 const app = Fastify({ logger: true });
 await app.register(websocket);
@@ -34,6 +35,7 @@ async function listTmuxSessions() {
 app.get("/api/config", async () => ({
   defaultAdapterWs: DEFAULT_ADAPTER_WS,
   defaultAdapterHttp: DEFAULT_ADAPTER_HTTP,
+  viewerUrl: VIEWER_URL,
 }));
 
 app.get("/api/tmux/sessions", async () => {

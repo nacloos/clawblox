@@ -12,7 +12,7 @@ Live web UI for:
 ## Run
 
 ```bash
-cd monitor
+cd worlds/minecraft/monitor
 npm install
 npm start
 ```
@@ -29,7 +29,7 @@ Run monitor on cluster, then tunnel to your laptop.
 On cluster:
 
 ```bash
-cd /storage/nacloos/projects/clawblox/monitor
+cd /storage/nacloos/projects/clawblox/worlds/minecraft/monitor
 npm install
 npm start
 ```

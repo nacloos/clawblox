@@ -1,0 +1,298 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Simple one-command launcher (npm-run style):
+# - Starts Minecraft server, adapter, monitor
+# - Streams logs in this terminal
+# - Keeps running until Ctrl+C
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MC_DIR="${MC_DIR:-$ROOT_DIR/mc-server}"
+MC_JAR="${MC_JAR:-$MC_DIR/server.jar}"
+STATE_DIR="$ROOT_DIR/.clawblox"
+PID_FILE="$STATE_DIR/pids"
+
+ADAPTER_DIR="$ROOT_DIR/worlds/minecraft/minecraft-adapter"
+MONITOR_DIR="$ROOT_DIR/worlds/minecraft/monitor"
+
+MONITOR_PORT="${MONITOR_PORT:-${CLAWBLOX_PORT:-4300}}"
+ADAPTER_PORT="${ADAPTER_PORT:-8081}"
+MC_PORT="${MC_PORT:-25565}"
+MC_HOST="${MC_HOST:-127.0.0.1}"
+MC_VERSION="${MC_VERSION:-1.20.1}"
+
+if ! command -v java >/dev/null 2>&1; then
+  echo "java is required."
+  exit 1
+fi
+if ! command -v npm >/dev/null 2>&1; then
+  echo "npm is required."
+  exit 1
+fi
+if ! command -v node >/dev/null 2>&1; then
+  echo "node is required."
+  exit 1
+fi
+if ! command -v curl >/dev/null 2>&1; then
+  echo "curl is required."
+  exit 1
+fi
+
+mkdir -p "$STATE_DIR"
+
+download_paper_jar() {
+  local version="$1"
+  local version_json
+  local build_json
+  local build
+  local jar_name
+  local download_url
+
+  echo "Minecraft server jar not found. Downloading Paper ${version}..."
+
+  version_json="$(curl -fsSL "https://api.papermc.io/v2/projects/paper/versions/${version}")" || {
+    echo "Failed to query Paper API for version ${version}."
+    return 1
+  }
+
+  build="$(node -e 'const o=JSON.parse(process.argv[1]); const b=o.builds?.at?.(-1); if (!b) process.exit(1); process.stdout.write(String(b));' "$version_json")" || {
+    echo "Failed to resolve latest Paper build for ${version}."
+    return 1
+  }
+
+  build_json="$(curl -fsSL "https://api.papermc.io/v2/projects/paper/versions/${version}/builds/${build}")" || {
+    echo "Failed to query Paper build metadata for ${version} build ${build}."
+    return 1
+  }
+
+  jar_name="$(node -e 'const o=JSON.parse(process.argv[1]); const n=o.downloads?.application?.name; if (!n) process.exit(1); process.stdout.write(n);' "$build_json")" || {
+    echo "Failed to resolve Paper jar name for ${version}."
+    return 1
+  }
+
+  download_url="https://api.papermc.io/v2/projects/paper/versions/${version}/builds/${build}/downloads/${jar_name}"
+  curl -fL "$download_url" -o "$MC_JAR"
+  echo "Downloaded: $MC_JAR"
+}
+
+if [[ ! -f "$MC_JAR" ]]; then
+  mkdir -p "$MC_DIR"
+  download_paper_jar "$MC_VERSION" || {
+    echo "Auto-download failed."
+    echo "Set MC_VERSION to a supported Paper version or place a jar at $MC_JAR"
+    exit 1
+  }
+fi
+
+mkdir -p "$MC_DIR"
+if [[ ! -f "$MC_DIR/eula.txt" ]]; then
+  echo "eula=true" >"$MC_DIR/eula.txt"
+fi
+
+if [[ ! -d "$ADAPTER_DIR/node_modules" ]]; then
+  (cd "$ADAPTER_DIR" && npm install)
+fi
+if [[ ! -d "$MONITOR_DIR/node_modules" ]]; then
+  (cd "$MONITOR_DIR" && npm install)
+fi
+
+port_in_use() {
+  local port="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn "sport = :$port" 2>/dev/null | tail -n +2 | grep -q .
+    return
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
+    return
+  fi
+  return 1
+}
+
+listener_pids_by_port() {
+  local port="$1"
+  ss -ltnp "sport = :$port" 2>/dev/null | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u
+}
+
+pid_cmdline() {
+  local pid="$1"
+  tr '\0' ' ' </proc/"$pid"/cmdline 2>/dev/null || true
+}
+
+pid_cwd() {
+  local pid="$1"
+  readlink -f /proc/"$pid"/cwd 2>/dev/null || true
+}
+
+try_reclaim_port_if_owned() {
+  local port="$1"
+  local expected_dir="$2"
+  local expected_hint="$3"
+  local pid
+  local reclaimed=0
+  while IFS= read -r pid; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    local cmd cwd
+    cmd="$(pid_cmdline "$pid")"
+    cwd="$(pid_cwd "$pid")"
+    if [[ "$cmd" == *"$expected_hint"* || "$cwd" == "$expected_dir"* ]]; then
+      kill -TERM "$pid" 2>/dev/null || true
+      sleep 0.2
+      kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+      reclaimed=1
+    fi
+  done < <(listener_pids_by_port "$port")
+  return "$reclaimed"
+}
+
+declare -a PIDS=()
+CLEANING=0
+
+looks_like_clawblox_process() {
+  local pid="$1"
+  local args
+  args="$(ps -o args= -p "$pid" 2>/dev/null || true)"
+  [[ -n "$args" ]] || return 1
+  [[ "$args" == *"$ROOT_DIR"* ]] && return 0
+  [[ "$args" == *"$MC_JAR"* ]] && return 0
+  [[ "$args" == *"server_eval.mjs"* ]] && return 0
+  [[ "$args" == *"monitor/server.mjs"* ]] && return 0
+  return 1
+}
+
+graceful_kill_pid_or_group() {
+  local pid="$1"
+  kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+}
+
+force_kill_pid_or_group() {
+  local pid="$1"
+  kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+}
+
+cleanup_stale_from_pidfile() {
+  [[ -f "$PID_FILE" ]] || return 0
+  local stale=()
+  while IFS= read -r pid; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    if kill -0 "$pid" 2>/dev/null && looks_like_clawblox_process "$pid"; then
+      stale+=("$pid")
+    fi
+  done <"$PID_FILE"
+
+  if ((${#stale[@]} > 0)); then
+    echo "Cleaning stale Clawblox processes from previous run..."
+    local pid
+    for pid in "${stale[@]}"; do
+      graceful_kill_pid_or_group "$pid"
+    done
+    sleep 1
+    for pid in "${stale[@]}"; do
+      kill -0 "$pid" 2>/dev/null && force_kill_pid_or_group "$pid"
+    done
+  fi
+  rm -f "$PID_FILE"
+}
+
+start_service() {
+  local name="$1"
+  local cmd="$2"
+  if command -v setsid >/dev/null 2>&1; then
+    setsid bash -lc "$cmd" \
+      > >(sed -u "s/^/[$name] /") \
+      2> >(sed -u "s/^/[$name] /" >&2) &
+  else
+    bash -lc "$cmd" \
+      > >(sed -u "s/^/[$name] /") \
+      2> >(sed -u "s/^/[$name] /" >&2) &
+  fi
+  local pid="$!"
+  PIDS+=("$pid")
+  echo "$pid" >>"$PID_FILE"
+  echo "started $name (pid $pid)"
+}
+
+cleanup() {
+  [[ "$CLEANING" -eq 1 ]] && return 0
+  CLEANING=1
+
+  local pid
+  for pid in "${PIDS[@]}"; do
+    graceful_kill_pid_or_group "$pid"
+  done
+
+  local deadline=$((SECONDS + 4))
+  while ((SECONDS < deadline)); do
+    local alive=0
+    for pid in "${PIDS[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        alive=1
+        break
+      fi
+    done
+    ((alive == 0)) && break
+    sleep 0.2
+  done
+
+  for pid in "${PIDS[@]}"; do
+    kill -0 "$pid" 2>/dev/null && force_kill_pid_or_group "$pid"
+  done
+
+  wait "${PIDS[@]}" 2>/dev/null || true
+  rm -f "$PID_FILE"
+}
+
+cleanup_stale_from_pidfile
+
+# Reclaim known stale listeners from this repo before hard-failing on ports.
+try_reclaim_port_if_owned "$MONITOR_PORT" "$MONITOR_DIR" "server.mjs" || true
+try_reclaim_port_if_owned "$ADAPTER_PORT" "$ADAPTER_DIR" "server_eval.mjs" || true
+try_reclaim_port_if_owned "$MC_PORT" "$MC_DIR" "server.jar" || true
+
+if port_in_use "$MC_PORT"; then
+  echo "Port $MC_PORT is already in use (Minecraft server)."
+  echo "Stop the existing process or change MC_PORT."
+  exit 1
+fi
+if port_in_use "$ADAPTER_PORT"; then
+  echo "Port $ADAPTER_PORT is already in use (adapter)."
+  echo "Stop the existing process or change ADAPTER_PORT."
+  exit 1
+fi
+if port_in_use "$MONITOR_PORT"; then
+  echo "Port $MONITOR_PORT is already in use (monitor)."
+  echo "Stop the existing process or change MONITOR_PORT."
+  exit 1
+fi
+
+on_interrupt() {
+  echo
+  echo "Stopping Clawblox services..."
+  cleanup
+  exit 0
+}
+
+trap on_interrupt INT TERM
+trap cleanup EXIT
+
+start_service "mc-server" "cd '$MC_DIR' && exec java -Xms1G -Xmx2G -jar '$MC_JAR' nogui"
+start_service "mc-adapter" "cd '$ADAPTER_DIR' && exec env PORT=$ADAPTER_PORT MC_HOST=$MC_HOST MC_PORT=$MC_PORT MC_VERSION=$MC_VERSION npm run start:eval"
+start_service "monitor-ui" "cd '$MONITOR_DIR' && exec env MONITOR_PORT=$MONITOR_PORT npm start"
+
+echo
+echo "Clawblox Minecraft stack started."
+echo "Monitor UI: http://127.0.0.1:$MONITOR_PORT"
+echo "Adapter:    http://127.0.0.1:$ADAPTER_PORT"
+echo "Server:     $MC_HOST:$MC_PORT"
+echo
+echo "Running in foreground. Press Ctrl+C to stop all services."
+
+set +e
+wait -n "${PIDS[@]}"
+status=$?
+set -e
+
+echo
+echo "A service exited (status $status). Stopping remaining services..."
+cleanup
+exit "$status"
