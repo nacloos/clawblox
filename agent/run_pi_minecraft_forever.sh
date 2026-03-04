@@ -9,6 +9,8 @@ TEMPLATE_DIR="$SCRIPT_DIR/template/agent"
 ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/.env}"
 RENEW_INTERVAL_SECONDS="${RENEW_INTERVAL_SECONDS:-3600}"
 LOGFILE="${LOGFILE:-$WORKSPACE_DIR/pi_forever.log}"
+PI_EXTENSION_PATH="${PI_EXTENSION_PATH:-$SCRIPT_DIR/extensions/minecraft-events.ts}"
+PI_NO_GLOBAL_EXTENSIONS="${PI_NO_GLOBAL_EXTENSIONS:-1}"
 
 generate_bot_name() {
   local -a first_parts=(Brisk Cozy Daring Fuzzy Jolly Lunar Nova Pixel Sunny Swift)
@@ -119,6 +121,14 @@ if pi --help 2>&1 | grep -q -- '--watch'; then
   WATCH_FLAG=(--watch)
 fi
 
+EXTENSION_FLAGS=()
+if [[ "$PI_NO_GLOBAL_EXTENSIONS" == "1" ]]; then
+  EXTENSION_FLAGS+=(--no-extensions)
+fi
+if [[ -f "$PI_EXTENSION_PATH" || -d "$PI_EXTENSION_PATH" ]]; then
+  EXTENSION_FLAGS+=(-e "$PI_EXTENSION_PATH")
+fi
+
 start_kerberos_renew_loop
 
 echo "Session: $SESSION_ID"
@@ -134,6 +144,7 @@ fi
 set +e
 pi \
   "${WATCH_FLAG[@]}" \
+  "${EXTENSION_FLAGS[@]}" \
   --append-system-prompt "$PROMPT_FILE" \
   "continue"
 status=$?
