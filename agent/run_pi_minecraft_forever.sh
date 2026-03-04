@@ -49,6 +49,10 @@ cleanup() {
   if [[ -n "$RENEW_PID" ]] && kill -0 "$RENEW_PID" 2>/dev/null; then
     kill "$RENEW_PID" 2>/dev/null || true
   fi
+  # Best-effort: tell adapter to close session so bot disconnects cleanly.
+  if [[ -n "${SESSION_ID:-}" ]]; then
+    curl -fsS -X POST -H "X-Session: ${SESSION_ID}" "${ADAPTER_URL%/}/leave" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT INT TERM
 
@@ -127,7 +131,11 @@ else
   echo "Kerberos renew loop: disabled (kinit/aklog or KERBEROS_* missing)"
 fi
 
-exec pi \
+set +e
+pi \
   "${WATCH_FLAG[@]}" \
   --append-system-prompt "$PROMPT_FILE" \
   "continue"
+status=$?
+set -e
+exit "$status"

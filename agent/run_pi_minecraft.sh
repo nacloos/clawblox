@@ -42,7 +42,14 @@ if [[ -z "$SESSION_ID" ]]; then
 fi
 
 PROMPT_FILE="$(mktemp -t pi-mc-prompt.XXXXXX.md)"
-trap 'rm -f "$PROMPT_FILE"' EXIT
+cleanup() {
+  rm -f "$PROMPT_FILE"
+  # Best-effort: tell adapter to close session so bot disconnects cleanly.
+  if [[ -n "${SESSION_ID:-}" ]]; then
+    curl -fsS -X POST -H "X-Session: ${SESSION_ID}" "${ADAPTER_URL%/}/leave" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT INT TERM
 
 cat >"$PROMPT_FILE" <<EOF
 /no_think
@@ -67,7 +74,11 @@ if pi --help 2>&1 | grep -q -- '--watch'; then
   WATCH_FLAG=(--watch)
 fi
 
-exec pi \
+set +e
+pi \
   "${WATCH_FLAG[@]}" \
   --append-system-prompt "$PROMPT_FILE" \
   "continue"
+status=$?
+set -e
+exit "$status"
