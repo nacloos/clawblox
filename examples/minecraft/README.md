@@ -3,6 +3,27 @@
 Minimal standalone world that uses Clawblox frontend runtime + prismarine viewer.
 No `main.lua` is required.
 
+## Run Without Clawblox (recommended for remote)
+
+```bash
+cd examples/minecraft
+./run.sh
+```
+
+This does not call `clawblox` at all. It starts:
+- Paper server (`mc-server/server.jar`)
+- Minecraft adapter (`minecraft-adapter/server_eval.mjs`)
+- Prismarine viewer (`http://127.0.0.1:3007/`)
+
+Default version is `MC_VERSION=1.21.1`.
+
+Example overrides:
+
+```bash
+MC_VERSION=1.21.1 ./run.sh
+MC_USE_LAN=1 MC_HOST=172.30.112.1 MC_PORT=51234 MC_VERSION=1.21.1 ./run.sh
+```
+
 ## Run
 
 ```bash

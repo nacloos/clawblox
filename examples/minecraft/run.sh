@@ -17,6 +17,7 @@ VIEWER_PORT="${VIEWER_PORT:-3007}"
 
 MC_PID=""
 ADAPTER_PID=""
+JAVA_BIN="${JAVA_BIN:-java}"
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -29,7 +30,7 @@ require_cmd node
 require_cmd npm
 require_cmd curl
 if [[ "$MC_USE_LAN" != "1" ]]; then
-  require_cmd java
+  require_cmd "$JAVA_BIN"
 fi
 
 download_paper_jar() {
@@ -51,6 +52,65 @@ jar_mc_version() {
   unzip -p "$MC_JAR" version.json 2>/dev/null \
     | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{const o=JSON.parse(d);process.stdout.write(String(o.id||""));}catch(_){}})' \
     || true
+}
+
+jar_required_java_version() {
+  unzip -p "$MC_JAR" version.json 2>/dev/null \
+    | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{const o=JSON.parse(d);process.stdout.write(String(o.java_version||""));}catch(_){}})' \
+    || true
+}
+
+java_major() {
+  local bin="$1"
+  "$bin" -version 2>&1 \
+    | awk -F '"' '/version/ {print $2}' \
+    | awk -F. '{if ($1=="1") print $2; else print $1}' \
+    | head -n1
+}
+
+install_local_jdk() {
+  local major="$1"
+  local arch
+  case "$(uname -m)" in
+    x86_64|amd64) arch="x64" ;;
+    aarch64|arm64) arch="aarch64" ;;
+    *)
+      echo "Unsupported architecture for auto-JDK install: $(uname -m)"
+      exit 1
+      ;;
+  esac
+
+  local base="$HOME/.local/jdk"
+  local target="$base/jdk-$major"
+  local tgz="$base/jdk${major}.tar.gz"
+  mkdir -p "$base"
+
+  if [[ ! -x "$target/bin/java" ]]; then
+    curl -fL "https://api.adoptium.net/v3/binary/latest/${major}/ga/linux/${arch}/jdk/hotspot/normal/eclipse" -o "$tgz"
+    mkdir -p "$target"
+    tar -xzf "$tgz" -C "$target" --strip-components=1
+  fi
+
+  JAVA_BIN="$target/bin/java"
+  export JAVA_HOME="$target"
+  export PATH="$JAVA_HOME/bin:$PATH"
+  echo "Using JAVA_HOME=$JAVA_HOME"
+  "$JAVA_BIN" --version | head -n1 || true
+}
+
+ensure_java_for_jar() {
+  local required current
+  required="$(jar_required_java_version)"
+  [[ -n "$required" ]] || return 0
+
+  current="$(java_major "$JAVA_BIN" 2>/dev/null || true)"
+  if [[ -n "$current" ]] && (( current >= required )); then
+    return 0
+  fi
+
+  echo "Java $required+ is required for Minecraft $MC_VERSION (current: ${current:-unknown})."
+  echo "Installing user-local JDK $required (no sudo)..."
+  install_local_jdk "$required"
 }
 
 wait_for_port() {
@@ -117,13 +177,15 @@ if [[ "$MC_USE_LAN" != "1" ]]; then
     echo "eula=true" >"$MC_DIR/eula.txt"
   fi
 
+  ensure_java_for_jar
+
   echo "Starting Minecraft server..."
   if command -v setsid >/dev/null 2>&1; then
-    setsid bash -lc "cd '$MC_DIR' && exec java -Xms1G -Xmx2G -jar '$MC_JAR' nogui" \
+    setsid bash -c "cd '$MC_DIR' && exec '$JAVA_BIN' -Xms1G -Xmx2G -jar '$MC_JAR' nogui" \
       > >(sed -u 's/^/[mc-server] /') \
       2> >(sed -u 's/^/[mc-server] /' >&2) &
   else
-    (cd "$MC_DIR" && exec java -Xms1G -Xmx2G -jar "$MC_JAR" nogui) \
+    (cd "$MC_DIR" && exec "$JAVA_BIN" -Xms1G -Xmx2G -jar "$MC_JAR" nogui) \
       > >(sed -u 's/^/[mc-server] /') \
       2> >(sed -u 's/^/[mc-server] /' >&2) &
   fi
@@ -136,7 +198,7 @@ fi
 
 echo "Starting Minecraft adapter..."
 if command -v setsid >/dev/null 2>&1; then
-  setsid bash -lc "cd '$ADAPTER_DIR' && exec env PORT='$ADAPTER_PORT' MC_HOST='$MC_HOST' MC_PORT='$MC_PORT' MC_VERSION='$MC_VERSION' MC_VIEWER=1 MC_VIEWER_PORT='$VIEWER_PORT' npm run start:eval" \
+  setsid bash -c "cd '$ADAPTER_DIR' && exec env PORT='$ADAPTER_PORT' MC_HOST='$MC_HOST' MC_PORT='$MC_PORT' MC_VERSION='$MC_VERSION' MC_VIEWER=1 MC_VIEWER_PORT='$VIEWER_PORT' npm run start:eval" \
     > >(sed -u 's/^/[mc-adapter] /') \
     2> >(sed -u 's/^/[mc-adapter] /' >&2) &
 else
