@@ -10,6 +10,7 @@ MC_HOST="${MC_HOST:-127.0.0.1}"
 MC_PORT="${MC_PORT:-25565}"
 MC_VERSION="${MC_VERSION:-1.21.1}"
 MC_USE_LAN="${MC_USE_LAN:-0}"
+MC_ONLINE_MODE="${MC_ONLINE_MODE:-false}"
 
 ADAPTER_DIR="$ROOT_DIR/minecraft-adapter"
 ADAPTER_PORT="${ADAPTER_PORT:-8081}"
@@ -176,6 +177,15 @@ if [[ "$MC_USE_LAN" != "1" ]]; then
   if [[ ! -f "$MC_DIR/eula.txt" ]]; then
     echo "eula=true" >"$MC_DIR/eula.txt"
   fi
+  if [[ -f "$MC_DIR/server.properties" ]]; then
+    if grep -q '^online-mode=' "$MC_DIR/server.properties"; then
+      sed -i "s/^online-mode=.*/online-mode=${MC_ONLINE_MODE}/" "$MC_DIR/server.properties"
+    else
+      printf '\nonline-mode=%s\n' "$MC_ONLINE_MODE" >>"$MC_DIR/server.properties"
+    fi
+  else
+    printf 'online-mode=%s\n' "$MC_ONLINE_MODE" >"$MC_DIR/server.properties"
+  fi
 
   ensure_java_for_jar
 
@@ -223,6 +233,7 @@ if [[ "$MC_USE_LAN" == "1" ]]; then
   echo "  Server:   ${MC_HOST}:${MC_PORT} (LAN/remote)"
 else
   echo "  Server:   ${MC_HOST}:${MC_PORT} (local Paper)"
+  echo "  Auth:     online-mode=${MC_ONLINE_MODE}"
 fi
 echo "  Adapter:  http://127.0.0.1:${ADAPTER_PORT}"
 echo "  Viewer:   http://127.0.0.1:${VIEWER_PORT}/"

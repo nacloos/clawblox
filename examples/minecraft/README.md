@@ -16,11 +16,14 @@ This does not call `clawblox` at all. It starts:
 - Prismarine viewer (`http://127.0.0.1:3007/`)
 
 Default version is `MC_VERSION=1.21.1`.
+Default auth mode is `MC_ONLINE_MODE=false` (allows offline bot join).
 
 Example overrides:
 
 ```bash
 MC_VERSION=1.21.1 ./run.sh
+MC_VERSION=1.21.1 MC_ONLINE_MODE=false ./run.sh
+MC_VERSION=1.21.1 MC_ONLINE_MODE=true ./run.sh
 MC_USE_LAN=1 MC_HOST=172.30.112.1 MC_PORT=51234 MC_VERSION=1.21.1 ./run.sh
 ```
 
