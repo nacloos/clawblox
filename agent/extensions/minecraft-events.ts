@@ -16,7 +16,6 @@ let ws: InstanceType<typeof WebSocket> | null = null;
 let lastHealth = 20;
 let lastFood = 20;
 let cooldownUntil = 0;
-let reflexCooldownUntil = 0;
 let extensionCtx: ExtensionContext | null = null;
 let piRef: ExtensionAPI | null = null;
 let autoLoopEnabled = true;
@@ -177,14 +176,6 @@ function connectWs() {
           logEvent(`Food dropped to ${f}/20`);
         }
 
-        // AUTO-REFLEX: only at near-death → interrupt & flee
-        if (dmg > 0 && h <= 8 && now > reflexCooldownUntil) {
-          reflexCooldownUntil = now + 5000;
-          interrupt(FLEE_CODE);
-          logEvent(`AUTO-FLEE triggered! Health critical at ${Math.round(h)}/20`);
-          notify(`🏃 AUTO-FLEE: Health ${Math.round(h)}/20! Interrupting and running!`);
-        }
-
         // Alert LLM only on significant damage or getting low
         if (dmg > 0 && h <= 10 && h > 6 && now > cooldownUntil) {
           cooldownUntil = now + 5000;
@@ -208,12 +199,6 @@ function connectWs() {
         const pos = event.data.pos;
         const posText = pos ? ` at (${pos.x}, ${pos.y}, ${pos.z})` : "";
         logEvent(`Hurt${posText}! Health now ${Math.round(h)}/20`);
-        // Immediate reaction — hurt fires even during /input execution
-        if (h <= 8 && now > reflexCooldownUntil) {
-          reflexCooldownUntil = now + 5000;
-          interrupt(FLEE_CODE);
-          notify(`🏃 AUTO-FLEE: Hurt! Health ${Math.round(h)}/20!`);
-        }
         lastHealth = h;
         break;
       }
@@ -360,13 +345,12 @@ export default function (pi: ExtensionAPI) {
       lastHealth = 20;
       lastFood = 20;
       cooldownUntil = 0;
-      reflexCooldownUntil = 0;
       extensionCtx = ctx;
 
       connectWs();
 
       return {
-        content: [{ type: "text", text: "WebSocket connected. Auto-reflexes: flee on hurt ≤8hp (via /interrupt, never blocked). Alerts: damage, hunger, death, chat." }],
+        content: [{ type: "text", text: "WebSocket connected. Alerts: damage, hunger, death, chat." }],
       };
     },
   });
