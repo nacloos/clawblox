@@ -7,11 +7,26 @@
 | MoveTo | `{"position": [x, y, z]}` | Move toward a world position |
 | Jump | `{}` | Jump (works when grounded) |
 | Stop | `{}` | Cancel current movement |
+| Pickup | `{"position": [x, y, z]}` | Pick up the block nearest that world position, if it is within reach |
+| Place | `{"position": [x, y, z]}` | Place the held block at that world position and let physics take over |
 
-## World Layout
+## Player Attributes
 
-- **Ground**: A 100x100 teal platform centered at the origin (Y=0). Extends from X=-50 to X=50 and Z=-50 to Z=50.
-- **Player**: Spawns at (0, 5, 0).
+The player observation includes:
+
+- `HoldingBlock`: `true` when the player is carrying a block.
+- `HeldBlockColor`: The carried block color name (`Sand` or `Slate`), or `""`.
+- `BlockSize`: The block edge length in studs (`0.75`).
+- `PickupRange`: Max pickup reach in studs.
+- `PlaceRange`: Max placement reach in studs.
+- `LastBlockAction`: Last pickup/place result string such as `PickupSuccess` or `PlaceFailed:OutOfRange`.
+
+## World Entity Attributes
+
+Each block entity includes:
+
+- `IsPickupBlock`: `true`
+- `BlockColorName`: `Sand` or `Slate`
 
 ## API Endpoints
 
