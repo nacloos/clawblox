@@ -8,6 +8,8 @@ WORKSPACE_DIR="${WORKSPACE_DIR:-}"
 TEMPLATE_DIR="$SCRIPT_DIR/template/agent"
 PI_EXTENSION_PATH="${PI_EXTENSION_PATH:-$SCRIPT_DIR/extensions/minecraft-events.ts}"
 PI_NO_GLOBAL_EXTENSIONS="${PI_NO_GLOBAL_EXTENSIONS:-1}"
+SESSION_DIR="${SESSION_DIR:-}"
+SYSTEM_PROMPT_SNAPSHOT_FILE="${SYSTEM_PROMPT_SNAPSHOT_FILE:-}"
 
 generate_bot_name() {
   local -a first_parts=(Brisk Cozy Daring Fuzzy Jolly Lunar Nova Pixel Sunny Swift)
@@ -33,17 +35,30 @@ if [[ -z "$WORKSPACE_DIR" ]]; then
   WORKSPACE_DIR="$SCRIPT_DIR/workspace/$SAFE_BOT_NAME"
 fi
 
+if [[ -z "${SAFE_BOT_NAME:-}" ]]; then
+  SAFE_BOT_NAME="$(sanitize_name "$BOT_NAME")"
+fi
+
+if [[ -z "$SESSION_DIR" ]]; then
+  SESSION_DIR="$SCRIPT_DIR/logs/$SAFE_BOT_NAME"
+fi
+
+if [[ -z "$SYSTEM_PROMPT_SNAPSHOT_FILE" ]]; then
+  SYSTEM_PROMPT_SNAPSHOT_FILE="$SESSION_DIR/system_prompt.txt"
+fi
+
 mkdir -p "$WORKSPACE_DIR"
-for file in SOUL.md IDENTITY.md SEMANTIC_MEMORY.md EPISODIC_MEMORY.md; do
-  dest="$WORKSPACE_DIR/$file"
-  if [[ ! -f "$dest" ]]; then
-    if [[ -f "$TEMPLATE_DIR/$file" ]]; then
-      cp "$TEMPLATE_DIR/$file" "$dest"
-    else
-      : > "$dest"
+mkdir -p "$SESSION_DIR"
+export PI_SYSTEM_PROMPT_SNAPSHOT_FILE="$SYSTEM_PROMPT_SNAPSHOT_FILE"
+if [[ -d "$TEMPLATE_DIR" ]]; then
+  while IFS= read -r -d '' template_path; do
+    file_name="$(basename "$template_path")"
+    dest="$WORKSPACE_DIR/$file_name"
+    if [[ ! -e "$dest" ]]; then
+      cp "$template_path" "$dest"
     fi
-  fi
-done
+  done < <(find "$TEMPLATE_DIR" -maxdepth 1 -type f -print0 | sort -z)
+fi
 
 JOIN_JSON="$(curl -fsS -X POST "${ADAPTER_URL%/}/join?name=${BOT_NAME}")"
 SESSION_ID="$(node -e 'const o=JSON.parse(process.argv[1]); process.stdout.write(String(o.session||""));' "$JOIN_JSON")"
@@ -63,10 +78,8 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 cat >"$PROMPT_FILE" <<EOF
-/no_think
 You are a being living in your world.
 Your workspace is ${WORKSPACE_DIR}. Only work inside this directory.
-Be polite and avoid working on your memory files when interacting with someone else.
 
 World base URL: ${ADAPTER_URL}
 Session key (X-Session): ${SESSION_ID}
@@ -80,6 +93,7 @@ EOF
 cd "$WORKSPACE_DIR"
 echo "Session: $SESSION_ID"
 echo "Agent name: $BOT_NAME"
+echo "Pi session dir: $SESSION_DIR"
 WATCH_FLAG=()
 if pi --help 2>&1 | grep -q -- '--watch'; then
   WATCH_FLAG=(--watch)
@@ -97,6 +111,7 @@ set +e
 pi \
   "${WATCH_FLAG[@]}" \
   "${EXTENSION_FLAGS[@]}" \
+  --session-dir "$SESSION_DIR" \
   --append-system-prompt "$PROMPT_FILE" \
   "continue"
 status=$?
