@@ -254,6 +254,7 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
 
                 // Check for BillboardGui children
                 let billboard_gui = GameInstance::collect_billboard_gui(&data.children);
+                let attrs = attributes_to_json(&data.attributes);
 
                 entities.push(SpectatorEntity {
                     id: data.id.0 as u32,
@@ -276,6 +277,7 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
                     model_yaw_offset_deg: GameInstance::extract_model_yaw_offset_deg(
                         &data.attributes,
                     ),
+                    attributes: if attrs.is_empty() { None } else { Some(attrs) },
                     billboard_gui,
                 });
             }

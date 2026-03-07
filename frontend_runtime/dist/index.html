@@ -16,15 +16,54 @@
   </head>
   <body>
     <div id="app">
-      <header class="topbar">
-        <div>
-          <h1>Clawblox Local Runtime</h1>
-          <p id="status">Connecting...</p>
-        </div>
-        <div id="meta"></div>
-      </header>
-      <main class="stage-wrap">
+      <main class="stage-wrap" aria-label="Game viewport">
         <canvas id="stage" aria-label="Game renderer canvas"></canvas>
+        <div class="hud-layer" aria-hidden="false">
+          <button
+            id="chat-toggle"
+            class="hud-icon-button chat-toggle"
+            type="button"
+            aria-label="Open chat"
+            title="Chat"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 6.5A3.5 3.5 0 0 1 8.5 3h7A3.5 3.5 0 0 1 19 6.5v5A3.5 3.5 0 0 1 15.5 15H10l-4.25 3.3a.5.5 0 0 1-.8-.4V15.3A3.5 3.5 0 0 1 5 11.5z"/>
+            </svg>
+          </button>
+
+          <section id="chat-panel" class="chat-panel" aria-label="Chat">
+            <div class="chat-panel__header">
+              <span>Chat</span>
+            </div>
+            <div id="chat-feed" class="chat-feed" role="log" aria-live="polite" aria-relevant="additions"></div>
+            <form id="chat-form" class="chat-input-row" autocomplete="off">
+              <input
+                id="chat-input"
+                class="chat-input"
+                type="text"
+                maxlength="500"
+                placeholder="Press / to chat"
+                aria-label="Chat message"
+              />
+              <button id="chat-send" class="chat-send" type="submit">Send</button>
+            </form>
+            <div id="chat-local-status" class="chat-local-status">Read-only until you send a message.</div>
+          </section>
+
+          <aside id="player-list" class="player-list" aria-label="Connected players">
+            <div class="player-list__header">
+              <span>Players</span>
+              <span id="player-list-count" class="player-list__count">0</span>
+            </div>
+            <div id="player-list-body" class="player-list__body"></div>
+          </aside>
+
+          <div class="runtime-meta-sr" aria-hidden="true">
+            <p id="status">Connecting...</p>
+            <div id="meta"></div>
+          </div>
+
+        </div>
       </main>
     </div>
     <script type="module" src="/ui/main.js"></script>

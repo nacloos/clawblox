@@ -6,6 +6,30 @@ const API_VERSION = 1
 const statusEl = document.getElementById('status')
 const metaEl = document.getElementById('meta')
 const canvas = document.getElementById('stage')
+const chatToggleEl = document.getElementById('chat-toggle')
+const chatPanelEl = document.getElementById('chat-panel')
+const chatFeedEl = document.getElementById('chat-feed')
+const chatFormEl = document.getElementById('chat-form')
+const chatInputEl = document.getElementById('chat-input')
+const chatSendEl = document.getElementById('chat-send')
+const chatConnectionEl = document.getElementById('chat-connection')
+const chatLocalStatusEl = document.getElementById('chat-local-status')
+const playerListCountEl = document.getElementById('player-list-count')
+const playerListBodyEl = document.getElementById('player-list-body')
+
+const chatState = {
+  open: false,
+  wsConnected: false,
+  loadedHistory: false,
+  sending: false,
+  messages: [],
+  seenIds: new Set(),
+  sessionToken: null,
+  agentId: null,
+  playerName: null,
+}
+let selectedSpectatorPlayerId = null
+let latestSpectatorState = null
 
 function setStatus(text, level = 'muted') {
   statusEl.textContent = text
@@ -13,6 +37,313 @@ function setStatus(text, level = 'muted') {
   else if (level === 'warn') statusEl.style.color = 'var(--warn)'
   else if (level === 'error') statusEl.style.color = 'var(--error)'
   else statusEl.style.color = 'var(--muted)'
+}
+
+function setChatConnection(text) {
+  if (chatConnectionEl) chatConnectionEl.textContent = text
+}
+
+function renderPlayerList(players) {
+  if (!playerListBodyEl) return
+  const list = Array.isArray(players) ? [...players] : []
+  const availableIds = new Set(list.map((p) => String(p?.id || '')).filter(Boolean))
+  if (selectedSpectatorPlayerId && !availableIds.has(selectedSpectatorPlayerId)) {
+    selectedSpectatorPlayerId = null
+  }
+  list.sort((a, b) => String(a?.name || '').localeCompare(String(b?.name || '')))
+  if (playerListCountEl) playerListCountEl.textContent = String(list.length)
+  playerListBodyEl.textContent = ''
+
+  if (!list.length) {
+    const empty = document.createElement('div')
+    empty.className = 'player-list__empty'
+    empty.textContent = 'No players connected'
+    playerListBodyEl.appendChild(empty)
+    return
+  }
+
+  const overviewRow = document.createElement('button')
+  overviewRow.className = 'player-list__row'
+  overviewRow.type = 'button'
+  overviewRow.title = 'Free camera overview'
+  if (!selectedSpectatorPlayerId) {
+    overviewRow.classList.add('is-selected')
+    overviewRow.setAttribute('aria-pressed', 'true')
+  } else {
+    overviewRow.setAttribute('aria-pressed', 'false')
+  }
+  const applyOverviewSelection = () => {
+    selectedSpectatorPlayerId = null
+    renderPlayerList(players)
+    if (latestSpectatorState && window.__renderer?.onState) {
+      const nextState = prioritizeSelectedPlayer(latestSpectatorState)
+      window.__renderer.onState(nextState)
+    }
+  }
+  overviewRow.addEventListener('pointerdown', (ev) => {
+    ev.preventDefault()
+    applyOverviewSelection()
+  })
+  overviewRow.addEventListener('click', () => {
+    applyOverviewSelection()
+  })
+  const overviewName = document.createElement('div')
+  overviewName.className = 'player-list__name'
+  overviewName.textContent = 'Overview / Free camera'
+  const overviewHint = document.createElement('div')
+  overviewHint.className = 'player-list__hp'
+  overviewHint.textContent = 'WASD, drag, wheel'
+  overviewRow.append(overviewName, overviewHint)
+  playerListBodyEl.appendChild(overviewRow)
+
+  for (const player of list) {
+    const row = document.createElement('button')
+    row.className = 'player-list__row'
+    row.type = 'button'
+    row.title = 'Focus player'
+    const playerId = String(player?.id || '')
+    if (playerId && playerId === selectedSpectatorPlayerId) {
+      row.classList.add('is-selected')
+      row.setAttribute('aria-pressed', 'true')
+    } else {
+      row.setAttribute('aria-pressed', 'false')
+    }
+    const applySelection = () => {
+      selectedSpectatorPlayerId = playerId || null
+      renderPlayerList(players)
+      if (latestSpectatorState && window.__renderer?.onState) {
+        const nextState = prioritizeSelectedPlayer(latestSpectatorState)
+        window.__renderer.onState(nextState)
+      }
+    }
+    row.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault()
+      applySelection()
+    })
+    row.addEventListener('click', () => {
+      applySelection()
+    })
+
+    const name = document.createElement('div')
+    name.className = 'player-list__name'
+    name.textContent = String(player?.name || 'Player')
+
+    const hp = document.createElement('div')
+    hp.className = 'player-list__hp'
+    const health = Number(player?.health)
+    hp.textContent = Number.isFinite(health) ? `${Math.max(0, Math.round(health))} HP` : ''
+
+    row.append(name, hp)
+    playerListBodyEl.appendChild(row)
+  }
+}
+
+function prioritizeSelectedPlayer(state) {
+  if (!state) return state
+  if (!selectedSpectatorPlayerId || !Array.isArray(state.players)) {
+    if (state.selected_player_id === undefined) return state
+    return { ...state, selected_player_id: null }
+  }
+  const idx = state.players.findIndex((p) => String(p?.id || '') === selectedSpectatorPlayerId)
+  if (idx <= 0) {
+    if (state.selected_player_id === selectedSpectatorPlayerId) return state
+    return { ...state, selected_player_id: selectedSpectatorPlayerId }
+  }
+  const players = [...state.players]
+  const [selected] = players.splice(idx, 1)
+  players.unshift(selected)
+  return { ...state, players, selected_player_id: selectedSpectatorPlayerId }
+}
+
+function setChatLocalStatus(text) {
+  if (chatLocalStatusEl) chatLocalStatusEl.textContent = text
+}
+
+function updateChatSendUi() {
+  if (chatSendEl) chatSendEl.disabled = chatState.sending
+  if (chatInputEl) chatInputEl.disabled = false
+}
+
+function setChatPanelOpen(open) {
+  chatState.open = !!open
+  if (!chatPanelEl) return
+  chatPanelEl.classList.toggle('is-open', chatState.open)
+  if (chatToggleEl) {
+    chatToggleEl.setAttribute('aria-expanded', chatState.open ? 'true' : 'false')
+  }
+  if (chatState.open) renderChatFeed()
+}
+
+function makeLocalPlayerName() {
+  const key = 'clawblox_local_chat_name'
+  const existing = localStorage.getItem(key)
+  if (existing && existing.trim()) return existing.trim()
+  const generated = `Player-${Math.random().toString(36).slice(2, 6)}`
+  localStorage.setItem(key, generated)
+  return generated
+}
+
+async function ensureChatSession() {
+  if (chatState.sessionToken) return
+  const playerName = chatState.playerName || makeLocalPlayerName()
+  chatState.playerName = playerName
+  const resp = await fetch(`/join?name=${encodeURIComponent(playerName)}`, { method: 'POST' })
+  if (!resp.ok) throw new Error(`join failed: HTTP ${resp.status}`)
+  const data = await resp.json()
+  chatState.sessionToken = data.session || null
+  chatState.agentId = data.agent_id || null
+  setChatLocalStatus(`Chatting as ${playerName}`)
+}
+
+function userAtBottom(el) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 16
+}
+
+function nameColor(name) {
+  let h = 0
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0
+  const hue = h % 360
+  return `hsl(${hue}deg 70% 75%)`
+}
+
+function appendChatMessage(msg) {
+  const id = String(msg?.id || '')
+  if (!id || chatState.seenIds.has(id)) return
+  chatState.seenIds.add(id)
+  chatState.messages.push(msg)
+  if (chatState.messages.length > 200) {
+    const removed = chatState.messages.splice(0, chatState.messages.length - 200)
+    for (const item of removed) chatState.seenIds.delete(String(item.id || ''))
+  }
+  renderChatFeed()
+}
+
+function renderChatFeed() {
+  if (!chatFeedEl) return
+  const shouldStick = userAtBottom(chatFeedEl)
+  chatFeedEl.textContent = ''
+  if (!chatState.messages.length) {
+    const empty = document.createElement('div')
+    empty.className = 'chat-message chat-message--system'
+    empty.textContent = 'No messages yet.'
+    chatFeedEl.appendChild(empty)
+  } else {
+    for (const msg of chatState.messages) {
+      const row = document.createElement('div')
+      row.className = 'chat-message'
+
+      const meta = document.createElement('span')
+      meta.className = 'chat-message__meta'
+
+      const name = document.createElement('span')
+      name.className = 'chat-message__name'
+      name.textContent = String(msg.agent_name || 'Player')
+      name.style.color = nameColor(name.textContent)
+
+      const time = document.createElement('span')
+      time.className = 'chat-message__time'
+      const dt = new Date(String(msg.created_at || ''))
+      time.textContent = Number.isFinite(dt.getTime())
+        ? dt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+        : ''
+
+      const body = document.createElement('span')
+      body.textContent = String(msg.content || '')
+
+      meta.append(name, time)
+      row.append(meta, body)
+      chatFeedEl.appendChild(row)
+    }
+  }
+  if (shouldStick) chatFeedEl.scrollTop = chatFeedEl.scrollHeight
+}
+
+async function loadChatHistory() {
+  try {
+    const resp = await fetch('/chat/messages?limit=50')
+    if (!resp.ok) throw new Error(`history HTTP ${resp.status}`)
+    const data = await resp.json()
+    const messages = Array.isArray(data?.messages) ? data.messages : []
+    for (const msg of messages) appendChatMessage(msg)
+    chatState.loadedHistory = true
+  } catch (err) {
+    console.error(err)
+    setChatLocalStatus('Failed to load chat history')
+  }
+}
+
+async function sendChatMessage(text) {
+  const content = String(text || '').trim()
+  if (!content) return
+  chatState.sending = true
+  updateChatSendUi()
+  try {
+    await ensureChatSession()
+    const resp = await fetch('/chat', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Session': chatState.sessionToken,
+      },
+      body: JSON.stringify({ content }),
+    })
+    if (!resp.ok) throw new Error(`chat send failed: HTTP ${resp.status}`)
+    if (chatInputEl) chatInputEl.value = ''
+    setChatLocalStatus(`Chatting as ${chatState.playerName}`)
+  } catch (err) {
+    console.error(err)
+    setChatLocalStatus(err instanceof Error ? err.message : 'Failed to send chat')
+  } finally {
+    chatState.sending = false
+    updateChatSendUi()
+  }
+}
+
+if (chatToggleEl) {
+  chatToggleEl.addEventListener('click', () => {
+    setChatPanelOpen(!chatState.open)
+    if (chatState.open && chatInputEl) chatInputEl.focus()
+  })
+}
+
+if (chatFormEl) {
+  chatFormEl.addEventListener('submit', (ev) => {
+    ev.preventDefault()
+    void sendChatMessage(chatInputEl?.value || '')
+  })
+}
+
+window.addEventListener('keydown', (ev) => {
+  const target = ev.target
+  const isTextField = target instanceof HTMLElement && (
+    target.tagName === 'INPUT' ||
+    target.tagName === 'TEXTAREA' ||
+    target.isContentEditable
+  )
+
+  if (ev.key === '/' && !isTextField) {
+    ev.preventDefault()
+    setChatPanelOpen(true)
+    chatInputEl?.focus()
+    return
+  }
+
+  if (ev.key === 'Escape' && chatState.open) {
+    if (document.activeElement === chatInputEl) {
+      chatInputEl.blur()
+    } else {
+      setChatPanelOpen(false)
+    }
+  }
+})
+
+updateChatSendUi()
+renderChatFeed()
+setChatLocalStatus('Read-only until you send a message.')
+setChatConnection('Connecting...')
+
+if (!chatState.open) {
+  setChatPanelOpen(false)
 }
 
 function resizeCanvas() {
@@ -508,9 +839,22 @@ async function bootstrap() {
   ws.binaryType = 'arraybuffer'
   spectateWs = ws
 
-  ws.onopen = () => setStatus(`Connected | ${rendererTarget}`, 'ok')
-  ws.onerror = () => setStatus('WebSocket error', 'error')
-  ws.onclose = () => setStatus('Disconnected', 'warn')
+  ws.onopen = () => {
+    chatState.wsConnected = true
+    setChatConnection('Live')
+    setStatus(`Connected | ${rendererTarget}`, 'ok')
+    if (!chatState.loadedHistory) void loadChatHistory()
+  }
+  ws.onerror = () => {
+    setChatConnection('WS error')
+    setStatus('WebSocket error', 'error')
+  }
+  ws.onclose = () => {
+    chatState.wsConnected = false
+    setChatConnection('Offline')
+    setStatus('Disconnected', 'warn')
+    renderPlayerList([])
+  }
 
   ws.onmessage = (event) => {
     try {
@@ -525,14 +869,24 @@ async function bootstrap() {
         onAudioChunk(data)
         return
       }
+      if (data && data.type === 'chat_message') {
+        appendChatMessage(data)
+        return
+      }
+      if (data && typeof data.type === 'string') {
+        return
+      }
       const state = data
       if (state && state.error) {
         setStatus(state.error, 'error')
         return
       }
+      latestSpectatorState = state
       wsStats.frames += 1
       if (typeof state?.tick === 'number') wsStats.lastTick = state.tick
-      if (renderer.onState) renderer.onState(state)
+      renderPlayerList(state?.players)
+      const rendererState = prioritizeSelectedPlayer(state)
+      if (renderer.onState) renderer.onState(rendererState)
     } catch (error) {
       console.error(error)
       setStatus('Failed to parse spectator state', 'error')

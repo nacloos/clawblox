@@ -14,12 +14,13 @@ use dashmap::DashMap;
 use flate2::{write::GzEncoder, Compression};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use chrono::{SecondsFormat, Utc};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1653,6 +1654,7 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore, r
         let (speech_tx, _) = broadcast::channel::<SpeechEvent>(64);
         let (speech_progress_tx, _) = broadcast::channel::<SpeechProgressEvent>(128);
         let (playback_done_tx, _) = broadcast::channel::<PlaybackDoneEvent>(64);
+        let (chat_tx, _) = broadcast::channel::<LocalChatMessage>(128);
         let state = LocalState {
             game_id,
             instance_id,
@@ -1666,12 +1668,14 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore, r
             speech_tx,
             speech_progress_tx,
             playback_done_tx,
+            chat_tx,
             playback_done_seq: Arc::new(Mutex::new(0)),
             speech_seq: Arc::new(Mutex::new(0)),
             speech_progress_seq: Arc::new(Mutex::new(0)),
             authoritative_speech_event_cursor: Arc::new(Mutex::new(0)),
             audio_streams: Arc::new(Mutex::new(HashMap::new())),
             audio_speech_text: Arc::new(Mutex::new(HashMap::new())),
+            chat_state: Arc::new(Mutex::new(LocalChatState::default())),
             recording_writer: recording_writer.clone(),
         };
 
@@ -1720,6 +1724,8 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore, r
             .route("/observe", get(local_observe))
             .route("/skill.md", get(local_skill))
             .route("/audio", post(local_audio))
+            .route("/chat", post(local_chat))
+            .route("/chat/messages", get(local_chat_messages))
             .nest_service("/renderer-files", ServeDir::new(path.join("renderer")))
             .nest_service("/assets", ServeDir::new(path.join("assets")))
             .nest_service("/static", ServeDir::new(path.join("static")))
@@ -1739,6 +1745,8 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore, r
         println!("  POST /join?name=X  - Join game, returns session token");
         println!("  POST /input        - Send input (requires X-Session header)");
         println!("  GET  /observe      - Player observation (requires X-Session header)");
+        println!("  POST /chat         - Send chat message (requires X-Session header)");
+        println!("  GET  /chat/messages - List local chat messages");
         println!("  GET  /skill.md     - Game skill definition");
 
         let listener = tokio::net::TcpListener::bind(addr)
@@ -2255,6 +2263,29 @@ struct PlaybackDoneEvent {
     seq: u64,
 }
 
+#[derive(Deserialize)]
+struct ChatPostRequest {
+    content: String,
+}
+
+#[derive(Serialize)]
+struct ChatPostResponse {
+    id: String,
+    created_at: String,
+}
+
+#[derive(Deserialize)]
+struct ChatMessagesQuery {
+    instance_id: Option<Uuid>,
+    after: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct ChatMessagesResponse {
+    messages: Vec<LocalChatMessage>,
+}
+
 #[derive(Clone, Debug)]
 struct AudioStreamState {
     agent_id: Uuid,
@@ -2272,6 +2303,61 @@ struct AudioStreamState {
     playback_speed: f32,
 }
 
+const LOCAL_CHAT_MAX_MESSAGES: usize = 1000;
+const LOCAL_CHAT_DEFAULT_LIMIT: usize = 50;
+const LOCAL_CHAT_MAX_LIMIT: usize = 100;
+
+#[derive(Clone, Debug, Serialize)]
+struct LocalChatMessage {
+    id: String,
+    instance_id: Uuid,
+    agent_id: Uuid,
+    agent_name: String,
+    message_type: String,
+    content: String,
+    created_at: String,
+}
+
+#[derive(Debug, Default)]
+struct LocalChatState {
+    next_seq: u64,
+    messages: VecDeque<LocalChatMessage>,
+}
+
+impl LocalChatState {
+    fn push(&mut self, instance_id: Uuid, agent_id: Uuid, agent_name: String, content: String) -> LocalChatMessage {
+        self.next_seq = self.next_seq.saturating_add(1);
+        let msg = LocalChatMessage {
+            id: format!("local_{}", self.next_seq),
+            instance_id,
+            agent_id,
+            agent_name,
+            message_type: "text".to_string(),
+            content,
+            created_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        };
+        self.messages.push_back(msg.clone());
+        while self.messages.len() > LOCAL_CHAT_MAX_MESSAGES {
+            self.messages.pop_front();
+        }
+        msg
+    }
+
+    fn list(&self, instance_id: Uuid, after: Option<&str>, limit: usize) -> Vec<LocalChatMessage> {
+        self.messages
+            .iter()
+            .filter(|m| m.instance_id == instance_id)
+            .filter(|m| after.map(|a| m.created_at.as_str() > a).unwrap_or(true))
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    }
+}
+
 #[derive(Clone)]
 struct LocalState {
     game_id: Uuid,
@@ -2286,6 +2372,7 @@ struct LocalState {
     speech_tx: broadcast::Sender<SpeechEvent>,
     speech_progress_tx: broadcast::Sender<SpeechProgressEvent>,
     playback_done_tx: broadcast::Sender<PlaybackDoneEvent>,
+    chat_tx: broadcast::Sender<LocalChatMessage>,
     playback_done_seq: Arc<Mutex<u64>>,
     speech_seq: Arc<Mutex<u64>>,
     speech_progress_seq: Arc<Mutex<u64>>,
@@ -2294,6 +2381,7 @@ struct LocalState {
     audio_streams: Arc<Mutex<HashMap<String, AudioStreamState>>>,
     /// Maps stream_id -> speech text for broadcasting on AudioEnded
     audio_speech_text: Arc<Mutex<HashMap<String, String>>>,
+    chat_state: Arc<Mutex<LocalChatState>>,
     /// Session recording writer (None if not recording). Kept alive via Arc.
     #[allow(dead_code)]
     recording_writer: Option<Arc<tokio::sync::Mutex<recording::RecordingWriter>>>,
@@ -2860,6 +2948,66 @@ async fn local_audio(
     Ok(axum::http::StatusCode::OK)
 }
 
+async fn local_chat(
+    State(state): State<LocalState>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<ChatPostRequest>,
+) -> Result<Json<ChatPostResponse>, (axum::http::StatusCode, String)> {
+    if let Some(err) = check_halted(&state) {
+        return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
+    }
+
+    let (agent_id, agent_name) = get_session(&state, &headers)?;
+    let content = body.content.trim();
+    if content.is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "content must be 1-500 non-whitespace characters".to_string(),
+        ));
+    }
+    if content.chars().count() > 500 {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "content exceeds 500 characters".to_string(),
+        ));
+    }
+
+    let msg = {
+        let mut chat = state.chat_state.lock().unwrap();
+        chat.push(state.instance_id, agent_id, agent_name, content.to_string())
+    };
+
+    let _ = state.chat_tx.send(msg.clone());
+
+    Ok(Json(ChatPostResponse {
+        id: msg.id,
+        created_at: msg.created_at,
+    }))
+}
+
+async fn local_chat_messages(
+    State(state): State<LocalState>,
+    Query(query): Query<ChatMessagesQuery>,
+) -> Result<Json<ChatMessagesResponse>, (axum::http::StatusCode, String)> {
+    if let Some(err) = check_halted(&state) {
+        return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
+    }
+
+    let instance_id = query.instance_id.unwrap_or(state.instance_id);
+    let limit = query
+        .limit
+        .unwrap_or(LOCAL_CHAT_DEFAULT_LIMIT)
+        .clamp(1, LOCAL_CHAT_MAX_LIMIT);
+    let after = query.after.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+    let messages = {
+        let chat = state.chat_state.lock().unwrap();
+        chat.list(instance_id, after, limit)
+    };
+
+    Ok(Json(ChatMessagesResponse { messages }))
+}
+
 #[derive(Deserialize)]
 struct InputRequest {
     #[serde(rename = "type")]
@@ -3118,6 +3266,7 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState, role: Spectate
     let mut speech_rx = state.speech_tx.subscribe();
     let mut speech_progress_rx = state.speech_progress_tx.subscribe();
     let mut playback_done_rx = state.playback_done_tx.subscribe();
+    let mut chat_rx = state.chat_tx.subscribe();
 
     let mut tick_interval = interval(Duration::from_millis(33));
     let mut last_tick: u64 = 0;
@@ -3192,6 +3341,24 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState, role: Spectate
                         "speaker": event.speaker,
                         "stream_id": event.stream_id,
                         "seq": event.seq,
+                    })).unwrap_or_default();
+                    if sender.send(Message::Text(json.into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+
+            chat = chat_rx.recv() => {
+                if let Ok(chat) = chat {
+                    let json = serde_json::to_string(&serde_json::json!({
+                        "type": "chat_message",
+                        "id": chat.id,
+                        "instance_id": chat.instance_id,
+                        "agent_id": chat.agent_id,
+                        "agent_name": chat.agent_name,
+                        "message_type": chat.message_type,
+                        "content": chat.content,
+                        "created_at": chat.created_at,
                     })).unwrap_or_default();
                     if sender.send(Message::Text(json.into())).await.is_err() {
                         break;

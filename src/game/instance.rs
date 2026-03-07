@@ -1910,6 +1910,8 @@ pub struct SpectatorEntity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_yaw_offset_deg: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<std::collections::HashMap<String, serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub billboard_gui: Option<BillboardGuiJson>,
 }
 
