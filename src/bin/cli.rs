@@ -24,7 +24,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
+use tokio::task::JoinHandle;
 use tokio::time::interval;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
@@ -1680,31 +1681,43 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore, r
         };
 
         // Spawn recording task if recording is enabled
+        let mut recording_shutdown_tx = None;
+        let mut recording_task: Option<JoinHandle<()>> = None;
         if let Some(ref writer) = recording_writer {
             let writer = writer.clone();
             let game_handle = state.game_handle.clone();
             let instance_id = state.instance_id;
-            tokio::spawn(async move {
+            let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+            recording_shutdown_tx = Some(shutdown_tx);
+            recording_task = Some(tokio::spawn(async move {
                 let mut tick_interval = interval(Duration::from_millis(16));
                 let mut last_tick: u64 = 0;
                 let start = Instant::now();
                 loop {
-                    tick_interval.tick().await;
-                    let obs = game::get_spectator_observation_for_instance(&game_handle, instance_id);
-                    match obs {
-                        Ok(mut obs) => {
-                            if obs.tick != last_tick {
-                                resolve_local_spectator_assets(&mut obs);
-                                let time_ms = start.elapsed().as_millis() as u64;
-                                let mut w = writer.lock().await;
-                                w.record_tick(obs.tick, time_ms, &obs).await;
-                                last_tick = obs.tick;
+                    tokio::select! {
+                        _ = shutdown_rx.changed() => {
+                            if *shutdown_rx.borrow() {
+                                break;
                             }
                         }
-                        Err(_) => break,
+                        _ = tick_interval.tick() => {
+                            let obs = game::get_spectator_observation_for_instance(&game_handle, instance_id);
+                            match obs {
+                                Ok(mut obs) => {
+                                    if obs.tick != last_tick {
+                                        resolve_local_spectator_assets(&mut obs);
+                                        let time_ms = start.elapsed().as_millis() as u64;
+                                        let mut w = writer.lock().await;
+                                        w.record_tick(obs.tick, time_ms, &obs).await;
+                                        last_tick = obs.tick;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
                     }
                 }
-            });
+            }));
         }
 
         let cors = CorsLayer::new()
@@ -1771,6 +1784,14 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore, r
             });
 
         // Finalize recording on shutdown
+        if let Some(shutdown_tx) = recording_shutdown_tx {
+            let _ = shutdown_tx.send(true);
+        }
+        if let Some(task) = recording_task {
+            if let Err(err) = task.await {
+                eprintln!("Warning: recording task join failed: {}", err);
+            }
+        }
         if let Some(writer) = recording_writer {
             let mut w = writer.lock().await;
             w.close(0, 0).await;
