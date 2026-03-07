@@ -142,7 +142,7 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             .physics
             .get_character_walk_speed(hrp_id)
             .unwrap_or(consts::WALK_SPEED);
-        let gravity = instance.physics.gravity.y;
+        let gravity = instance.physics.gravity.y * consts::CHARACTER_GRAVITY_MULTIPLIER;
         let controller_config = ControllerManagerConfig {
             ground_query_distance: consts::CHARACTER_GROUND_QUERY_DISTANCE,
             platform_stick_distance: consts::CHARACTER_PLATFORM_STICK_DISTANCE,

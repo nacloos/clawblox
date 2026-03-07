@@ -138,8 +138,8 @@ local function setupPlayer(player)
 
     if humanoid then
         humanoid.WalkSpeed = 16
-        -- humanoid.JumpPower = 50
-        humanoid.JumpPower = 5
+        humanoid.JumpPower = 50
+        -- humanoid.JumpPower = 5
     end
 
     if character then

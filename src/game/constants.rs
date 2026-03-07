@@ -27,6 +27,10 @@ pub mod physics {
     /// Character controller autostep min width (very small for platform edges)
     pub const AUTOSTEP_MIN_WIDTH: f32 = 0.01;
 
+    /// Multiplier applied to world gravity for character controllers.
+    /// Characters feel heavier than dynamic objects (blocks) at the same gravity.
+    pub const CHARACTER_GRAVITY_MULTIPLIER: f32 = 20.0;
+
     /// Character controller snap to ground distance
     pub const SNAP_TO_GROUND: f32 = 0.2;
 
