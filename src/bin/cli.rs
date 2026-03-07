@@ -74,7 +74,7 @@ impl LocalDatastore {
 
 #[derive(Parser)]
 #[command(name = "clawblox")]
-#[command(about = "Clawblox game engine CLI", long_about = None)]
+#[command(about = "Clawblox game engine CLI", long_about = None, version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
