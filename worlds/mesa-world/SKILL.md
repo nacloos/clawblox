@@ -15,18 +15,11 @@
 The player observation includes:
 
 - `HoldingBlock`: `true` when the player is carrying a block.
-- `HeldBlockColor`: The carried block color name (`Sand` or `Slate`), or `""`.
-- `BlockSize`: The block edge length in studs (`0.75`).
+- `HeldBlockColor`: The carried block color name.
+- `BlockSize`: The block edge length in studs.
 - `PickupRange`: Max pickup reach in studs.
 - `PlaceRange`: Max placement reach in studs.
 - `LastBlockAction`: Last pickup/place result string such as `PickupSuccess` or `PlaceFailed:OutOfRange`.
-
-## World Entity Attributes
-
-Each block entity includes:
-
-- `IsPickupBlock`: `true`
-- `BlockColorName`: `Sand` or `Slate`
 
 ## API Endpoints
 
