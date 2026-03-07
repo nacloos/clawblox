@@ -385,7 +385,7 @@ impl RecordingReader {
         let opts = SqliteConnectOptions::new()
             .filename(path)
             .read_only(true)
-            .journal_mode(SqliteJournalMode::Wal);
+            .immutable(true);
 
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
