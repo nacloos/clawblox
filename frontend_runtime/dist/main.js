@@ -174,40 +174,6 @@ function renderPlayerList(players) {
     return
   }
 
-  const overviewRow = document.createElement('button')
-  overviewRow.className = 'player-list__row'
-  overviewRow.type = 'button'
-  overviewRow.title = 'Free camera overview'
-  if (!selectedSpectatorPlayerId) {
-    overviewRow.classList.add('is-selected')
-    overviewRow.setAttribute('aria-pressed', 'true')
-  } else {
-    overviewRow.setAttribute('aria-pressed', 'false')
-  }
-  const applyOverviewSelection = () => {
-    selectedSpectatorPlayerId = null
-    renderPlayerList(players)
-    if (latestSpectatorState && window.__renderer?.onState) {
-      const nextState = prioritizeSelectedPlayer(latestSpectatorState)
-      window.__renderer.onState(nextState)
-    }
-  }
-  overviewRow.addEventListener('pointerdown', (ev) => {
-    ev.preventDefault()
-    applyOverviewSelection()
-  })
-  overviewRow.addEventListener('click', () => {
-    applyOverviewSelection()
-  })
-  const overviewName = document.createElement('div')
-  overviewName.className = 'player-list__name'
-  overviewName.textContent = 'Overview / Free camera'
-  const overviewHint = document.createElement('div')
-  overviewHint.className = 'player-list__hp'
-  overviewHint.textContent = 'WASD, drag, wheel'
-  overviewRow.append(overviewName, overviewHint)
-  playerListBodyEl.appendChild(overviewRow)
-
   for (const player of list) {
     const row = document.createElement('button')
     row.className = 'player-list__row'
@@ -221,7 +187,7 @@ function renderPlayerList(players) {
       row.setAttribute('aria-pressed', 'false')
     }
     const applySelection = () => {
-      selectedSpectatorPlayerId = playerId || null
+      selectedSpectatorPlayerId = playerId && playerId === selectedSpectatorPlayerId ? null : (playerId || null)
       renderPlayerList(players)
       if (latestSpectatorState && window.__renderer?.onState) {
         const nextState = prioritizeSelectedPlayer(latestSpectatorState)
@@ -243,7 +209,10 @@ function renderPlayerList(players) {
     const hp = document.createElement('div')
     hp.className = 'player-list__hp'
     const health = Number(player?.health)
-    hp.textContent = Number.isFinite(health) ? `${Math.max(0, Math.round(health))} HP` : ''
+    const healthText = Number.isFinite(health) ? `${Math.max(0, Math.round(health))} HP` : ''
+    hp.textContent = playerId && playerId === selectedSpectatorPlayerId
+      ? (healthText ? `${healthText} | click again for free camera` : 'Click again for free camera')
+      : healthText
 
     row.append(name, hp)
     playerListBodyEl.appendChild(row)

@@ -194,6 +194,14 @@ export function createRenderer(ctx) {
   const clouds = buildClouds(scene)
 
   const stateBuffer = ctx.runtime.state.createSnapshotBuffer({ maxSnapshots: 8, interpolationDelayMs: 100 })
+  const cameraModes = ctx.runtime.three.createCameraModeController(THREE, camera, {
+    canvas: ctx.canvas,
+    stateBuffer,
+    debugCamera: false,
+    follow: { followDistance: 20, followHeight: 6, shoulderOffset: 0 },
+    spectatorOffset: new THREE.Vector3(0, 18, -18),
+    spectatorBoundsPadding: 8,
+  })
   const entityObjects = new Map()
   const modelController = ctx.runtime.three.createModelEntityController(THREE, {
     onError(err, meta) {
@@ -201,20 +209,30 @@ export function createRenderer(ctx) {
     },
   })
 
-  let followTargetPos = new THREE.Vector3(0, 4, 0)
-  let camPos = new THREE.Vector3(0, 15, -20)
-  let camTarget = new THREE.Vector3(0, 2, 0)
+  const tmpForward = new THREE.Vector3(0, 0, 1)
+  const anchorPos = new THREE.Vector3(0, 4, 0)
   const clock = new THREE.Clock()
 
-  function updateCamera() {
-    const tp = followTargetPos
-    const ideal = new THREE.Vector3(tp.x, tp.y + 12, tp.z - 20)
-    camPos.lerp(ideal, 0.05)
-    camera.position.copy(camPos)
-    camTarget.lerp(tp.clone().add(new THREE.Vector3(0, 2, 0)), 0.08)
-    camera.lookAt(camTarget)
-    dirLight.position.set(tp.x + 30, 50, tp.z + 20)
-    dirLight.target.position.copy(tp)
+  function computeAnchorPosition(obs) {
+    let count = 0
+    let sumX = 0
+    let sumY = 0
+    let sumZ = 0
+    const pushPos = (pos) => {
+      if (!Array.isArray(pos)) return
+      const x = Number(pos[0])
+      const y = Number(pos[1])
+      const z = Number(pos[2])
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return
+      sumX += x
+      sumY += y
+      sumZ += z
+      count += 1
+    }
+    for (const player of obs.players || []) pushPos(player?.position)
+    for (const entity of obs.entities || []) pushPos(entity?.position)
+    if (count === 0) return anchorPos.clone()
+    return new THREE.Vector3(sumX / count, sumY / count, sumZ / count)
   }
 
   function updateScene(obs, dt) {
@@ -276,10 +294,26 @@ export function createRenderer(ctx) {
     }
 
     const players = obs.players || []
-    if (players.length > 0) {
-      const target = players[0]
-      followTargetPos.set(target.position[0], target.position[1], target.position[2])
-    }
+    const selectedId = obs && obs.selected_player_id ? String(obs.selected_player_id) : null
+    const selectedTarget = selectedId
+      ? players.find((player) => String(player?.id || '') === selectedId)
+      : null
+    const followTarget = selectedTarget || null
+    const cameraTarget = followTarget && Array.isArray(followTarget.position)
+      ? new THREE.Vector3(followTarget.position[0], followTarget.position[1], followTarget.position[2])
+      : computeAnchorPosition(obs)
+    const cameraMode = followTarget ? 'follow' : 'spectator'
+
+    anchorPos.copy(cameraTarget)
+    cameraModes.update({
+      mode: cameraMode,
+      targetPosition: cameraTarget,
+      targetForward: tmpForward,
+      dt,
+    })
+
+    dirLight.position.set(cameraTarget.x + 30, 50, cameraTarget.z + 20)
+    dirLight.target.position.copy(cameraTarget)
   }
 
   return {
@@ -295,11 +329,11 @@ export function createRenderer(ctx) {
       const dt = Math.min(clock.getDelta(), 0.05)
       updateClouds(clouds, dt)
       updateScene(obs, dt)
-      updateCamera()
       renderer.render(scene, camera)
     },
 
     unmount() {
+      if (cameraModes?.dispose) cameraModes.dispose()
       for (const obj of entityObjects.values()) scene.remove(obj)
       entityObjects.clear()
       modelController.clear()

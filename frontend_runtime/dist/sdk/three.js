@@ -295,7 +295,7 @@ export function createCameraModeController(THREE, camera, options = {}) {
     panSpeed: options.overviewPanSpeed ?? 55,
     zoomSpeed: options.overviewZoomSpeed ?? 0.001,
     minZoom: options.minOverviewZoom ?? 0.2,
-    maxZoom: options.maxOverviewZoom ?? 1.8,
+    maxZoom: options.maxOverviewZoom ?? 3.2,
     touchPanSpeed: options.touchPanSpeed ?? 0.08,
     boundsPadding: options.spectatorBoundsPadding ?? -5,
   }
@@ -383,8 +383,8 @@ export function createCameraModeController(THREE, camera, options = {}) {
   function panByScreenDelta(dx, dy) {
     const scale = overviewCfg.touchPanSpeed * controlsState.zoom
     const before = { x: controlsState.pan.x, z: controlsState.pan.z }
-    controlsState.pan.x -= dx * scale
-    controlsState.pan.z -= dy * scale
+    controlsState.pan.x += dx * scale
+    controlsState.pan.z += dy * scale
     clampPanToBounds()
     dbg('panByScreenDelta', { dx, dy, scale, before, after: { x: controlsState.pan.x, z: controlsState.pan.z } })
   }
@@ -600,8 +600,8 @@ export function createCameraModeController(THREE, camera, options = {}) {
           direction.normalize()
           const step = (overviewCfg.panSpeed * controlsState.zoom) * dtSafe
           const before = { x: controlsState.pan.x, z: controlsState.pan.z }
-          controlsState.pan.x += direction.x * step
-          controlsState.pan.z += direction.z * step
+          controlsState.pan.x -= direction.x * step
+          controlsState.pan.z -= direction.z * step
           clampPanToBounds()
           dbg('keyboardPan', { step, before, after: { x: controlsState.pan.x, z: controlsState.pan.z }, keys: [...controlsState.keys] })
         }
