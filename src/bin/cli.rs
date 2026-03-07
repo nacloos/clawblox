@@ -36,6 +36,7 @@ use tower_http::services::ServeDir;
 
 use clawblox::{
     db,
+    recording,
     game::{
         constants::audio::{
             DEFAULT_BYTES_PER_SAMPLE, DEFAULT_CHANNELS, DEFAULT_PLAYBACK_SPEED,
@@ -101,6 +102,23 @@ enum Commands {
         /// Datastore backend for local DataStoreService
         #[arg(long, value_enum, default_value_t = LocalDatastore::Sqlite)]
         datastore: LocalDatastore,
+        /// Record session to a .clawrec file for later replay
+        #[arg(long)]
+        record: bool,
+    },
+    /// Replay a recorded session
+    Replay {
+        /// Path to .clawrec recording file
+        file: PathBuf,
+        /// Playback speed multiplier
+        #[arg(long, default_value = "1.0")]
+        speed: f32,
+        /// Port to run the replay server on
+        #[arg(short, long, default_value = "8080")]
+        port: u16,
+        /// Override the world directory (for serving assets)
+        #[arg(long)]
+        world_dir: Option<PathBuf>,
     },
     /// Start a game locally in background (daemon mode)
     Start {
@@ -167,7 +185,14 @@ fn main() {
             port,
             daemon,
             datastore,
-        } => run_game(path, port, daemon, datastore),
+            record,
+        } => run_game(path, port, daemon, datastore, record),
+        Commands::Replay {
+            file,
+            speed,
+            port,
+            world_dir,
+        } => run_replay(file, speed, port, world_dir),
         Commands::Start {
             path,
             port,
@@ -1183,6 +1208,17 @@ struct LocalRendererManifest {
     capabilities: Vec<String>,
 }
 
+fn default_renderer_manifest() -> LocalRendererManifest {
+    LocalRendererManifest {
+        schema_version: 1,
+        api_version: 1,
+        name: String::new(),
+        mode: "none".to_string(),
+        entry_url: None,
+        capabilities: Vec::new(),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct RendererPackageJson {
     #[serde(default)]
@@ -1449,7 +1485,7 @@ fn maybe_build_renderer_package(
     })
 }
 
-fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
+fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore, record: bool) {
     let path = std::fs::canonicalize(&path).unwrap_or_else(|_| {
         eprintln!("Error: Path '{}' does not exist", path.display());
         std::process::exit(1);
@@ -1588,6 +1624,31 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
     // Start HTTP server
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
+        let recording_writer = if record {
+            let rec_dir = path.join("recordings");
+            let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+            let rec_path = rec_dir.join(format!("{}.clawrec", timestamp));
+            match recording::RecordingWriter::create(
+                &rec_path,
+                &config.name,
+                &path.to_string_lossy(),
+                60,
+            )
+            .await
+            {
+                Ok(writer) => {
+                    println!("Recording to: {}", rec_path.display());
+                    Some(Arc::new(tokio::sync::Mutex::new(writer)))
+                }
+                Err(e) => {
+                    eprintln!("Warning: failed to start recording: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let (audio_tx, _) = broadcast::channel::<AudioChunk>(64);
         let (speech_tx, _) = broadcast::channel::<SpeechEvent>(64);
         let (speech_progress_tx, _) = broadcast::channel::<SpeechProgressEvent>(128);
@@ -1596,6 +1657,7 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
             game_id,
             instance_id,
             game_handle,
+            started_at: Instant::now(),
             skill_md,
             renderer_manifest,
             sessions: Arc::new(DashMap::new()),
@@ -1610,7 +1672,36 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
             authoritative_speech_event_cursor: Arc::new(Mutex::new(0)),
             audio_streams: Arc::new(Mutex::new(HashMap::new())),
             audio_speech_text: Arc::new(Mutex::new(HashMap::new())),
+            recording_writer: recording_writer.clone(),
         };
+
+        // Spawn recording task if recording is enabled
+        if let Some(ref writer) = recording_writer {
+            let writer = writer.clone();
+            let game_handle = state.game_handle.clone();
+            let instance_id = state.instance_id;
+            tokio::spawn(async move {
+                let mut tick_interval = interval(Duration::from_millis(16));
+                let mut last_tick: u64 = 0;
+                let start = Instant::now();
+                loop {
+                    tick_interval.tick().await;
+                    let obs = game::get_spectator_observation_for_instance(&game_handle, instance_id);
+                    match obs {
+                        Ok(mut obs) => {
+                            if obs.tick != last_tick {
+                                resolve_local_spectator_assets(&mut obs);
+                                let time_ms = start.elapsed().as_millis() as u64;
+                                let mut w = writer.lock().await;
+                                w.record_tick(obs.tick, time_ms, &obs).await;
+                                last_tick = obs.tick;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
 
         let cors = CorsLayer::new()
             .allow_origin(Any)
@@ -1671,9 +1762,244 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
                 eprintln!("Server error: {}", e);
             });
 
+        // Finalize recording on shutdown
+        if let Some(writer) = recording_writer {
+            let mut w = writer.lock().await;
+            w.close(0, 0).await;
+            eprintln!("Recording saved.");
+        }
+
         // Also clean up here in case shutdown_signal didn't fire
         delete_pid_file(&pid_file);
     });
+}
+
+fn run_replay(file: PathBuf, speed: f32, port: u16, world_dir_override: Option<PathBuf>) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let reader = recording::RecordingReader::open(&file).await.unwrap_or_else(|e| {
+            eprintln!("Error: failed to open recording: {}", e);
+            std::process::exit(1);
+        });
+        let meta = reader.meta().await.unwrap_or_else(|e| {
+            eprintln!("Error: failed to read recording metadata: {}", e);
+            std::process::exit(1);
+        });
+
+        let world_dir = world_dir_override
+            .unwrap_or_else(|| PathBuf::from(&meta.world_dir));
+        if !world_dir.is_dir() {
+            eprintln!(
+                "Warning: world directory '{}' not found. Asset serving may fail. Use --world-dir to override.",
+                world_dir.display()
+            );
+        }
+
+        println!("Replaying: {}", file.display());
+        println!("World: {} ({})", meta.world_name, world_dir.display());
+        println!("Duration: {:.1}s, {} ticks", meta.duration_ms as f64 / 1000.0, meta.total_ticks);
+
+        let reader = Arc::new(reader);
+        let playback = Arc::new(tokio::sync::Mutex::new(ReplayPlayback {
+            current_tick: 0,
+            speed,
+            paused: false,
+            total_ticks: meta.total_ticks,
+            tick_rate: meta.tick_rate,
+        }));
+
+        // Load renderer manifest from world_dir
+        let renderer_manifest = {
+            let world_toml_path = world_dir.join("world.toml");
+            if world_toml_path.exists() {
+                let cfg = clawblox::config::WorldConfig::from_game_dir(&world_dir).ok();
+                cfg.map(|c| maybe_build_renderer_package(&world_dir, &c.renderer).ok())
+                    .flatten()
+                    .unwrap_or_else(default_renderer_manifest)
+            } else {
+                default_renderer_manifest()
+            }
+        };
+
+        let replay_state = ReplayState {
+            reader: reader.clone(),
+            playback: playback.clone(),
+            renderer_manifest,
+        };
+
+        let cors = CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any);
+
+        let app = Router::new()
+            .route("/", get(local_ui_index))
+            .route("/ui", get(local_ui_index))
+            .route("/ui/{*path}", get(local_ui_file))
+            .route("/spectate/ws", get(replay_spectate_ws))
+            .route("/renderer/manifest", get(replay_renderer_manifest))
+            .route("/replay/info", get(replay_info))
+            .route("/replay/seek", post(replay_seek))
+            .route("/replay/speed", post(replay_speed))
+            .route("/replay/pause", post(replay_pause))
+            .route("/replay/play", post(replay_play))
+            .nest_service("/renderer-files", ServeDir::new(world_dir.join("renderer")))
+            .nest_service("/assets", ServeDir::new(world_dir.join("assets")))
+            .nest_service("/static", ServeDir::new(world_dir.join("static")))
+            .with_state(replay_state)
+            .layer(cors);
+
+        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        println!("Replay server: http://localhost:{}", port);
+
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap_or_else(|e| {
+            eprintln!("Error: Port {} is already in use. Try --port <PORT>", port);
+            eprintln!("Details: {}", e);
+            std::process::exit(1);
+        });
+
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                shutdown_signal().await;
+                eprintln!("\nReplay server stopped.");
+            })
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("Server error: {}", e);
+            });
+    });
+}
+
+#[derive(Clone)]
+struct ReplayState {
+    reader: Arc<recording::RecordingReader>,
+    playback: Arc<tokio::sync::Mutex<ReplayPlayback>>,
+    renderer_manifest: LocalRendererManifest,
+}
+
+struct ReplayPlayback {
+    current_tick: u64,
+    speed: f32,
+    paused: bool,
+    total_ticks: u64,
+    tick_rate: u32,
+}
+
+async fn replay_spectate_ws(
+    State(state): State<ReplayState>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_replay_ws(socket, state))
+}
+
+async fn handle_replay_ws(socket: WebSocket, state: ReplayState) {
+    let (mut sender, mut receiver) = socket.split();
+    let mut tick_interval = interval(Duration::from_millis(33));
+    let mut fractional_ticks: f64 = 0.0;
+
+    loop {
+        tokio::select! {
+            msg = receiver.next() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        if sender.send(Message::Pong(data)).await.is_err() { break; }
+                    }
+                    _ => {}
+                }
+            }
+            _ = tick_interval.tick() => {
+                let (tick, should_advance) = {
+                    let pb = state.playback.lock().await;
+                    (pb.current_tick, !pb.paused)
+                };
+
+                if should_advance {
+                    let mut pb = state.playback.lock().await;
+                    // Advance by speed * (tick_rate / 30) ticks per 33ms frame
+                    fractional_ticks += pb.speed as f64 * (pb.tick_rate as f64 / 30.0);
+                    let advance = fractional_ticks as u64;
+                    fractional_ticks -= advance as f64;
+                    pb.current_tick = (pb.current_tick + advance).min(pb.total_ticks);
+                }
+
+                match state.reader.get_state_at(tick).await {
+                    Ok(obs) => {
+                        if let Ok(json) = serde_json::to_vec(&obs) {
+                            let msg = Message::Text(String::from_utf8_lossy(&json).into_owned().into());
+                            if sender.send(msg).await.is_err() { break; }
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+    }
+}
+
+async fn replay_renderer_manifest(State(state): State<ReplayState>) -> Json<LocalRendererManifest> {
+    Json(state.renderer_manifest)
+}
+
+#[derive(Serialize)]
+struct ReplayInfo {
+    total_ticks: u64,
+    duration_ms: u64,
+    current_tick: u64,
+    speed: f32,
+    paused: bool,
+}
+
+async fn replay_info(State(state): State<ReplayState>) -> Json<ReplayInfo> {
+    let pb = state.playback.lock().await;
+    let duration_ms = (pb.total_ticks as f64 / pb.tick_rate as f64 * 1000.0) as u64;
+    Json(ReplayInfo {
+        total_ticks: pb.total_ticks,
+        duration_ms,
+        current_tick: pb.current_tick,
+        speed: pb.speed,
+        paused: pb.paused,
+    })
+}
+
+#[derive(Deserialize)]
+struct SeekQuery {
+    tick: u64,
+}
+
+async fn replay_seek(
+    State(state): State<ReplayState>,
+    Query(q): Query<SeekQuery>,
+) -> axum::http::StatusCode {
+    let mut pb = state.playback.lock().await;
+    pb.current_tick = q.tick.min(pb.total_ticks);
+    axum::http::StatusCode::OK
+}
+
+#[derive(Deserialize)]
+struct SpeedQuery {
+    value: f32,
+}
+
+async fn replay_speed(
+    State(state): State<ReplayState>,
+    Query(q): Query<SpeedQuery>,
+) -> axum::http::StatusCode {
+    let mut pb = state.playback.lock().await;
+    pb.speed = q.value.max(0.1).min(100.0);
+    axum::http::StatusCode::OK
+}
+
+async fn replay_pause(State(state): State<ReplayState>) -> axum::http::StatusCode {
+    let mut pb = state.playback.lock().await;
+    pb.paused = true;
+    axum::http::StatusCode::OK
+}
+
+async fn replay_play(State(state): State<ReplayState>) -> axum::http::StatusCode {
+    let mut pb = state.playback.lock().await;
+    pb.paused = false;
+    axum::http::StatusCode::OK
 }
 
 fn run_external_runtime(path: PathBuf, port: u16, daemon: bool, config: &clawblox::config::WorldConfig) {
@@ -1951,6 +2277,7 @@ struct LocalState {
     game_id: Uuid,
     instance_id: Uuid,
     game_handle: GameManagerHandle,
+    started_at: Instant,
     skill_md: Option<String>,
     renderer_manifest: LocalRendererManifest,
     sessions: Arc<DashMap<String, (Uuid, String)>>, // token -> (agent_id, name)
@@ -1967,6 +2294,9 @@ struct LocalState {
     audio_streams: Arc<Mutex<HashMap<String, AudioStreamState>>>,
     /// Maps stream_id -> speech text for broadcasting on AudioEnded
     audio_speech_text: Arc<Mutex<HashMap<String, String>>>,
+    /// Session recording writer (None if not recording). Kept alive via Arc.
+    #[allow(dead_code)]
+    recording_writer: Option<Arc<tokio::sync::Mutex<recording::RecordingWriter>>>,
 }
 
 #[derive(Clone)]
@@ -2550,6 +2880,8 @@ async fn local_input(
     let (agent_id, agent_name) = get_session(&state, &headers)?;
 
     let speech_progress = extract_speech_progress_event(&input.input_type, &input.data);
+    let input_type = input.input_type.clone();
+    let input_data = input.data.clone();
 
     game::queue_input(
         &state.game_handle,
@@ -2565,6 +2897,17 @@ async fn local_input(
         .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
     resolve_local_player_assets(&mut observation);
     maybe_publish_authoritative_speech_events(&state, &observation.recent_events);
+
+    if let Some(writer) = &state.recording_writer {
+        let time_ms = state.started_at.elapsed().as_millis() as u64;
+        let tick = observation.tick;
+        let writer = writer.clone();
+        tokio::spawn(async move {
+            let w = writer.lock().await;
+            w.record_input(tick, time_ms, &agent_id, &input_type, &input_data)
+                .await;
+        });
+    }
 
     if let Some(progress) = speech_progress {
         maybe_publish_speech_progress(&state, &observation, &agent_name, progress);

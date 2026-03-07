@@ -1761,7 +1761,7 @@ pub struct GameEvent {
     pub amount: Option<i32>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SpectatorObservation {
     pub instance_id: Uuid,
     pub tick: u64,
@@ -1775,7 +1775,7 @@ pub struct SpectatorObservation {
     pub recent_events: Vec<SpectatorReplicatedEvent>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SpectatorSound {
     pub id: u32,
     pub stream_id: String,
@@ -1783,7 +1783,7 @@ pub struct SpectatorSound {
     pub is_playing: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SpectatorReplicatedEvent {
     pub id: u64,
     pub tick: u64,
@@ -1795,7 +1795,7 @@ pub struct SpectatorReplicatedEvent {
     pub target_user_id: Option<u64>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SpectatorPlayerInfo {
     pub id: Uuid,
     pub name: String,
@@ -1813,7 +1813,7 @@ pub struct SpectatorPlayerInfo {
     pub active_animations: Option<Vec<SpectatorPlayerAnimation>>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SpectatorPlayerAnimation {
     pub track_id: u64,
     pub animation_id: String,
@@ -1830,7 +1830,7 @@ pub struct SpectatorPlayerAnimation {
 }
 
 /// Serialized GUI element for frontend rendering
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GuiElement {
     pub id: u64,
     #[serde(rename = "type")]
@@ -1882,7 +1882,7 @@ pub struct GuiElement {
 }
 
 /// UDim2 serialization format
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UDim2Json {
     pub x_scale: f32,
     pub x_offset: i32,
@@ -1890,7 +1890,7 @@ pub struct UDim2Json {
     pub y_offset: i32,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SpectatorEntity {
     pub id: u32,
     #[serde(rename = "type")]
@@ -1913,7 +1913,7 @@ pub struct SpectatorEntity {
     pub billboard_gui: Option<BillboardGuiJson>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SpectatorRender {
     pub kind: String,
     pub role: String,
@@ -1933,14 +1933,14 @@ pub struct SpectatorRender {
 }
 
 /// BillboardGui serialization for 3D floating labels
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BillboardGuiJson {
     pub studs_offset: [f32; 3],
     pub always_on_top: bool,
     pub labels: Vec<BillboardLabelJson>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BillboardLabelJson {
     pub text: String,
     pub color: [f32; 3],
