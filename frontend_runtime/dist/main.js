@@ -19,7 +19,6 @@ const playerListBodyEl = document.getElementById('player-list-body')
 const replayPanelEl = document.getElementById('replay-panel')
 const replayPlayToggleEl = document.getElementById('replay-play-toggle')
 const replayPlayIconEl = document.getElementById('replay-play-icon')
-const replayPlayLabelEl = document.getElementById('replay-play-label')
 const replaySliderEl = document.getElementById('replay-slider')
 const replayTimeCurrentEl = document.getElementById('replay-time-current')
 const replayTimeTotalEl = document.getElementById('replay-time-total')
@@ -83,15 +82,13 @@ function setReplayMode(enabled) {
 }
 
 function setReplayPlayUi(paused) {
-  if (!replayPlayIconEl || !replayPlayLabelEl || !replayPlayToggleEl) return
+  if (!replayPlayIconEl || !replayPlayToggleEl) return
   if (paused) {
     replayPlayIconEl.innerHTML = '<path d="M8 5v14l11-7z"/>'
-    replayPlayLabelEl.textContent = 'Play'
     replayPlayToggleEl.setAttribute('aria-label', 'Play replay')
     replayPlayToggleEl.title = 'Play replay'
   } else {
     replayPlayIconEl.innerHTML = '<path d="M7 5h3v14H7zm7 0h3v14h-3z"/>'
-    replayPlayLabelEl.textContent = 'Pause'
     replayPlayToggleEl.setAttribute('aria-label', 'Pause replay')
     replayPlayToggleEl.title = 'Pause replay'
   }
@@ -125,7 +122,12 @@ async function fetchReplayInfo() {
 async function probeReplayMode() {
   try {
     return await fetchReplayInfo()
-  } catch (_) {
+  } catch (err) {
+    const message = String(err?.message || err || '')
+    if (!message.includes('HTTP 404')) {
+      console.error(err)
+      setStatus('Replay detection failed', 'warn')
+    }
     return null
   }
 }
@@ -996,6 +998,10 @@ async function bootstrap() {
         return
       }
       if (data && typeof data.type === 'string') {
+        if (data.type === 'replay_error') {
+          setStatus(data.message || 'Replay error', 'error')
+          console.error('[replay]', data.message || 'Replay error', data)
+        }
         return
       }
       const state = data

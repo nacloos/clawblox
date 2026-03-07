@@ -1932,7 +1932,18 @@ async fn handle_replay_ws(socket: WebSocket, state: ReplayState) {
                             if sender.send(msg).await.is_err() { break; }
                         }
                     }
-                    Err(_) => {}
+                    Err(err) => {
+                        let message = format!("Failed to load replay state at tick {}: {}", tick, err);
+                        eprintln!("{}", message);
+                        let payload = serde_json::json!({
+                            "type": "replay_error",
+                            "tick": tick,
+                            "message": message,
+                        });
+                        if sender.send(Message::Text(payload.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
                 }
             }
         }

@@ -396,14 +396,14 @@ body {
 }
 
 .replay-button {
-  min-width: 72px;
-  padding: 8px 12px;
+  width: 38px;
+  height: 38px;
+  padding: 0;
   font-weight: 700;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
 }
 
 .replay-button:hover,
