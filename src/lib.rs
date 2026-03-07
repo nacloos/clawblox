@@ -7,4 +7,5 @@ pub mod config;
 pub mod db;
 pub mod game;
 pub mod r2;
+pub mod replay;
 pub mod recording;

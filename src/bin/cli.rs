@@ -37,7 +37,7 @@ use tower_http::services::ServeDir;
 
 use clawblox::{
     db,
-    recording,
+    recording, replay,
     game::{
         constants::audio::{
             DEFAULT_BYTES_PER_SAMPLE, DEFAULT_CHANNELS, DEFAULT_PLAYBACK_SPEED,
@@ -1807,14 +1807,24 @@ fn run_replay(file: PathBuf, speed: f32, port: u16, world_dir_override: Option<P
         println!("World: {} ({})", meta.world_name, world_dir.display());
         println!("Duration: {:.1}s, {} ticks", meta.duration_ms as f64 / 1000.0, meta.total_ticks);
 
-        let reader = Arc::new(reader);
-        let playback = Arc::new(tokio::sync::Mutex::new(ReplayPlayback {
-            current_tick: 0,
+        let first_tick = reader.first_tick().unwrap_or_else(|| {
+            eprintln!("Error: recording has no checkpoints to replay");
+            std::process::exit(1);
+        });
+        let playback = replay::ReplayPlayback::new(
+            first_tick,
+            meta.total_ticks,
+            meta.tick_rate,
+            meta.duration_ms,
             speed,
-            paused: false,
-            total_ticks: meta.total_ticks,
-            tick_rate: meta.tick_rate,
-        }));
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("Error: invalid replay playback state: {}", e);
+            std::process::exit(1);
+        });
+
+        let reader = Arc::new(reader);
+        let playback = Arc::new(tokio::sync::Mutex::new(playback));
 
         // Load renderer manifest from world_dir
         let renderer_manifest = {
@@ -1881,16 +1891,8 @@ fn run_replay(file: PathBuf, speed: f32, port: u16, world_dir_override: Option<P
 #[derive(Clone)]
 struct ReplayState {
     reader: Arc<recording::RecordingReader>,
-    playback: Arc<tokio::sync::Mutex<ReplayPlayback>>,
+    playback: Arc<tokio::sync::Mutex<replay::ReplayPlayback>>,
     renderer_manifest: LocalRendererManifest,
-}
-
-struct ReplayPlayback {
-    current_tick: u64,
-    speed: f32,
-    paused: bool,
-    total_ticks: u64,
-    tick_rate: u32,
 }
 
 async fn replay_spectate_ws(
@@ -1903,7 +1905,6 @@ async fn replay_spectate_ws(
 async fn handle_replay_ws(socket: WebSocket, state: ReplayState) {
     let (mut sender, mut receiver) = socket.split();
     let mut tick_interval = interval(Duration::from_millis(33));
-    let mut fractional_ticks: f64 = 0.0;
 
     loop {
         tokio::select! {
@@ -1917,19 +1918,12 @@ async fn handle_replay_ws(socket: WebSocket, state: ReplayState) {
                 }
             }
             _ = tick_interval.tick() => {
-                let (tick, should_advance) = {
-                    let pb = state.playback.lock().await;
-                    (pb.current_tick, !pb.paused)
-                };
-
-                if should_advance {
+                let tick = {
                     let mut pb = state.playback.lock().await;
-                    // Advance by speed * (tick_rate / 30) ticks per 33ms frame
-                    fractional_ticks += pb.speed as f64 * (pb.tick_rate as f64 / 30.0);
-                    let advance = fractional_ticks as u64;
-                    fractional_ticks -= advance as f64;
-                    pb.current_tick = (pb.current_tick + advance).min(pb.total_ticks);
-                }
+                    let tick = pb.current_tick();
+                    pb.advance_frame(Duration::from_millis(33));
+                    tick
+                };
 
                 match state.reader.get_state_at(tick).await {
                     Ok(obs) => {
@@ -1949,25 +1943,9 @@ async fn replay_renderer_manifest(State(state): State<ReplayState>) -> Json<Loca
     Json(state.renderer_manifest)
 }
 
-#[derive(Serialize)]
-struct ReplayInfo {
-    total_ticks: u64,
-    duration_ms: u64,
-    current_tick: u64,
-    speed: f32,
-    paused: bool,
-}
-
-async fn replay_info(State(state): State<ReplayState>) -> Json<ReplayInfo> {
+async fn replay_info(State(state): State<ReplayState>) -> Json<replay::ReplayInfo> {
     let pb = state.playback.lock().await;
-    let duration_ms = (pb.total_ticks as f64 / pb.tick_rate as f64 * 1000.0) as u64;
-    Json(ReplayInfo {
-        total_ticks: pb.total_ticks,
-        duration_ms,
-        current_tick: pb.current_tick,
-        speed: pb.speed,
-        paused: pb.paused,
-    })
+    Json(pb.info())
 }
 
 #[derive(Deserialize)]
@@ -1980,7 +1958,7 @@ async fn replay_seek(
     Query(q): Query<SeekQuery>,
 ) -> axum::http::StatusCode {
     let mut pb = state.playback.lock().await;
-    pb.current_tick = q.tick.min(pb.total_ticks);
+    pb.seek(q.tick);
     axum::http::StatusCode::OK
 }
 
@@ -1994,19 +1972,19 @@ async fn replay_speed(
     Query(q): Query<SpeedQuery>,
 ) -> axum::http::StatusCode {
     let mut pb = state.playback.lock().await;
-    pb.speed = q.value.max(0.1).min(100.0);
+    pb.set_speed(q.value);
     axum::http::StatusCode::OK
 }
 
 async fn replay_pause(State(state): State<ReplayState>) -> axum::http::StatusCode {
     let mut pb = state.playback.lock().await;
-    pb.paused = true;
+    pb.set_paused(true);
     axum::http::StatusCode::OK
 }
 
 async fn replay_play(State(state): State<ReplayState>) -> axum::http::StatusCode {
     let mut pb = state.playback.lock().await;
-    pb.paused = false;
+    pb.set_paused(false);
     axum::http::StatusCode::OK
 }
 

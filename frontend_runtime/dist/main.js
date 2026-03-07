@@ -16,6 +16,14 @@ const chatConnectionEl = document.getElementById('chat-connection')
 const chatLocalStatusEl = document.getElementById('chat-local-status')
 const playerListCountEl = document.getElementById('player-list-count')
 const playerListBodyEl = document.getElementById('player-list-body')
+const replayPanelEl = document.getElementById('replay-panel')
+const replayPlayToggleEl = document.getElementById('replay-play-toggle')
+const replayPlayIconEl = document.getElementById('replay-play-icon')
+const replayPlayLabelEl = document.getElementById('replay-play-label')
+const replaySliderEl = document.getElementById('replay-slider')
+const replayTimeCurrentEl = document.getElementById('replay-time-current')
+const replayTimeTotalEl = document.getElementById('replay-time-total')
+const replaySpeedEl = document.getElementById('replay-speed')
 
 const chatState = {
   open: false,
@@ -30,6 +38,12 @@ const chatState = {
 }
 let selectedSpectatorPlayerId = null
 let latestSpectatorState = null
+const replayState = {
+  enabled: false,
+  info: null,
+  pollTimer: null,
+  scrubbing: false,
+}
 
 function setStatus(text, level = 'muted') {
   statusEl.textContent = text
@@ -41,6 +55,102 @@ function setStatus(text, level = 'muted') {
 
 function setChatConnection(text) {
   if (chatConnectionEl) chatConnectionEl.textContent = text
+}
+
+function formatDurationMs(ms) {
+  const totalSeconds = Math.max(0, Math.floor((Number(ms) || 0) / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  if (hours > 0) return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+  return `${minutes}:${String(seconds).padStart(2, '0')}`
+}
+
+function tickToMs(tick, info) {
+  if (!info || !Number.isFinite(info.tick_rate) || info.tick_rate <= 0) return 0
+  return Math.max(0, Math.round(((tick - info.first_tick) / info.tick_rate) * 1000))
+}
+
+function setReplayMode(enabled) {
+  replayState.enabled = !!enabled
+  document.body.dataset.mode = replayState.enabled ? 'replay' : 'live'
+  if (replayPanelEl) replayPanelEl.hidden = !replayState.enabled
+  if (replayState.enabled) {
+    setChatPanelOpen(false)
+    setChatLocalStatus('Replay mode')
+    setChatConnection('Replay')
+  }
+}
+
+function setReplayPlayUi(paused) {
+  if (!replayPlayIconEl || !replayPlayLabelEl || !replayPlayToggleEl) return
+  if (paused) {
+    replayPlayIconEl.innerHTML = '<path d="M8 5v14l11-7z"/>'
+    replayPlayLabelEl.textContent = 'Play'
+    replayPlayToggleEl.setAttribute('aria-label', 'Play replay')
+    replayPlayToggleEl.title = 'Play replay'
+  } else {
+    replayPlayIconEl.innerHTML = '<path d="M7 5h3v14H7zm7 0h3v14h-3z"/>'
+    replayPlayLabelEl.textContent = 'Pause'
+    replayPlayToggleEl.setAttribute('aria-label', 'Pause replay')
+    replayPlayToggleEl.title = 'Pause replay'
+  }
+}
+
+function renderReplayInfo(info) {
+  replayState.info = info
+  if (!replayState.enabled || !info) return
+  setReplayPlayUi(!!info.paused)
+  if (replaySliderEl) {
+    replaySliderEl.min = String(info.first_tick || 0)
+    replaySliderEl.max = String(info.total_ticks || info.first_tick || 0)
+    if (!replayState.scrubbing) replaySliderEl.value = String(info.current_tick || info.first_tick || 0)
+  }
+  if (replayTimeCurrentEl) replayTimeCurrentEl.textContent = formatDurationMs(tickToMs(info.current_tick || 0, info))
+  if (replayTimeTotalEl) replayTimeTotalEl.textContent = formatDurationMs(info.duration_ms || 0)
+  if (replaySpeedEl) {
+    const value = String(info.speed ?? 1)
+    if ([...replaySpeedEl.options].some((opt) => opt.value === value)) {
+      replaySpeedEl.value = value
+    }
+  }
+}
+
+async function fetchReplayInfo() {
+  const resp = await fetch('/replay/info', { cache: 'no-store' })
+  if (!resp.ok) throw new Error(`replay info HTTP ${resp.status}`)
+  return resp.json()
+}
+
+async function probeReplayMode() {
+  try {
+    return await fetchReplayInfo()
+  } catch (_) {
+    return null
+  }
+}
+
+async function postReplay(path) {
+  const resp = await fetch(path, { method: 'POST' })
+  if (!resp.ok) throw new Error(`${path} HTTP ${resp.status}`)
+}
+
+async function refreshReplayInfo() {
+  if (!replayState.enabled) return
+  try {
+    const info = await fetchReplayInfo()
+    renderReplayInfo(info)
+  } catch (err) {
+    console.error(err)
+    setStatus('Replay status unavailable', 'warn')
+  }
+}
+
+function startReplayPolling() {
+  if (replayState.pollTimer) clearInterval(replayState.pollTimer)
+  replayState.pollTimer = setInterval(() => {
+    void refreshReplayInfo()
+  }, 300)
 }
 
 function renderPlayerList(players) {
@@ -259,6 +369,7 @@ function renderChatFeed() {
 }
 
 async function loadChatHistory() {
+  if (replayState.enabled) return
   try {
     const resp = await fetch('/chat/messages?limit=50')
     if (!resp.ok) throw new Error(`history HTTP ${resp.status}`)
@@ -273,6 +384,7 @@ async function loadChatHistory() {
 }
 
 async function sendChatMessage(text) {
+  if (replayState.enabled) return
   const content = String(text || '').trim()
   if (!content) return
   chatState.sending = true
@@ -772,6 +884,13 @@ async function bootstrap() {
 
   setStatus('Loading renderer...', 'muted')
 
+  const replayInfo = await probeReplayMode()
+  if (replayInfo) {
+    setReplayMode(true)
+    renderReplayInfo(replayInfo)
+    startReplayPolling()
+  }
+
   let manifest
   try {
     manifest = await loadManifest()
@@ -841,9 +960,12 @@ async function bootstrap() {
 
   ws.onopen = () => {
     chatState.wsConnected = true
-    setChatConnection('Live')
-    setStatus(`Connected | ${rendererTarget}`, 'ok')
-    if (!chatState.loadedHistory) void loadChatHistory()
+    setChatConnection(replayState.enabled ? 'Replay' : 'Live')
+    setStatus(
+      replayState.enabled ? `Connected | Replay | ${rendererTarget}` : `Connected | ${rendererTarget}`,
+      'ok'
+    )
+    if (!replayState.enabled && !chatState.loadedHistory) void loadChatHistory()
   }
   ws.onerror = () => {
     setChatConnection('WS error')
@@ -895,7 +1017,62 @@ async function bootstrap() {
 
   window.addEventListener('beforeunload', () => {
     if (renderer.unmount) renderer.unmount()
+    if (replayState.pollTimer) clearInterval(replayState.pollTimer)
     ws.close()
+  })
+}
+
+if (replayPlayToggleEl) {
+  replayPlayToggleEl.addEventListener('click', async () => {
+    if (!replayState.enabled || !replayState.info) return
+    try {
+      if (replayState.info.paused) await postReplay('/replay/play')
+      else await postReplay('/replay/pause')
+      await refreshReplayInfo()
+    } catch (err) {
+      console.error(err)
+      setStatus('Failed to update replay playback', 'error')
+    }
+  })
+}
+
+if (replaySliderEl) {
+  replaySliderEl.addEventListener('pointerdown', () => {
+    replayState.scrubbing = true
+  })
+  replaySliderEl.addEventListener('input', () => {
+    if (!replayState.enabled || !replayState.info) return
+    const tick = Number(replaySliderEl.value)
+    if (replayTimeCurrentEl) replayTimeCurrentEl.textContent = formatDurationMs(tickToMs(tick, replayState.info))
+  })
+  replaySliderEl.addEventListener('change', async () => {
+    if (!replayState.enabled) return
+    try {
+      const tick = Number(replaySliderEl.value)
+      await postReplay(`/replay/seek?tick=${encodeURIComponent(String(tick))}`)
+      await refreshReplayInfo()
+    } catch (err) {
+      console.error(err)
+      setStatus('Failed to seek replay', 'error')
+    } finally {
+      replayState.scrubbing = false
+    }
+  })
+  replaySliderEl.addEventListener('pointerup', () => {
+    replayState.scrubbing = false
+  })
+}
+
+if (replaySpeedEl) {
+  replaySpeedEl.addEventListener('change', async () => {
+    if (!replayState.enabled) return
+    try {
+      await postReplay(`/replay/speed?value=${encodeURIComponent(replaySpeedEl.value)}`)
+      await refreshReplayInfo()
+    } catch (err) {
+      console.error(err)
+      setStatus('Failed to change replay speed', 'error')
+    }
   })
 }
 

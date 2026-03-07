@@ -359,6 +359,111 @@ body {
   padding: 6px 4px;
 }
 
+.replay-panel {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  width: min(720px, calc(100vw - 28px));
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--hud-border);
+  background: var(--hud-bg-strong);
+  box-shadow: var(--hud-shadow);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  pointer-events: auto;
+  z-index: 20;
+}
+
+.replay-panel[hidden] {
+  display: none;
+}
+
+.replay-button,
+.replay-speed {
+  appearance: none;
+  border: 1px solid rgba(209, 222, 255, 0.16);
+  background: rgba(255, 255, 255, 0.05);
+  color: #eef3ff;
+  border-radius: 10px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.replay-button {
+  min-width: 72px;
+  padding: 8px 12px;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.replay-button:hover,
+.replay-speed:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.replay-button--icon svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+  flex: 0 0 auto;
+}
+
+.replay-button:focus-visible,
+.replay-speed:focus-visible,
+.replay-slider:focus-visible {
+  outline: 2px solid rgba(126, 211, 255, 0.9);
+  outline-offset: 2px;
+}
+
+.replay-timeline {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.replay-slider {
+  width: 100%;
+  margin: 0;
+  accent-color: #7ed3ff;
+  cursor: pointer;
+}
+
+.replay-time-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: rgba(233, 238, 255, 0.9);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.replay-speed-label {
+  color: rgba(185, 196, 238, 0.86);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.replay-speed {
+  padding: 7px 10px;
+  cursor: pointer;
+}
+
+body[data-mode="replay"] .chat-toggle,
+body[data-mode="replay"] .chat-panel {
+  display: none;
+}
+
 @media (max-width: 640px) {
   .chat-toggle {
     top: 10px;
@@ -377,6 +482,32 @@ body {
     right: 10px;
     width: min(180px, calc(100vw - 20px));
     max-height: min(34vh, 220px);
+  }
+
+  .replay-panel {
+    bottom: 10px;
+    width: min(100vw - 20px, 560px);
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas:
+      "play speed"
+      "timeline timeline";
+  }
+
+  .replay-button {
+    grid-area: play;
+  }
+
+  .replay-timeline {
+    grid-area: timeline;
+  }
+
+  .replay-speed-label {
+    display: none;
+  }
+
+  .replay-speed {
+    grid-area: speed;
+    justify-self: end;
   }
 }
 

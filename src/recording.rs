@@ -435,6 +435,10 @@ impl RecordingReader {
         self.checkpoint_ticks.last().copied().unwrap_or(0)
     }
 
+    pub fn first_tick(&self) -> Option<u64> {
+        self.checkpoint_ticks.first().copied()
+    }
+
     pub async fn get_state_at(
         &self,
         tick: u64,

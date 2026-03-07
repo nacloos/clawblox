@@ -58,6 +58,46 @@
             <div id="player-list-body" class="player-list__body"></div>
           </aside>
 
+          <section id="replay-panel" class="replay-panel" aria-label="Replay controls" hidden>
+            <button
+              id="replay-play-toggle"
+              class="replay-button replay-button--icon"
+              type="button"
+              aria-label="Pause replay"
+              title="Pause replay"
+            >
+              <svg id="replay-play-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M7 5h3v14H7zm7 0h3v14h-3z"/>
+              </svg>
+              <span id="replay-play-label">Pause</span>
+            </button>
+            <div class="replay-timeline">
+              <input
+                id="replay-slider"
+                class="replay-slider"
+                type="range"
+                min="0"
+                max="1"
+                value="0"
+                step="1"
+                aria-label="Replay timeline"
+              />
+              <div class="replay-time-row">
+                <span id="replay-time-current">0:00</span>
+                <span id="replay-time-total">0:00</span>
+              </div>
+            </div>
+            <label class="replay-speed-label" for="replay-speed">Speed</label>
+            <select id="replay-speed" class="replay-speed" aria-label="Replay speed">
+              <option value="0.25">0.25x</option>
+              <option value="0.5">0.5x</option>
+              <option value="1" selected>1x</option>
+              <option value="1.5">1.5x</option>
+              <option value="2">2x</option>
+              <option value="4">4x</option>
+            </select>
+          </section>
+
           <div class="runtime-meta-sr" aria-hidden="true">
             <p id="status">Connecting...</p>
             <div id="meta"></div>
