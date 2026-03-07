@@ -11,9 +11,11 @@ local BLOCK_SIZE = 0.75
 local PICKUP_RANGE = 6
 local PLACE_RANGE = 7
 local PLAYER_SPAWN_POSITION = Vector3.new(0, 5, 0)
+local OUT_OF_BOUNDS_Y = -200
 
 local heldBlocksByPlayer = {}
 local placingBlocks = {} -- { block, startPos, targetPos, elapsed, duration }
+local trackedBlocks = {}
 
 local blockColors = {
     Sand = Color3.fromRGB(214, 186, 128),
@@ -90,6 +92,7 @@ local function createBlock(name, position, colorName)
     block.CustomPhysicalProperties = blockPhysics
     setBlockMetadata(block, colorName)
     block.Parent = Workspace
+    trackedBlocks[block] = true
     return block
 end
 
@@ -166,6 +169,52 @@ local function cleanupPlayer(player)
         heldBlock:Destroy()
         heldBlocksByPlayer[player] = nil
     end
+end
+
+local function resetPlayerToSpawn(player)
+    local character = player.Character
+    if not character then
+        return
+    end
+
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    local humanoid = character:FindFirstChild("Humanoid")
+    if hrp then
+        hrp.Position = PLAYER_SPAWN_POSITION
+        hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+    end
+    if humanoid then
+        humanoid:CancelMoveTo()
+    end
+end
+
+local function releaseBlockReferences(block)
+    for player, heldBlock in pairs(heldBlocksByPlayer) do
+        if heldBlock == block then
+            heldBlocksByPlayer[player] = nil
+            setPlayerBlockState(player, nil)
+            player:SetAttribute("LastBlockAction", "ResetAfterFall")
+        end
+    end
+
+    local i = 1
+    while i <= #placingBlocks do
+        if placingBlocks[i].block == block then
+            table.remove(placingBlocks, i)
+        else
+            i = i + 1
+        end
+    end
+end
+
+local function destroyBlock(block)
+    if not block.Parent then
+        return
+    end
+    releaseBlockReferences(block)
+    trackedBlocks[block] = nil
+    block:Destroy()
 end
 
 --------------------------------------------------------------------------------
@@ -321,6 +370,13 @@ end
 --------------------------------------------------------------------------------
 
 RunService.Heartbeat:Connect(function(dt)
+    for _, player in ipairs(Players:GetPlayers()) do
+        local hrp = getHumanoidRootPart(player)
+        if hrp and hrp.Position.Y < OUT_OF_BOUNDS_Y then
+            resetPlayerToSpawn(player)
+        end
+    end
+
     -- Update held blocks
     for player, heldBlock in pairs(heldBlocksByPlayer) do
         local hrp = getHumanoidRootPart(player)
@@ -346,6 +402,14 @@ RunService.Heartbeat:Connect(function(dt)
             table.remove(placingBlocks, i)
         else
             i = i + 1
+        end
+    end
+
+    for block, _ in pairs(trackedBlocks) do
+        if not block.Parent then
+            trackedBlocks[block] = nil
+        elseif block.Position.Y < OUT_OF_BOUNDS_Y then
+            destroyBlock(block)
         end
     end
 end)
