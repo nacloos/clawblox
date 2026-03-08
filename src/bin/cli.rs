@@ -739,7 +739,7 @@ export function createRenderer(ctx) {
         .expect("Failed to create renderer/src/index.js");
 
     // Create .gitignore
-    let gitignore = ".clawblox/\n.clawblox.log\n";
+    let gitignore = ".clawblox/\n.clawblox-*.log\n";
     let gitignore_path = project_dir.join(".gitignore");
     if !gitignore_path.exists() {
         std::fs::write(&gitignore_path, gitignore).expect("Failed to create .gitignore");
@@ -1078,6 +1078,26 @@ fn deploy_game(path: PathBuf, api_key_override: Option<String>, server_override:
 
         println!("Game deployed: {}/game/{}", server, game_id);
     });
+}
+
+// =============================================================================
+// File Locking
+// =============================================================================
+
+/// Acquire an exclusive advisory lock (blocking) on an open file.
+#[cfg(unix)]
+fn flock_exclusive(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn flock_exclusive(_file: &std::fs::File) -> std::io::Result<()> {
+    Ok(())
 }
 
 // =============================================================================
@@ -1420,6 +1440,14 @@ fn maybe_build_renderer_package(
         .unwrap_or_else(|| "dist/renderer.bundle.js".to_string());
 
     let renderer_dir = game_dir.join("renderer");
+
+    // Acquire an exclusive lock so concurrent instances don't race on the build.
+    let lock_path = renderer_dir.join(".build.lock");
+    let lock_file = std::fs::File::create(&lock_path)
+        .map_err(|e| format!("Failed to create renderer build lock: {}", e))?;
+    flock_exclusive(&lock_file)
+        .map_err(|e| format!("Failed to acquire renderer build lock: {}", e))?;
+
     if package.scripts.contains_key("build") {
         if !command_exists("npm") {
             return Err(
@@ -1443,6 +1471,8 @@ fn maybe_build_renderer_package(
     } else {
         bundle_renderer_package_with_esbuild(game_dir, &entry_rel, &out_rel)?;
     }
+
+    drop(lock_file);
 
     let output_path = renderer_dir.join(&out_rel);
     if !output_path.is_file() {
@@ -1580,7 +1610,8 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore, r
             GameManager::new_with_bridge(60, Some(bridge), ErrorMode::Halt, true)
         }
         LocalDatastore::Sqlite => {
-            let db_path = path.join(".clawblox").join("local.db");
+            let db_name = format!("local-{}.db", port);
+            let db_path = path.join(".clawblox").join(db_name);
             if let Some(parent) = db_path.parent() {
                 std::fs::create_dir_all(parent).unwrap_or_else(|e| {
                     eprintln!("Error: failed to create local datastore directory: {}", e);
@@ -1664,7 +1695,7 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore, r
             skill_md,
             renderer_manifest,
             sessions: Arc::new(DashMap::new()),
-            log_file: path.join(".clawblox.log"),
+            log_file: path.join(format!(".clawblox-{}.log", port)),
             audio_tx,
             speech_tx,
             speech_progress_tx,
@@ -2160,7 +2191,7 @@ fn start_game(path: PathBuf, port: u16, datastore: LocalDatastore) {
 
     kill_previous_instance(port);
 
-    let log_file_path = path.join(".clawblox.log");
+    let log_file_path = path.join(format!(".clawblox-{}.log", port));
     let log_file = std::fs::File::create(&log_file_path).unwrap_or_else(|e| {
         eprintln!("Error creating log file {}: {}", log_file_path.display(), e);
         std::process::exit(1);
