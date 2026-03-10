@@ -4,6 +4,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 const AUTO_LOOP_STEER = "continue";
+const PROJECT_CONTEXT_SECTION = /(?:^|\n)# Project Context\b[\s\S]*$/m;
 
 function writeSystemPromptSnapshot(prompt: string) {
   const outputPath = process.env.PI_SYSTEM_PROMPT_SNAPSHOT_FILE;
@@ -12,11 +13,17 @@ function writeSystemPromptSnapshot(prompt: string) {
   writeFileSync(outputPath, prompt.endsWith("\n") ? prompt : `${prompt}\n`, "utf8");
 }
 
+function stripProjectContext(prompt: string): string {
+  return prompt.replace(PROJECT_CONTEXT_SECTION, "").trimEnd();
+}
+
 export default function (pi: ExtensionAPI) {
   let autoLoopEnabled = true;
 
   pi.on("before_agent_start", async (event) => {
-    writeSystemPromptSnapshot(event.systemPrompt);
+    const sanitizedPrompt = stripProjectContext(event.systemPrompt);
+    writeSystemPromptSnapshot(sanitizedPrompt);
+    return { systemPrompt: sanitizedPrompt };
   });
 
   pi.registerCommand("agent-auto", {

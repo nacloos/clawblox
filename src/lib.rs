@@ -9,3 +9,4 @@ pub mod game;
 pub mod r2;
 pub mod replay;
 pub mod recording;
+pub mod replay_agent_log;

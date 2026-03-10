@@ -359,6 +359,90 @@ body {
   padding: 6px 4px;
 }
 
+.agent-log-panel {
+  position: absolute;
+  left: 14px;
+  bottom: 92px;
+  z-index: 18;
+  width: min(400px, calc(100vw - 28px));
+  max-height: min(34vh, 280px);
+  border-radius: 12px;
+  border: 1px solid var(--hud-border);
+  background: var(--hud-bg-strong);
+  box-shadow: var(--hud-shadow);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  pointer-events: auto;
+}
+
+.agent-log-panel[hidden] {
+  display: none;
+}
+
+.agent-log-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(209, 222, 255, 0.08);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.agent-log-panel__status {
+  color: rgba(185, 196, 238, 0.82);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.agent-log-feed {
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  scrollbar-width: thin;
+}
+
+.agent-log-message {
+  border: 1px solid rgba(209, 222, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 6px 7px;
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.agent-log-message__meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+  color: rgba(185, 196, 238, 0.88);
+  font-size: 10px;
+}
+
+.agent-log-message__role {
+  font-weight: 700;
+}
+
+.agent-log-message__tick {
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-log-empty {
+  color: rgba(185, 196, 238, 0.72);
+  font-size: 10px;
+  padding: 2px 2px;
+}
+
 .replay-panel {
   position: absolute;
   left: 50%;
@@ -482,6 +566,13 @@ body[data-mode="replay"] .chat-panel {
     right: 10px;
     width: min(180px, calc(100vw - 20px));
     max-height: min(34vh, 220px);
+  }
+
+  .agent-log-panel {
+    left: 10px;
+    bottom: 114px;
+    width: min(260px, calc(100vw - 20px));
+    max-height: min(30vh, 200px);
   }
 
   .replay-panel {

@@ -39,6 +39,7 @@ use tower_http::services::ServeDir;
 use clawblox::{
     db,
     recording, replay,
+    replay_agent_log::{load_agent_timeline, ReplayAgentMessage, ReplayAgentTimeline},
     game::{
         constants::audio::{
             DEFAULT_BYTES_PER_SAMPLE, DEFAULT_CHANNELS, DEFAULT_PLAYBACK_SPEED,
@@ -107,6 +108,9 @@ enum Commands {
         /// Record session to a .clawrec file for later replay
         #[arg(long)]
         record: bool,
+        /// Directory to write recording output into (default: <world>/recordings)
+        #[arg(long, env = "CLAWBLOX_RECORD_DIR")]
+        record_dir: Option<PathBuf>,
     },
     /// Replay a recorded session
     Replay {
@@ -121,6 +125,9 @@ enum Commands {
         /// Override the world directory (for serving assets)
         #[arg(long)]
         world_dir: Option<PathBuf>,
+        /// Path to agent JSONL log file (from agent/logs/*/*.jsonl)
+        #[arg(long)]
+        agent: Option<PathBuf>,
     },
     /// Start a game locally in background (daemon mode)
     Start {
@@ -188,13 +195,15 @@ fn main() {
             daemon,
             datastore,
             record,
-        } => run_game(path, port, daemon, datastore, record),
+            record_dir,
+        } => run_game(path, port, daemon, datastore, record, record_dir),
         Commands::Replay {
             file,
             speed,
             port,
             world_dir,
-        } => run_replay(file, speed, port, world_dir),
+            agent,
+        } => run_replay(file, speed, port, world_dir, agent),
         Commands::Start {
             path,
             port,
@@ -1517,7 +1526,14 @@ fn maybe_build_renderer_package(
     })
 }
 
-fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore, record: bool) {
+fn run_game(
+    path: PathBuf,
+    port: u16,
+    daemon: bool,
+    datastore: LocalDatastore,
+    record: bool,
+    record_dir: Option<PathBuf>,
+) {
     let path = std::fs::canonicalize(&path).unwrap_or_else(|_| {
         eprintln!("Error: Path '{}' does not exist", path.display());
         std::process::exit(1);
@@ -1658,7 +1674,15 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore, r
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let recording_writer = if record {
-            let rec_dir = path.join("recordings");
+            let rec_dir = if let Some(dir) = record_dir.as_ref() {
+                if dir.is_absolute() {
+                    dir.clone()
+                } else {
+                    path.join(dir)
+                }
+            } else {
+                path.join("recordings")
+            };
             let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
             let rec_path = rec_dir.join(format!("{}.clawrec", timestamp));
             match recording::RecordingWriter::create(
@@ -1834,7 +1858,13 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore, r
     });
 }
 
-fn run_replay(file: PathBuf, speed: f32, port: u16, world_dir_override: Option<PathBuf>) {
+fn run_replay(
+    file: PathBuf,
+    speed: f32,
+    port: u16,
+    world_dir_override: Option<PathBuf>,
+    agent_log_file: Option<PathBuf>,
+) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let reader = recording::RecordingReader::open(&file).await.unwrap_or_else(|e| {
@@ -1891,10 +1921,31 @@ fn run_replay(file: PathBuf, speed: f32, port: u16, world_dir_override: Option<P
             }
         };
 
+        let agent_timeline = if let Some(path) = agent_log_file.as_ref() {
+            match load_agent_timeline(path, meta.tick_rate) {
+                Ok(timeline) => {
+                    println!(
+                        "Loaded agent log: {} ({} messages, {} anchors)",
+                        path.display(),
+                        timeline.messages.len(),
+                        timeline.anchor_count
+                    );
+                    Some(Arc::new(timeline))
+                }
+                Err(err) => {
+                    eprintln!("Warning: failed to load agent log '{}': {}", path.display(), err);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let replay_state = ReplayState {
             reader: reader.clone(),
             playback: playback.clone(),
             renderer_manifest,
+            agent_timeline,
         };
 
         let cors = CorsLayer::new()
@@ -1909,6 +1960,7 @@ fn run_replay(file: PathBuf, speed: f32, port: u16, world_dir_override: Option<P
             .route("/spectate/ws", get(replay_spectate_ws))
             .route("/renderer/manifest", get(replay_renderer_manifest))
             .route("/replay/info", get(replay_info))
+            .route("/replay/agent", get(replay_agent_messages))
             .route("/replay/seek", post(replay_seek))
             .route("/replay/speed", post(replay_speed))
             .route("/replay/pause", post(replay_pause))
@@ -1945,6 +1997,7 @@ struct ReplayState {
     reader: Arc<recording::RecordingReader>,
     playback: Arc<tokio::sync::Mutex<replay::ReplayPlayback>>,
     renderer_manifest: LocalRendererManifest,
+    agent_timeline: Option<Arc<ReplayAgentTimeline>>,
 }
 
 async fn replay_spectate_ws(
@@ -2009,6 +2062,52 @@ async fn replay_renderer_manifest(State(state): State<ReplayState>) -> Json<Loca
 async fn replay_info(State(state): State<ReplayState>) -> Json<replay::ReplayInfo> {
     let pb = state.playback.lock().await;
     Json(pb.info())
+}
+
+#[derive(Deserialize)]
+struct ReplayAgentQuery {
+    tick: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct ReplayAgentMessagesResponse {
+    enabled: bool,
+    current_tick: u64,
+    start_tick: u64,
+    end_tick: u64,
+    messages: Vec<ReplayAgentMessage>,
+}
+
+async fn replay_agent_messages(
+    State(state): State<ReplayState>,
+    Query(query): Query<ReplayAgentQuery>,
+) -> Json<ReplayAgentMessagesResponse> {
+    let current_tick = if let Some(tick) = query.tick {
+        tick
+    } else {
+        let pb = state.playback.lock().await;
+        pb.current_tick()
+    };
+    let start_tick = 0;
+    let end_tick = current_tick;
+
+    let Some(timeline) = state.agent_timeline.as_ref() else {
+        return Json(ReplayAgentMessagesResponse {
+            enabled: false,
+            current_tick,
+            start_tick,
+            end_tick,
+            messages: Vec::new(),
+        });
+    };
+
+    Json(ReplayAgentMessagesResponse {
+        enabled: true,
+        current_tick,
+        start_tick,
+        end_tick,
+        messages: timeline.messages.clone(),
+    })
 }
 
 #[derive(Deserialize)]

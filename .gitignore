@@ -11,12 +11,22 @@
 .claude/
 **/.DS_Store
 
+
 # Local runtime artifacts
 agent/results/
 agent/logs/
 agent/workspace/
 **/.clawblox/
 mc-server/
+
+results/
+recordings/
+
+minecraft-adapter/
+worlds/minecraft/monitor/
+worlds/minecraft/monitor-old/
+
+*.egg-info/
 
 # Piper TTS binary (download separately, not versioned)
 agent/piper/

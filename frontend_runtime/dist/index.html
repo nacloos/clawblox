@@ -58,6 +58,14 @@
             <div id="player-list-body" class="player-list__body"></div>
           </aside>
 
+          <section id="agent-log-panel" class="agent-log-panel" aria-label="Agent messages" hidden>
+            <div class="agent-log-panel__header">
+              <span>Agent Messages</span>
+              <span id="agent-log-status" class="agent-log-panel__status">Syncing...</span>
+            </div>
+            <div id="agent-log-feed" class="agent-log-feed" role="log" aria-live="polite"></div>
+          </section>
+
           <section id="replay-panel" class="replay-panel" aria-label="Replay controls" hidden>
             <button
               id="replay-play-toggle"

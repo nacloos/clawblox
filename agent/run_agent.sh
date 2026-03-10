@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORLD_BASE_URL="${WORLD_BASE_URL:-http://localhost:8080}"
 WORLD_JOIN_PATH="${WORLD_JOIN_PATH:-/join}"
 WORLD_LEAVE_PATH="${WORLD_LEAVE_PATH:-/leave}"
@@ -17,6 +18,12 @@ PI_NO_GLOBAL_EXTENSIONS="${PI_NO_GLOBAL_EXTENSIONS:-1}"
 SESSION_DIR="${SESSION_DIR:-}"
 SYSTEM_PROMPT_SNAPSHOT_FILE="${SYSTEM_PROMPT_SNAPSHOT_FILE:-}"
 WORLD_STARTUP_INSTRUCTIONS="${WORLD_STARTUP_INSTRUCTIONS:-}"
+
+if [[ -z "${ANTHROPIC_API_KEY:-}" && -f "$ROOT_DIR/.env" ]]; then
+  set -a
+  source "$ROOT_DIR/.env"
+  set +a
+fi
 
 generate_agent_name() {
   local -a first_parts=(Brisk Cozy Daring Fuzzy Jolly Lunar Nova Pixel Sunny Swift)
@@ -48,6 +55,12 @@ fi
 
 if [[ -z "$SYSTEM_PROMPT_SNAPSHOT_FILE" ]]; then
   SYSTEM_PROMPT_SNAPSHOT_FILE="$SESSION_DIR/system_prompt.txt"
+fi
+
+if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+  echo "Error: ANTHROPIC_API_KEY is not set." >&2
+  echo "Set it in environment or in $ROOT_DIR/.env before running agents." >&2
+  exit 1
 fi
 
 mkdir -p "$WORKSPACE_DIR"
@@ -88,24 +101,24 @@ if [[ -n "$WORLD_STARTUP_INSTRUCTIONS" ]]; then
 elif [[ -n "$WORLD_SKILL_PATH" ]]; then
   if [[ -n "$SESSION_ID" ]]; then
     STARTUP_INSTRUCTIONS="$(cat <<EOF
-1. Fetch capabilities with: curl -sS -H "${WORLD_SESSION_HEADER}: ${SESSION_ID}" ${WORLD_BASE_URL%/}${WORLD_SKILL_PATH}
-2. Follow the capability document exactly.
+Fetch capabilities with: curl -sS -H "${WORLD_SESSION_HEADER}: ${SESSION_ID}" ${WORLD_BASE_URL%/}${WORLD_SKILL_PATH}
 EOF
 )"
   else
     STARTUP_INSTRUCTIONS="$(cat <<EOF
-1. Fetch capabilities with: curl -sS ${WORLD_BASE_URL%/}${WORLD_SKILL_PATH}
-2. Follow the capability document exactly.
+Fetch capabilities with: curl -sS ${WORLD_BASE_URL%/}${WORLD_SKILL_PATH}
 EOF
 )"
   fi
 else
-  STARTUP_INSTRUCTIONS="1. Follow the world's documented protocol."
+  STARTUP_INSTRUCTIONS="Follow the world's documented protocol."
 fi
 
 cat >"$PROMPT_FILE" <<EOF
 You are a being living in your world.
 Your workspace is ${WORKSPACE_DIR}. Only work inside this directory.
+The files in your workspace are yours to evolve. Keep your workspace clean and organized.
+These files are your memory that persists across sessions. Anything not in your workspace will be forgotten.
 
 World base URL: ${WORLD_BASE_URL}
 $(if [[ -n "$SESSION_ID" ]]; then printf 'Session header: %s\nSession key: %s\n' "$WORLD_SESSION_HEADER" "$SESSION_ID"; fi)

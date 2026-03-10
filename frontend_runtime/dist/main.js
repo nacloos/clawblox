@@ -23,6 +23,9 @@ const replaySliderEl = document.getElementById('replay-slider')
 const replayTimeCurrentEl = document.getElementById('replay-time-current')
 const replayTimeTotalEl = document.getElementById('replay-time-total')
 const replaySpeedEl = document.getElementById('replay-speed')
+const agentLogPanelEl = document.getElementById('agent-log-panel')
+const agentLogFeedEl = document.getElementById('agent-log-feed')
+const agentLogStatusEl = document.getElementById('agent-log-status')
 
 const chatState = {
   open: false,
@@ -42,6 +45,9 @@ const replayState = {
   info: null,
   pollTimer: null,
   scrubbing: false,
+  agentEnabled: false,
+  agentLoaded: false,
+  agentMessages: [],
 }
 
 function setStatus(text, level = 'muted') {
@@ -54,6 +60,10 @@ function setStatus(text, level = 'muted') {
 
 function setChatConnection(text) {
   if (chatConnectionEl) chatConnectionEl.textContent = text
+}
+
+function setAgentLogStatus(text) {
+  if (agentLogStatusEl) agentLogStatusEl.textContent = text
 }
 
 function formatDurationMs(ms) {
@@ -72,12 +82,18 @@ function tickToMs(tick, info) {
 
 function setReplayMode(enabled) {
   replayState.enabled = !!enabled
+  if (!replayState.enabled) {
+    replayState.agentLoaded = false
+    replayState.agentMessages = []
+  }
   document.body.dataset.mode = replayState.enabled ? 'replay' : 'live'
   if (replayPanelEl) replayPanelEl.hidden = !replayState.enabled
+  if (agentLogPanelEl) agentLogPanelEl.hidden = !replayState.enabled
   if (replayState.enabled) {
     setChatPanelOpen(false)
     setChatLocalStatus('Replay mode')
     setChatConnection('Replay')
+    setAgentLogStatus('Syncing...')
   }
 }
 
@@ -113,9 +129,100 @@ function renderReplayInfo(info) {
   }
 }
 
+function formatAgentLogTime(timestampMs) {
+  const ms = Number(timestampMs)
+  if (!Number.isFinite(ms)) return ''
+  const dt = new Date(ms)
+  if (!Number.isFinite(dt.getTime())) return ''
+  return dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
+function renderAgentLogMessages(currentTick, payload = null) {
+  if (!agentLogFeedEl) return
+  const shouldStick = userAtBottom(agentLogFeedEl)
+  const prevScrollTop = agentLogFeedEl.scrollTop
+  const prevScrollHeight = agentLogFeedEl.scrollHeight
+  if (payload) {
+    const enabled = !!payload?.enabled
+    replayState.agentEnabled = enabled
+    replayState.agentLoaded = true
+    replayState.agentMessages = Array.isArray(payload?.messages) ? payload.messages : []
+  }
+  const enabled = replayState.agentEnabled
+  if (agentLogPanelEl) agentLogPanelEl.hidden = !replayState.enabled || !enabled
+
+  agentLogFeedEl.textContent = ''
+  if (!enabled) {
+    setAgentLogStatus('No file')
+    return
+  }
+
+  const allMessages = Array.isArray(replayState.agentMessages) ? replayState.agentMessages : []
+  const endTick = Number((currentTick ?? replayState.info?.current_tick) || 0)
+  const messages = allMessages.filter((msg) => Number(msg?.tick) <= endTick + 1e-6)
+  setAgentLogStatus(`${messages.length}/${allMessages.length}`)
+  if (!allMessages.length) {
+    const empty = document.createElement('div')
+    empty.className = 'agent-log-empty'
+    empty.textContent = 'No agent messages in this log.'
+    agentLogFeedEl.appendChild(empty)
+    return
+  }
+  if (!messages.length) {
+    const empty = document.createElement('div')
+    empty.className = 'agent-log-empty'
+    empty.textContent = 'No messages yet at this replay point.'
+    agentLogFeedEl.appendChild(empty)
+    return
+  }
+
+  for (const msg of messages) {
+    const row = document.createElement('div')
+    row.className = 'agent-log-message'
+
+    const meta = document.createElement('div')
+    meta.className = 'agent-log-message__meta'
+
+    const role = document.createElement('span')
+    role.className = 'agent-log-message__role'
+    role.textContent = String(msg?.role || 'message')
+
+    const tickNum = Number(msg?.tick)
+
+    const time = document.createElement('span')
+    time.className = 'agent-log-message__tick'
+    time.textContent = formatAgentLogTime(msg?.timestamp_ms)
+
+    meta.append(role, time)
+
+    const body = document.createElement('div')
+    body.textContent = String(msg?.text || '')
+
+    if (Number.isFinite(tickNum) && Math.abs(tickNum - endTick) <= 1) {
+      row.style.borderColor = 'rgba(126, 211, 255, 0.6)'
+      row.style.boxShadow = 'inset 0 0 0 1px rgba(126, 211, 255, 0.28)'
+    }
+
+    row.append(meta, body)
+    agentLogFeedEl.appendChild(row)
+  }
+  if (shouldStick) {
+    agentLogFeedEl.scrollTop = agentLogFeedEl.scrollHeight
+  } else {
+    const growth = agentLogFeedEl.scrollHeight - prevScrollHeight
+    agentLogFeedEl.scrollTop = Math.max(0, prevScrollTop + growth)
+  }
+}
+
 async function fetchReplayInfo() {
   const resp = await fetch('/replay/info', { cache: 'no-store' })
   if (!resp.ok) throw new Error(`replay info HTTP ${resp.status}`)
+  return resp.json()
+}
+
+async function fetchReplayAgentMessages() {
+  const resp = await fetch('/replay/agent', { cache: 'no-store' })
+  if (!resp.ok) throw new Error(`replay agent HTTP ${resp.status}`)
   return resp.json()
 }
 
@@ -142,6 +249,12 @@ async function refreshReplayInfo() {
   try {
     const info = await fetchReplayInfo()
     renderReplayInfo(info)
+    if (!replayState.agentLoaded) {
+      const logs = await fetchReplayAgentMessages()
+      if (logs) renderAgentLogMessages(info?.current_tick || 0, logs)
+    } else {
+      renderAgentLogMessages(info?.current_tick || 0)
+    }
   } catch (err) {
     console.error(err)
     setStatus('Replay status unavailable', 'warn')
@@ -859,6 +972,11 @@ async function bootstrap() {
   if (replayInfo) {
     setReplayMode(true)
     renderReplayInfo(replayInfo)
+    const logs = await fetchReplayAgentMessages().catch((err) => {
+      console.error(err)
+      return null
+    })
+    if (logs) renderAgentLogMessages(replayInfo?.current_tick || 0, logs)
     startReplayPolling()
   }
 
