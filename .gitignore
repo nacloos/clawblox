@@ -31,3 +31,5 @@ worlds/minecraft/monitor-old/
 # Piper TTS binary (download separately, not versioned)
 agent/piper/
 agent/piper_linux_x86_64.tar.gz
+
+worlds/mesa-world/cmd.md

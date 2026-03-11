@@ -19,20 +19,8 @@ HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-30}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 AGENT_NAME_PREFIX="${AGENT_NAME_PREFIX:-mesa}"
 STOP_GRACE_SECONDS="${STOP_GRACE_SECONDS:-5}"
-
-if [[ -f "$ROOT_DIR/target/release/clawblox" ]]; then
-  CLAWBLOX_BIN="${CLAWBLOX_BIN:-$ROOT_DIR/target/release/clawblox}"
-elif command -v clawblox >/dev/null 2>&1; then
-  CLAWBLOX_BIN="${CLAWBLOX_BIN:-clawblox}"
-else
-  echo "Error: clawblox binary not found in target/release/ or PATH"
-  exit 1
-fi
-
-CLAWBLOX_SUPPORTS_RECORD_DIR=0
-if "$CLAWBLOX_BIN" run --help 2>&1 | grep -q -- '--record-dir'; then
-  CLAWBLOX_SUPPORTS_RECORD_DIR=1
-fi
+GOAL="${GOAL:-}"
+TEMPLATE_DIR="${TEMPLATE_DIR:-}"
 
 AGENT_SCRIPT="$ROOT_DIR/agent/run_agent.sh"
 if [[ ! -f "$AGENT_SCRIPT" ]]; then
@@ -46,14 +34,27 @@ sanitize_name() {
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--stop] [--force] [--status]
+Usage: $(basename "$0") [--stop|--status] [options]
 
 Launches $NUM_WORLDS mesa world servers and $AGENTS_PER_WORLD agents per world in tmux.
 
 Options:
-  --stop     Gracefully stop worlds/agents, then kill the tmux session
-  --force    Skip confirmation when replacing an existing session
-  --status   Show running session info and exit
+  --stop                       Gracefully stop worlds/agents, then kill the tmux session
+  --status                     Show running session info and exit
+  --force                      Skip confirmation when replacing an existing session
+  --num-worlds N               Number of world servers
+  --agents-per-world N         Agents per world
+  --base-port PORT             First server port
+  --tmux-session NAME          Tmux session name
+  --record true|false          Enable/disable recording
+  --world-dir PATH             World directory (relative to project root or absolute)
+  --health-timeout SECONDS     Server health-check timeout
+  --run-id ID                  Run identifier under results/
+  --agent-name-prefix PREFIX   Agent name prefix
+  --stop-grace-seconds N       Wait after Ctrl+C before force-killing tmux
+  --goal TEXT                  Custom startup objective passed to agents
+  --template PATH              Agent template directory (relative to project root or absolute)
+  --clawblox-bin PATH          Path or command name for clawblox binary
 
 Environment variables:
   NUM_WORLDS        Number of world servers (default: 5)
@@ -66,8 +67,47 @@ Environment variables:
   RUN_ID            Run identifier under results/ (default: UTC timestamp)
   AGENT_NAME_PREFIX Agent name prefix (default: mesa)
   STOP_GRACE_SECONDS Seconds to wait after Ctrl+C before force-closing tmux (default: 5)
+  GOAL              Custom startup objective passed to agents
+  TEMPLATE_DIR      Agent template directory (run_agent.sh TEMPLATE_DIR override)
   CLAWBLOX_BIN      Path to clawblox binary (auto-detected)
 EOF
+}
+
+require_value() {
+  local opt="$1"
+  local maybe_value="${2:-}"
+  if [[ -z "$maybe_value" ]]; then
+    echo "Error: $opt requires a value."
+    usage
+    exit 1
+  fi
+}
+
+is_nonnegative_int() {
+  [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+is_positive_int() {
+  [[ "$1" =~ ^[1-9][0-9]*$ ]]
+}
+
+resolve_clawblox_bin() {
+  if [[ -n "${CLAWBLOX_BIN:-}" ]]; then
+    if command -v "$CLAWBLOX_BIN" >/dev/null 2>&1 || [[ -x "$CLAWBLOX_BIN" ]]; then
+      return 0
+    fi
+    echo "Error: CLAWBLOX_BIN '$CLAWBLOX_BIN' was not found."
+    exit 1
+  fi
+
+  if [[ -f "$ROOT_DIR/target/release/clawblox" ]]; then
+    CLAWBLOX_BIN="$ROOT_DIR/target/release/clawblox"
+  elif command -v clawblox >/dev/null 2>&1; then
+    CLAWBLOX_BIN="clawblox"
+  else
+    echo "Error: clawblox binary not found in target/release/ or PATH"
+    exit 1
+  fi
 }
 
 collect_session_recordings() {
@@ -151,15 +191,141 @@ do_status() {
 }
 
 FORCE=0
-for arg in "$@"; do
-  case "$arg" in
-    --stop)   do_stop; exit 0 ;;
-    --status) do_status; exit 0 ;;
-    --force)  FORCE=1 ;;
-    --help|-h) usage; exit 0 ;;
-    *) echo "Unknown option: $arg"; usage; exit 1 ;;
+ACTION="run"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --stop)
+      ACTION="stop"
+      shift
+      ;;
+    --status)
+      ACTION="status"
+      shift
+      ;;
+    --force)
+      FORCE=1
+      shift
+      ;;
+    --num-worlds)
+      require_value "$1" "${2:-}"
+      NUM_WORLDS="$2"
+      shift 2
+      ;;
+    --agents-per-world)
+      require_value "$1" "${2:-}"
+      AGENTS_PER_WORLD="$2"
+      shift 2
+      ;;
+    --base-port)
+      require_value "$1" "${2:-}"
+      BASE_PORT="$2"
+      shift 2
+      ;;
+    --tmux-session)
+      require_value "$1" "${2:-}"
+      TMUX_SESSION="$2"
+      shift 2
+      ;;
+    --record)
+      require_value "$1" "${2:-}"
+      RECORD="$2"
+      shift 2
+      ;;
+    --world-dir)
+      require_value "$1" "${2:-}"
+      WORLD_DIR="$2"
+      shift 2
+      ;;
+    --health-timeout)
+      require_value "$1" "${2:-}"
+      HEALTH_TIMEOUT="$2"
+      shift 2
+      ;;
+    --run-id)
+      require_value "$1" "${2:-}"
+      RUN_ID="$2"
+      shift 2
+      ;;
+    --agent-name-prefix)
+      require_value "$1" "${2:-}"
+      AGENT_NAME_PREFIX="$2"
+      shift 2
+      ;;
+    --stop-grace-seconds)
+      require_value "$1" "${2:-}"
+      STOP_GRACE_SECONDS="$2"
+      shift 2
+      ;;
+    --clawblox-bin)
+      require_value "$1" "${2:-}"
+      CLAWBLOX_BIN="$2"
+      shift 2
+      ;;
+    --goal)
+      require_value "$1" "${2:-}"
+      GOAL="$2"
+      shift 2
+      ;;
+    --template|--template-dir)
+      require_value "$1" "${2:-}"
+      TEMPLATE_DIR="$2"
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1"
+      usage
+      exit 1
+      ;;
   esac
 done
+
+if ! is_nonnegative_int "$STOP_GRACE_SECONDS"; then
+  echo "Error: STOP_GRACE_SECONDS must be a non-negative integer (got '$STOP_GRACE_SECONDS')."
+  exit 1
+fi
+
+case "$ACTION" in
+  stop)
+    do_stop
+    exit 0
+    ;;
+  status)
+    do_status
+    exit 0
+    ;;
+esac
+
+if ! is_positive_int "$NUM_WORLDS"; then
+  echo "Error: NUM_WORLDS must be a positive integer (got '$NUM_WORLDS')."
+  exit 1
+fi
+if ! is_positive_int "$AGENTS_PER_WORLD"; then
+  echo "Error: AGENTS_PER_WORLD must be a positive integer (got '$AGENTS_PER_WORLD')."
+  exit 1
+fi
+if ! is_positive_int "$BASE_PORT" || ((BASE_PORT > 65535)); then
+  echo "Error: BASE_PORT must be an integer in [1, 65535] (got '$BASE_PORT')."
+  exit 1
+fi
+if ! is_positive_int "$HEALTH_TIMEOUT"; then
+  echo "Error: HEALTH_TIMEOUT must be a positive integer (got '$HEALTH_TIMEOUT')."
+  exit 1
+fi
+if [[ "$RECORD" != "true" && "$RECORD" != "false" ]]; then
+  echo "Error: RECORD must be 'true' or 'false' (got '$RECORD')."
+  exit 1
+fi
+
+resolve_clawblox_bin
+
+CLAWBLOX_SUPPORTS_RECORD_DIR=0
+if "$CLAWBLOX_BIN" run --help 2>&1 | grep -q -- '--record-dir'; then
+  CLAWBLOX_SUPPORTS_RECORD_DIR=1
+fi
 
 if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
   if [[ "$FORCE" -eq 1 ]]; then
@@ -181,6 +347,20 @@ fi
 if [[ ! -d "$WORLD_ABS_DIR" ]]; then
   echo "Error: world directory not found at $WORLD_ABS_DIR"
   exit 1
+fi
+
+TEMPLATE_ABS_DIR=""
+if [[ -n "$TEMPLATE_DIR" ]]; then
+  if [[ "$TEMPLATE_DIR" = /* ]]; then
+    TEMPLATE_ABS_DIR="$TEMPLATE_DIR"
+  else
+    TEMPLATE_ABS_DIR="$ROOT_DIR/$TEMPLATE_DIR"
+  fi
+
+  if [[ ! -d "$TEMPLATE_ABS_DIR" ]]; then
+    echo "Error: template directory not found at $TEMPLATE_ABS_DIR"
+    exit 1
+  fi
 fi
 
 RUN_SAFE_ID="$(sanitize_name "$RUN_ID")"
@@ -302,9 +482,26 @@ fi
 
 echo "Launching $AGENTS_PER_WORLD agents per world..."
 
+TEMPLATE_ENV_PREFIX=""
+if [[ -n "$TEMPLATE_ABS_DIR" ]]; then
+  TEMPLATE_ENV_PREFIX="TEMPLATE_DIR=$(printf '%q' "$TEMPLATE_ABS_DIR") "
+fi
+
 for ((i = 0; i < NUM_WORLDS; i++)); do
   port=$((BASE_PORT + i))
   url="http://localhost:${port}"
+  startup_instructions=""
+  if [[ -n "$GOAL" ]]; then
+    startup_instructions="$(cat <<EOF
+First fetch capabilities with:
+curl -sS -H "X-Session: <session-key>" ${url}/skill.md
+Use the session key shown above in this prompt.
+
+Then follow this objective:
+${GOAL}
+EOF
+)"
+  fi
 
   tmux new-window -t "$TMUX_SESSION" -n "agents-$i"
   for ((j = 0; j < AGENTS_PER_WORLD; j++)); do
@@ -323,8 +520,14 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
 
     mkdir -p "$agent_log_dir" "$agent_workspace" "$agent_session"
 
-    tmux send-keys -t "${TMUX_SESSION}:agents-$i" \
-      "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
+    if [[ -n "$startup_instructions" ]]; then
+      startup_instructions_q="$(printf '%q' "$startup_instructions")"
+      tmux send-keys -t "${TMUX_SESSION}:agents-$i" \
+        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' ${TEMPLATE_ENV_PREFIX}WORLD_STARTUP_INSTRUCTIONS=${startup_instructions_q} bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
+    else
+      tmux send-keys -t "${TMUX_SESSION}:agents-$i" \
+        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' ${TEMPLATE_ENV_PREFIX}bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
+    fi
   done
 done
 

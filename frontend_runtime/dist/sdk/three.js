@@ -273,6 +273,9 @@ export function createCameraModeController(THREE, camera, options = {}) {
   const tmpOverviewTarget = new THREE.Vector3()
   const tmpOverviewPos = new THREE.Vector3()
   const spectatorOffset = options.spectatorOffset || new THREE.Vector3(0, 18, -18)
+  const defaultSpectatorOffset = spectatorOffset.lengthSq() > 1e-6
+    ? spectatorOffset.clone()
+    : new THREE.Vector3(0, 18, -18)
   const controlsCanvas = options.canvas || null
   const debugCamera = options.debugCamera ?? true
   const controlsState = {
@@ -288,6 +291,9 @@ export function createCameraModeController(THREE, camera, options = {}) {
     lastTouchCenter: null,
     pinchStartDistance: null,
     pinchStartZoom: null,
+    orbitYaw: 0,
+    orbitPitch: 0,
+    orbitSeeded: false,
     debugTickCount: 0,
   }
 
@@ -297,7 +303,11 @@ export function createCameraModeController(THREE, camera, options = {}) {
     minZoom: options.minOverviewZoom ?? 0.2,
     maxZoom: options.maxOverviewZoom ?? 3.2,
     touchPanSpeed: options.touchPanSpeed ?? 0.08,
+    panDragSign: options.invertOverviewPanDrag === false ? 1 : -1,
     boundsPadding: options.spectatorBoundsPadding ?? -5,
+    rotateSpeed: options.overviewRotateSpeed ?? 0.005,
+    minPitch: THREE.MathUtils.degToRad(options.minOverviewPitchDeg ?? 12),
+    maxPitch: THREE.MathUtils.degToRad(options.maxOverviewPitchDeg ?? 85),
   }
 
   function dbg(...args) {
@@ -381,12 +391,61 @@ export function createCameraModeController(THREE, camera, options = {}) {
   }
 
   function panByScreenDelta(dx, dy) {
+    seedOrbitFromOffset()
     const scale = overviewCfg.touchPanSpeed * controlsState.zoom
     const before = { x: controlsState.pan.x, z: controlsState.pan.z }
-    controlsState.pan.x += dx * scale
-    controlsState.pan.z += dy * scale
+    const cosYaw = Math.cos(controlsState.orbitYaw)
+    const sinYaw = Math.sin(controlsState.orbitYaw)
+    const worldDx = (dx * cosYaw) + (dy * sinYaw)
+    const worldDz = (-dx * sinYaw) + (dy * cosYaw)
+    controlsState.pan.x += worldDx * scale * overviewCfg.panDragSign
+    controlsState.pan.z += worldDz * scale * overviewCfg.panDragSign
     clampPanToBounds()
-    dbg('panByScreenDelta', { dx, dy, scale, before, after: { x: controlsState.pan.x, z: controlsState.pan.z } })
+    dbg('panByScreenDelta', {
+      dx,
+      dy,
+      worldDx,
+      worldDz,
+      scale,
+      panDragSign: overviewCfg.panDragSign,
+      yaw: controlsState.orbitYaw,
+      before,
+      after: { x: controlsState.pan.x, z: controlsState.pan.z },
+    })
+  }
+
+  function seedOrbitFromOffset() {
+    if (controlsState.orbitSeeded) return
+    const horizontal = Math.hypot(defaultSpectatorOffset.x, defaultSpectatorOffset.z)
+    controlsState.orbitYaw = Math.atan2(defaultSpectatorOffset.x, defaultSpectatorOffset.z)
+    controlsState.orbitPitch = Math.atan2(defaultSpectatorOffset.y, Math.max(1e-6, horizontal))
+    controlsState.orbitPitch = THREE.MathUtils.clamp(
+      controlsState.orbitPitch,
+      overviewCfg.minPitch,
+      overviewCfg.maxPitch
+    )
+    controlsState.orbitSeeded = true
+    dbg('seedOrbit', {
+      yaw: controlsState.orbitYaw,
+      pitch: controlsState.orbitPitch,
+    })
+  }
+
+  function rotateByScreenDelta(dx, dy) {
+    seedOrbitFromOffset()
+    const before = { yaw: controlsState.orbitYaw, pitch: controlsState.orbitPitch }
+    controlsState.orbitYaw -= dx * overviewCfg.rotateSpeed
+    controlsState.orbitPitch = THREE.MathUtils.clamp(
+      controlsState.orbitPitch + dy * overviewCfg.rotateSpeed,
+      overviewCfg.minPitch,
+      overviewCfg.maxPitch
+    )
+    dbg('rotateByScreenDelta', {
+      dx,
+      dy,
+      before,
+      after: { yaw: controlsState.orbitYaw, pitch: controlsState.orbitPitch },
+    })
   }
 
   function resetTouchState() {
@@ -444,14 +503,32 @@ export function createCameraModeController(THREE, camera, options = {}) {
       dbg('wheel', { deltaY: event.deltaY, before, after: controlsState.zoom })
     }
 
+    const onContextMenu = (event) => {
+      if (controlsState.mode !== 'spectator') return
+      event.preventDefault()
+    }
+
     const onPointerDown = (event) => {
       if (controlsState.mode !== 'spectator') return
       if (event.pointerType === 'mouse') {
-        // Mouse drag pans in spectator mode (requested default behavior).
-        if (event.button !== 0) return
-        controlsState.mouseDrag = { id: event.pointerId, x: event.clientX, y: event.clientY }
+        const wantsRotate = event.button === 2 || (event.button === 0 && event.shiftKey)
+        const wantsPan = event.button === 0 && !event.shiftKey
+        if (!wantsRotate && !wantsPan) return
+        controlsState.mouseDrag = {
+          id: event.pointerId,
+          x: event.clientX,
+          y: event.clientY,
+          mode: wantsRotate ? 'rotate' : 'pan',
+        }
         try { controlsCanvas.setPointerCapture?.(event.pointerId) } catch {}
-        dbg('mouseDownPanStart', { id: event.pointerId, x: event.clientX, y: event.clientY })
+        dbg('mouseDownStart', {
+          id: event.pointerId,
+          x: event.clientX,
+          y: event.clientY,
+          mode: controlsState.mouseDrag.mode,
+          shiftKey: !!event.shiftKey,
+          button: event.button,
+        })
         event.preventDefault()
         return
       }
@@ -475,8 +552,13 @@ export function createCameraModeController(THREE, camera, options = {}) {
         const dy = event.clientY - md.y
         md.x = event.clientX
         md.y = event.clientY
-        panByScreenDelta(dx, dy)
-        dbg('mouseDragPan', { id: event.pointerId, dx, dy })
+        if (md.mode === 'rotate') {
+          rotateByScreenDelta(dx, dy)
+          dbg('mouseDragRotate', { id: event.pointerId, dx, dy })
+        } else {
+          panByScreenDelta(dx, dy)
+          dbg('mouseDragPan', { id: event.pointerId, dx, dy })
+        }
         event.preventDefault()
         return
       }
@@ -508,7 +590,7 @@ export function createCameraModeController(THREE, camera, options = {}) {
     const onPointerEnd = (event) => {
       if (event.pointerType === 'mouse') {
         if (controlsState.mouseDrag?.id === event.pointerId) {
-          dbg('mouseDownPanEnd', { id: event.pointerId })
+          dbg('mouseDownEnd', { id: event.pointerId, mode: controlsState.mouseDrag.mode })
           endMouseDrag()
           try { controlsCanvas.releasePointerCapture?.(event.pointerId) } catch {}
         }
@@ -525,6 +607,7 @@ export function createCameraModeController(THREE, camera, options = {}) {
     controlsCanvas.addEventListener('pointermove', onPointerMove, { passive: false })
     controlsCanvas.addEventListener('pointerup', onPointerEnd)
     controlsCanvas.addEventListener('pointercancel', onPointerEnd)
+    controlsCanvas.addEventListener('contextmenu', onContextMenu)
     window.addEventListener('keydown', onKeyDown)
     window.addEventListener('keyup', onKeyUp)
     window.addEventListener('blur', onWindowBlur)
@@ -536,6 +619,7 @@ export function createCameraModeController(THREE, camera, options = {}) {
       controlsCanvas.removeEventListener('pointermove', onPointerMove)
       controlsCanvas.removeEventListener('pointerup', onPointerEnd)
       controlsCanvas.removeEventListener('pointercancel', onPointerEnd)
+      controlsCanvas.removeEventListener('contextmenu', onContextMenu)
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup', onKeyUp)
       window.removeEventListener('blur', onWindowBlur)
@@ -599,18 +683,42 @@ export function createCameraModeController(THREE, camera, options = {}) {
         if (direction.lengthSq() > 0) {
           direction.normalize()
           const step = (overviewCfg.panSpeed * controlsState.zoom) * dtSafe
+          seedOrbitFromOffset()
+          const cosYaw = Math.cos(controlsState.orbitYaw)
+          const sinYaw = Math.sin(controlsState.orbitYaw)
+          const localDx = -direction.x * step
+          const localDz = -direction.z * step
+          const worldDx = (localDx * cosYaw) + (localDz * sinYaw)
+          const worldDz = (-localDx * sinYaw) + (localDz * cosYaw)
           const before = { x: controlsState.pan.x, z: controlsState.pan.z }
-          controlsState.pan.x -= direction.x * step
-          controlsState.pan.z -= direction.z * step
+          controlsState.pan.x += worldDx
+          controlsState.pan.z += worldDz
           clampPanToBounds()
-          dbg('keyboardPan', { step, before, after: { x: controlsState.pan.x, z: controlsState.pan.z }, keys: [...controlsState.keys] })
+          dbg('keyboardPan', {
+            step,
+            yaw: controlsState.orbitYaw,
+            localDx,
+            localDz,
+            worldDx,
+            worldDz,
+            before,
+            after: { x: controlsState.pan.x, z: controlsState.pan.z },
+            keys: [...controlsState.keys],
+          })
         }
 
-        tmpOverviewTarget.set(controlsState.pan.x, targetPosition.y, controlsState.pan.z)
+        seedOrbitFromOffset()
+        const baseDistance = Math.max(0.001, defaultSpectatorOffset.length())
+        const orbitDistance = baseDistance * controlsState.zoom
+        const cosPitch = Math.cos(controlsState.orbitPitch)
+        const sinPitch = Math.sin(controlsState.orbitPitch)
+        const sinYaw = Math.sin(controlsState.orbitYaw)
+        const cosYaw = Math.cos(controlsState.orbitYaw)
+        tmpOverviewTarget.set(controlsState.pan.x, controlsState.pan.y, controlsState.pan.z)
         tmpOverviewPos.set(
-          controlsState.pan.x + spectatorOffset.x * controlsState.zoom,
-          targetPosition.y + spectatorOffset.y * controlsState.zoom,
-          controlsState.pan.z + spectatorOffset.z * controlsState.zoom
+          controlsState.pan.x + sinYaw * cosPitch * orbitDistance,
+          controlsState.pan.y + sinPitch * orbitDistance,
+          controlsState.pan.z + cosYaw * cosPitch * orbitDistance
         )
         camera.position.copy(tmpOverviewPos)
         camera.lookAt(tmpOverviewTarget)
@@ -623,9 +731,14 @@ export function createCameraModeController(THREE, camera, options = {}) {
         return
       }
 
-      const target = targetPosition.clone().add(spectatorOffset)
-      camera.position.lerp(target, 1 - Math.exp(-6 * dtSafe))
-      camera.lookAt(targetPosition)
+      tmpOverviewPos.set(
+        controlsState.pan.x + spectatorOffset.x,
+        controlsState.pan.y + spectatorOffset.y,
+        controlsState.pan.z + spectatorOffset.z
+      )
+      tmpOverviewTarget.set(controlsState.pan.x, controlsState.pan.y, controlsState.pan.z)
+      camera.position.lerp(tmpOverviewPos, 1 - Math.exp(-6 * dtSafe))
+      camera.lookAt(tmpOverviewTarget)
       return
     }
 
@@ -644,6 +757,8 @@ export function createCameraModeController(THREE, camera, options = {}) {
       reset(targetPosition = null) {
         if (targetPosition) controlsState.pan.copy(targetPosition)
         controlsState.zoom = 1
+        controlsState.orbitSeeded = false
+        seedOrbitFromOffset()
         controlsState.seeded = !!targetPosition
       },
     },

@@ -26,6 +26,7 @@ const replaySpeedEl = document.getElementById('replay-speed')
 const agentLogPanelEl = document.getElementById('agent-log-panel')
 const agentLogFeedEl = document.getElementById('agent-log-feed')
 const agentLogStatusEl = document.getElementById('agent-log-status')
+const agentLogToggleEl = document.getElementById('agent-log-toggle')
 
 const chatState = {
   open: false,
@@ -48,6 +49,23 @@ const replayState = {
   agentEnabled: false,
   agentLoaded: false,
   agentMessages: [],
+  agentPanelOpen: readStoredBool('clawblox_agent_log_open', true),
+}
+
+function readStoredBool(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key)
+    if (raw === null) return fallback
+    return raw === '1'
+  } catch (_) {
+    return fallback
+  }
+}
+
+function storeBool(key, value) {
+  try {
+    localStorage.setItem(key, value ? '1' : '0')
+  } catch (_) {}
 }
 
 function setStatus(text, level = 'muted') {
@@ -64,6 +82,28 @@ function setChatConnection(text) {
 
 function setAgentLogStatus(text) {
   if (agentLogStatusEl) agentLogStatusEl.textContent = text
+}
+
+function setAgentLogPanelOpen(open, persist = true) {
+  replayState.agentPanelOpen = !!open
+  if (agentLogPanelEl) {
+    agentLogPanelEl.classList.toggle('is-open', replayState.agentPanelOpen)
+  }
+  if (agentLogToggleEl) {
+    agentLogToggleEl.setAttribute('aria-expanded', replayState.agentPanelOpen ? 'true' : 'false')
+    agentLogToggleEl.setAttribute('aria-label', replayState.agentPanelOpen ? 'Close agent messages' : 'Open agent messages')
+    agentLogToggleEl.title = replayState.agentPanelOpen ? 'Hide agent messages' : 'Show agent messages'
+  }
+  if (persist) storeBool('clawblox_agent_log_open', replayState.agentPanelOpen)
+}
+
+function syncAgentLogVisibility() {
+  const shouldShow = replayState.enabled && replayState.agentEnabled
+  if (agentLogPanelEl) {
+    agentLogPanelEl.hidden = !shouldShow
+    agentLogPanelEl.classList.toggle('is-open', shouldShow && replayState.agentPanelOpen)
+  }
+  if (agentLogToggleEl) agentLogToggleEl.hidden = !shouldShow
 }
 
 function formatDurationMs(ms) {
@@ -88,7 +128,7 @@ function setReplayMode(enabled) {
   }
   document.body.dataset.mode = replayState.enabled ? 'replay' : 'live'
   if (replayPanelEl) replayPanelEl.hidden = !replayState.enabled
-  if (agentLogPanelEl) agentLogPanelEl.hidden = !replayState.enabled
+  syncAgentLogVisibility()
   if (replayState.enabled) {
     setChatPanelOpen(false)
     setChatLocalStatus('Replay mode')
@@ -149,7 +189,7 @@ function renderAgentLogMessages(currentTick, payload = null) {
     replayState.agentMessages = Array.isArray(payload?.messages) ? payload.messages : []
   }
   const enabled = replayState.agentEnabled
-  if (agentLogPanelEl) agentLogPanelEl.hidden = !replayState.enabled || !enabled
+  syncAgentLogVisibility()
 
   agentLogFeedEl.textContent = ''
   if (!enabled) {
@@ -1166,6 +1206,14 @@ if (replaySpeedEl) {
       console.error(err)
       setStatus('Failed to change replay speed', 'error')
     }
+  })
+}
+
+if (agentLogToggleEl) {
+  setAgentLogPanelOpen(replayState.agentPanelOpen, false)
+  agentLogToggleEl.addEventListener('click', () => {
+    setAgentLogPanelOpen(!replayState.agentPanelOpen, true)
+    syncAgentLogVisibility()
   })
 }
 

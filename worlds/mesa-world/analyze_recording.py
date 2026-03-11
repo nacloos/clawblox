@@ -13,6 +13,29 @@ import matplotlib.pyplot as plt
 import zstandard as zstd
 
 
+def parse_duration_seconds(value: str) -> float:
+    text = value.strip().lower()
+    if not text:
+        raise argparse.ArgumentTypeError("Duration cannot be empty.")
+
+    unit_multiplier = 1.0
+    if text[-1] in {"s", "m", "h"}:
+        unit_multiplier = {"s": 1.0, "m": 60.0, "h": 3600.0}[text[-1]]
+        text = text[:-1].strip()
+
+    try:
+        amount = float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "Invalid duration. Use seconds (e.g. 3600) or suffix with s/m/h (e.g. 1h)."
+        ) from exc
+
+    if amount < 0:
+        raise argparse.ArgumentTypeError("Duration must be >= 0.")
+
+    return amount * unit_multiplier
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Analyze a .clawrec recording and plot agent vertical position + block stack height over time."
@@ -49,6 +72,12 @@ def parse_args():
         help="Stop analysis at this tick",
     )
     parser.add_argument(
+        "--max-duration",
+        type=parse_duration_seconds,
+        default=None,
+        help="Stop analysis after this many seconds from recording start (supports suffix s/m/h, e.g. 1h)",
+    )
+    parser.add_argument(
         "--stack-bin-size",
         type=float,
         default=None,
@@ -67,9 +96,13 @@ def decode_blob(blob: bytes):
 
 def is_block_entity(entity: dict) -> bool:
     attrs = entity.get("attributes") or {}
+    if attrs.get("IsPickupObject") is True:
+        return True
     if attrs.get("IsPickupBlock") is True:
         return True
     render = entity.get("render") or {}
+    if render.get("role") == "PickupObject":
+        return True
     if render.get("role") == "Block":
         return True
     return False
@@ -200,6 +233,43 @@ def plot_series(
     plt.close()
 
 
+def compute_sustained_max_y_series(
+    times_s: list[float],
+    y_values: list[float],
+    hold_seconds: float = 2.0,
+    y_tolerance: float = 0.05,
+) -> list[float]:
+    sustained_max_values = []
+    confirmed_max_y = None
+    run_anchor_y = None
+    run_start_t = None
+    run_peak_y = None
+
+    for t_s, y in zip(times_s, y_values):
+        if not math.isfinite(y):
+            run_anchor_y = None
+            run_start_t = None
+            run_peak_y = None
+            sustained_max_values.append(math.nan if confirmed_max_y is None else confirmed_max_y)
+            continue
+
+        if run_anchor_y is None or abs(y - run_anchor_y) > y_tolerance:
+            run_anchor_y = y
+            run_start_t = t_s
+            run_peak_y = y
+        else:
+            run_peak_y = max(run_peak_y, y)
+
+        if run_start_t is not None and (t_s - run_start_t) >= hold_seconds:
+            candidate_max = run_peak_y if run_peak_y is not None else y
+            if confirmed_max_y is None or candidate_max > confirmed_max_y:
+                confirmed_max_y = candidate_max
+
+        sustained_max_values.append(math.nan if confirmed_max_y is None else confirmed_max_y)
+
+    return sustained_max_values
+
+
 def main():
     args = parse_args()
     recording = args.recording.resolve()
@@ -219,10 +289,12 @@ def main():
     }
     tick_rate = int(meta.get("tick_rate", "60"))
 
-    cp_ticks = [int(r["tick"]) for r in cur.execute("SELECT tick FROM checkpoints ORDER BY tick").fetchall()]
-    if not cp_ticks:
+    cp_rows = cur.execute("SELECT tick, time_ms FROM checkpoints ORDER BY tick").fetchall()
+    if not cp_rows:
         raise RuntimeError("No checkpoints in recording.")
+    cp_ticks = [int(r["tick"]) for r in cp_rows]
     first_tick = cp_ticks[0]
+    first_time_ms = int(cp_rows[0]["time_ms"])
 
     db_max_tick_row = cur.execute(
         """
@@ -240,14 +312,25 @@ def main():
     if args.max_tick is not None:
         end_tick = min(end_tick, args.max_tick)
 
+    max_end_time_ms = None
+    if args.max_duration is not None:
+        max_end_time_ms = first_time_ms + int(round(args.max_duration * 1000.0))
+        print(f"[info] Limiting analysis to first {args.max_duration:.3f}s of recording time.")
+
     agent_csv = out_dir / "agent_vertical.csv"
     stack_csv = out_dir / "max_stack.csv"
     y_plot_png = out_dir / "agent_vertical.png"
+    y_sustained_csv = out_dir / "agent_max_y_sustained.csv"
+    y_sustained_plot_png = out_dir / "agent_max_y_sustained.png"
     stack_plot_png = out_dir / "max_stack.png"
     summary_json = out_dir / "summary.json"
 
+    sustained_hold_s = 1.0
     y_times = []
     y_vals = []
+    agent_sample_ticks = []
+    agent_sample_times = []
+    agent_sample_y = []
     stack_times = []
     stack_vals = []
 
@@ -281,14 +364,18 @@ def main():
             if cp_row is None:
                 continue
 
-            observation = decode_blob(cp_row["data"])
             time_ms = int(cp_row["time_ms"])
+            if max_end_time_ms is not None and time_ms > max_end_time_ms:
+                break
+            observation = decode_blob(cp_row["data"])
 
             def sample_now(tick: int, ms: int, obs: dict):
                 nonlocal selected_agent_id, selected_agent_name
                 nonlocal auto_select_announced, max_stack_seen, max_stack_tick, max_y_seen, max_y_tick
 
                 if tick < first_tick:
+                    return
+                if max_end_time_ms is not None and ms > max_end_time_ms:
                     return
                 if tick != end_tick and ((tick - first_tick) % args.tick_step != 0):
                     return
@@ -314,6 +401,9 @@ def main():
 
                 max_stack, num_blocks = compute_max_stack(obs, args.stack_bin_size)
                 t_s = ms / 1000.0
+                agent_sample_ticks.append(tick)
+                agent_sample_times.append(t_s)
+                agent_sample_y.append(math.nan if agent_y is None else agent_y)
 
                 agent_writer.writerow(
                     [
@@ -341,15 +431,17 @@ def main():
 
             sample_now(int(cp_row["tick"]), time_ms, observation)
 
-            delta_rows = cur.execute(
-                """
+            delta_query = """
                 SELECT tick, time_ms, data
                 FROM deltas
                 WHERE tick > ? AND tick <= ?
-                ORDER BY tick
-                """,
-                (cp_tick, segment_end),
-            ).fetchall()
+            """
+            delta_params = [cp_tick, segment_end]
+            if max_end_time_ms is not None:
+                delta_query += " AND time_ms <= ?"
+                delta_params.append(max_end_time_ms)
+            delta_query += "\n                ORDER BY tick"
+            delta_rows = cur.execute(delta_query, tuple(delta_params)).fetchall()
 
             for row in delta_rows:
                 tick = int(row["tick"])
@@ -359,6 +451,17 @@ def main():
                 observation["tick"] = tick
                 observation["server_time_ms"] = time_ms
                 sample_now(tick, time_ms, observation)
+
+    sustained_max_values = compute_sustained_max_y_series(
+        agent_sample_times,
+        agent_sample_y,
+        hold_seconds=sustained_hold_s,
+    )
+    with y_sustained_csv.open("w", newline="") as f_sustained:
+        sustained_writer = csv.writer(f_sustained)
+        sustained_writer.writerow(["tick", "time_s", "max_agent_y_sustained_2s"])
+        for tick, t_s, max_y in zip(agent_sample_ticks, agent_sample_times, sustained_max_values):
+            sustained_writer.writerow([tick, f"{t_s:.6f}", "" if not math.isfinite(max_y) else f"{max_y:.6f}"])
 
     if y_times and y_vals:
         plot_series(
@@ -371,6 +474,18 @@ def main():
     else:
         print("[warn] No agent Y samples found; agent_vertical.png not generated.")
 
+    has_sustained_max = any(math.isfinite(v) for v in sustained_max_values)
+    if has_sustained_max:
+        plot_series(
+            agent_sample_times,
+            sustained_max_values,
+            ylabel=f"Max Agent Y (held >= {sustained_hold_s:.0f}s)",
+            title=f"Sustained Max Agent Y Over Time ({selected_agent_name or 'agent'})",
+            output_png=y_sustained_plot_png,
+        )
+    else:
+        print("[warn] No sustained max agent Y samples found; agent_max_y_sustained.png not generated.")
+
     if stack_times and stack_vals:
         plot_series(
             stack_times,
@@ -382,21 +497,37 @@ def main():
     else:
         print("[warn] No stack samples found; max_stack.png not generated.")
 
+    max_sustained_y = None
+    max_sustained_y_tick = None
+    for tick, value in zip(agent_sample_ticks, sustained_max_values):
+        if not math.isfinite(value):
+            continue
+        if max_sustained_y is None or value > max_sustained_y:
+            max_sustained_y = value
+            max_sustained_y_tick = tick
+
     summary = {
         "recording": str(recording),
         "tick_rate": tick_rate,
         "first_tick": first_tick,
+        "first_time_ms": first_time_ms,
         "end_tick": end_tick,
+        "max_duration_s": args.max_duration,
         "agent_id": selected_agent_id,
         "agent_name": selected_agent_name,
         "max_agent_y": max_y_seen,
         "max_agent_y_tick": max_y_tick,
+        "max_agent_y_sustained_hold_s": sustained_hold_s,
+        "max_agent_y_sustained": max_sustained_y,
+        "max_agent_y_sustained_tick": max_sustained_y_tick,
         "max_stack_seen": max_stack_seen,
         "max_stack_tick": max_stack_tick,
         "outputs": {
             "agent_csv": str(agent_csv),
+            "agent_max_y_sustained_csv": str(y_sustained_csv),
             "stack_csv": str(stack_csv),
             "agent_plot_png": str(y_plot_png) if y_times else None,
+            "agent_max_y_sustained_plot_png": str(y_sustained_plot_png) if has_sustained_max else None,
             "stack_plot_png": str(stack_plot_png) if stack_times else None,
         },
     }
@@ -404,9 +535,12 @@ def main():
 
     print(f"[done] Wrote analysis to: {out_dir}")
     print(f"[done] Agent CSV: {agent_csv}")
+    print(f"[done] Agent sustained max CSV: {y_sustained_csv}")
     print(f"[done] Stack CSV: {stack_csv}")
     if y_times:
         print(f"[done] Agent plot: {y_plot_png}")
+    if has_sustained_max:
+        print(f"[done] Agent sustained max plot: {y_sustained_plot_png}")
     if stack_times:
         print(f"[done] Stack plot: {stack_plot_png}")
     print(f"[done] Summary: {summary_json}")

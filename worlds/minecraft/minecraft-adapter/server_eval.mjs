@@ -182,22 +182,55 @@ async function maybeStartViewer(session) {
 function wireWsBroadcast(session) {
   const { bot, sessionToken } = session;
 
+  // Helper: get bot position as rounded coords
+  function botPos() {
+    const p = bot.entity?.position;
+    return p ? { x: Math.round(p.x), y: Math.round(p.y), z: Math.round(p.z) } : null;
+  }
+
+  // Track last known inventory so we can report it on death
+  // (by the time "death" fires, inventory may already be cleared)
+  let lastKnownInventory = bot.inventory.items().map(i => i.name + " x" + i.count);
+  let lastDeathPos = null;
+
   bot.on("health", () => {
+    // Update inventory snapshot while alive
+    const inv = bot.inventory.items().map(i => i.name + " x" + i.count);
+    if (inv.length > 0) lastKnownInventory = inv;
+
     broadcastEvent(sessionToken, {
       type: "health",
-      data: { health: bot.health, food: bot.food },
+      data: { health: bot.health, food: bot.food, pos: botPos() },
     });
   });
 
   bot.on("death", () => {
-    broadcastEvent(sessionToken, { type: "death", data: {} });
+    lastDeathPos = botPos();
+    broadcastEvent(sessionToken, {
+      type: "death",
+      data: { deathInventory: lastKnownInventory, deathPos: lastDeathPos },
+    });
+    lastKnownInventory = [];
+  });
+
+  bot.on("spawn", () => {
+    broadcastEvent(sessionToken, {
+      type: "spawn",
+      data: {
+        health: bot.health,
+        food: bot.food,
+        pos: botPos(),
+        deathPos: lastDeathPos,
+      },
+    });
+    lastDeathPos = null;
   });
 
   bot.on("entityHurt", (entity) => {
     if (entity === bot.entity) {
       broadcastEvent(sessionToken, {
         type: "hurt",
-        data: { health: bot.health },
+        data: { health: bot.health, pos: botPos() },
       });
     }
   });

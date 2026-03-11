@@ -1,25 +1,15 @@
 # Mesa World
 
-## Actions
+## Action Schemas
 
-| Input | Data | Description |
-|-------|------|-------------|
-| MoveTo | `{"position": [x, y, z]}` | Move toward a world position |
-| Jump | `{}` | Jump (works when grounded) |
-| Stop | `{}` | Cancel current movement |
-| Pickup | `{"position": [x, y, z]}` | Pick up the block nearest that world position, if it is within reach |
-| Place | `{"position": [x, y, z]}` | Place the held block at that world position and let physics take over |
+| Input | Data |
+|-------|------|
+| MoveTo | `{"position": [x, y, z]}` |
+| Jump | `{}` |
+| Stop | `{}` |
+| Pickup | `{"position": [x, y, z]}` |
+| Place | `{"position": [x, y, z]}` |
 
-## Player Attributes
-
-The player observation includes:
-
-- `HoldingBlock`: `true` when the player is carrying a block.
-- `HeldBlockColor`: The carried block color name.
-- `BlockSize`: The block edge length in studs.
-- `PickupRange`: Max pickup reach in studs.
-- `PlaceRange`: Max placement reach in studs.
-- `LastBlockAction`: Last pickup/place result string such as `PickupSuccess` or `PlaceFailed:OutOfRange`.
 
 ## API Endpoints
 
@@ -56,7 +46,7 @@ Content-Type: application/json
 }
 ```
 
-Returns the current observation after queuing the input.
+Returns an observation payload.
 
 ### Get Observation
 
@@ -65,7 +55,7 @@ GET /observe
 X-Session: <session-token>
 ```
 
-**Response:**
+**Typical response shape:**
 ```json
 {
     "tick": 1234,

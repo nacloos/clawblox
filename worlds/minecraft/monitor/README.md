@@ -1,13 +1,14 @@
 # Clawblox Monitor
 
-Live web UI for:
-- Minecraft adapter events (`/ws`)
-- tmux TUI streaming (pi agent, adapter logs, server console)
+Read-only monitor for `pi` agents (launched via `run_pi_minecraft.sh`) with a
+`shadcn/ui`-style frontend.
 
-## What it shows
+The backend reads session JSONL files from `~/.pi/agent/sessions` and exposes:
 
-- Left panel: adapter event feed + quick agent stats
-- Right panel: real tmux terminal rendering via xterm.js
+- `GET /api/agents` for active agent discovery
+- `GET /api/events?agent=<id>` for recent events
+- `WS /api/stream?agent=<id>` for live appended events
+- Shared Minecraft viewer iframe (default `http://127.0.0.1:3007/`)
 
 ## Run
 
@@ -17,49 +18,24 @@ npm install
 npm start
 ```
 
-Defaults:
-- Monitor UI: `http://127.0.0.1:3000`
-- Adapter HTTP: `http://127.0.0.1:8081`
-- Adapter WS: `ws://127.0.0.1:8081/ws`
+`npm start` runs a frontend build automatically (`prestart`) and then starts the
+Fastify server.
 
-## Remote cluster usage (recommended)
+Open from another machine:
 
-Run monitor on cluster, then tunnel to your laptop.
+- `http://128.30.45.25:4310`
 
-On cluster:
+## Optional local UI dev
 
 ```bash
-cd /storage/nacloos/projects/clawblox/worlds/minecraft/monitor
-npm install
-npm start
+cd worlds/minecraft/monitor
+npm run dev
 ```
 
-On your laptop:
+## Environment
 
-```bash
-ssh -N \
-  -L 3000:127.0.0.1:3000 \
-  -L 8081:127.0.0.1:8081 \
-  -L 25565:127.0.0.1:25565 \
-  nacloos@victoria.csail.mit.edu
-```
-
-Open:
-- `http://localhost:3000`
-
-## Terminal streaming details
-
-- Endpoint: `GET /term?session=<tmux-session>&readonly=1|0`
-- Uses `node-pty` to run `tmux attach -t <session>` inside a pseudo-terminal
-- This preserves full-screen TUI behavior (cursor movement, alternate screen, ANSI)
-
-## Event stream details
-
-- Enter agent session token (`X-Session`) in UI
-- UI opens adapter websocket:
-  - `ws://<adapter-host>:8081/ws?session=<token>`
-
-## Security note
-
-By default monitor binds to `127.0.0.1`.
-Keep it behind SSH tunnels for safety.
+- `MONITOR_HOST` default `0.0.0.0`
+- `MONITOR_PORT` default `4310`
+- `PI_SESSIONS_DIR` default `~/.pi/agent/sessions`
+- `VIEWER_URL` default `http://127.0.0.1:3007/`
+- `POLL_MS` default `1000`
