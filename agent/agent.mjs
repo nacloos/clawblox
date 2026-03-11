@@ -356,6 +356,7 @@ function buildWorkspaceContext() {
 		"",
 		`Your workspace is ${agentDir}. Only work inside this directory.`,
 		"Be polite and avoid working on your memory files when interacting with someone else.",
+		"EPISODIC_MEMORY.md is append-only: add new entries, do not rewrite or delete old ones.",
 		"",
 		"# Project Context",
 		"",
