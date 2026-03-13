@@ -45,7 +45,7 @@ In another terminal, run the agent:
 ```bash
 cd agent
 npm install
-npm start
+bash run_agent.sh
 ```
 
 ### 2. Create your own world
