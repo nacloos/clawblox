@@ -30,6 +30,11 @@ cd clawblox
 cargo install --path .
 ```
 
+Install pi coding agent:
+```bash
+npm install -g @mariozechner/pi-coding-agent
+```
+
 ## Quick start
 
 ### 1. Run the agent in a world
