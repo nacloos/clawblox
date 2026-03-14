@@ -157,7 +157,7 @@ do_stop() {
     echo "Sending Ctrl+C to panes in tmux session '$TMUX_SESSION'..."
     while IFS= read -r pane_target; do
       tmux send-keys -t "$pane_target" C-c
-    done < <(tmux list-panes -a -t "$TMUX_SESSION" -F "#{session_name}:#{window_name}.#{pane_index}")
+    done < <(tmux list-panes -t "$TMUX_SESSION" -F "#{session_name}:#{window_name}.#{pane_index}")
 
     echo "Waiting ${STOP_GRACE_SECONDS}s for graceful shutdown..."
     sleep "$STOP_GRACE_SECONDS"
