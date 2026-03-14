@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LAUNCH_SCRIPT="${LAUNCH_SCRIPT:-$SCRIPT_DIR/launch_multi.sh}"
+WATCHDOG_SCRIPT="${WATCHDOG_SCRIPT:-$SCRIPT_DIR/watchdog_stop_session.sh}"
 
 GENERATIONS="${GENERATIONS:-5}"
 GENERATION_DURATION="${GENERATION_DURATION:-2h}"
@@ -111,17 +112,21 @@ schedule_stop_watchdog() {
   local expected_session_created="$2"
   local duration_seconds="$3"
 
+  local watchdog_script_q
   local launch_script_q
   local tmux_session_q
   local expected_created_q
   local stop_grace_q
+  local duration_q
+  printf -v watchdog_script_q '%q' "$WATCHDOG_SCRIPT"
   printf -v launch_script_q '%q' "$LAUNCH_SCRIPT"
   printf -v tmux_session_q '%q' "$tmux_session"
   printf -v expected_created_q '%q' "$expected_session_created"
   printf -v stop_grace_q '%q' "$STOP_GRACE_SECONDS"
+  printf -v duration_q '%q' "$duration_seconds"
 
   local watchdog_cmd
-  watchdog_cmd="sleep $duration_seconds; if tmux has-session -t $tmux_session_q 2>/dev/null; then current_created=\$(tmux display-message -p -t $tmux_session_q '##{session_created}' 2>/dev/null || true); if [[ \"\$current_created\" == $expected_created_q ]]; then bash $launch_script_q --tmux-session $tmux_session_q --stop --stop-grace-seconds $stop_grace_q >/dev/null 2>&1 || true; fi; fi"
+  watchdog_cmd="bash $watchdog_script_q $duration_q $tmux_session_q $expected_created_q $launch_script_q $stop_grace_q"
   tmux run-shell -b "$watchdog_cmd"
 }
 
@@ -160,6 +165,10 @@ EOF
 
 if [[ ! -f "$LAUNCH_SCRIPT" ]]; then
   echo "Error: launch script not found at $LAUNCH_SCRIPT"
+  exit 1
+fi
+if [[ ! -f "$WATCHDOG_SCRIPT" ]]; then
+  echo "Error: watchdog script not found at $WATCHDOG_SCRIPT"
   exit 1
 fi
 

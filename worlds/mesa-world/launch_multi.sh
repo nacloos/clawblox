@@ -162,8 +162,12 @@ do_stop() {
     echo "Waiting ${STOP_GRACE_SECONDS}s for graceful shutdown..."
     sleep "$STOP_GRACE_SECONDS"
 
-    echo "Killing tmux session '$TMUX_SESSION'..."
-    tmux kill-session -t "$TMUX_SESSION"
+    if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+      echo "Killing tmux session '$TMUX_SESSION'..."
+      tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+    else
+      echo "Tmux session '$TMUX_SESSION' already exited."
+    fi
 
     if ((${#recordings[@]} > 0)); then
       echo "Finalizing recording databases..."
