@@ -121,7 +121,7 @@ schedule_stop_watchdog() {
   printf -v stop_grace_q '%q' "$STOP_GRACE_SECONDS"
 
   local watchdog_cmd
-  watchdog_cmd="sleep $duration_seconds; if tmux has-session -t $tmux_session_q 2>/dev/null; then current_created=\$(tmux display-message -p -t $tmux_session_q '#{session_created}' 2>/dev/null || true); if [[ \"\$current_created\" == $expected_created_q ]]; then bash $launch_script_q --tmux-session $tmux_session_q --stop --stop-grace-seconds $stop_grace_q >/dev/null 2>&1 || true; fi; fi"
+  watchdog_cmd="sleep $duration_seconds; if tmux has-session -t $tmux_session_q 2>/dev/null; then current_created=\$(tmux display-message -p -t $tmux_session_q '##{session_created}' 2>/dev/null || true); if [[ \"\$current_created\" == $expected_created_q ]]; then bash $launch_script_q --tmux-session $tmux_session_q --stop --stop-grace-seconds $stop_grace_q >/dev/null 2>&1 || true; fi; fi"
   tmux run-shell -b "$watchdog_cmd"
 }
 
