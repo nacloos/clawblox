@@ -18,6 +18,8 @@ PI_NO_GLOBAL_EXTENSIONS="${PI_NO_GLOBAL_EXTENSIONS:-1}"
 SESSION_DIR="${SESSION_DIR:-}"
 SYSTEM_PROMPT_SNAPSHOT_FILE="${SYSTEM_PROMPT_SNAPSHOT_FILE:-}"
 WORLD_STARTUP_INSTRUCTIONS="${WORLD_STARTUP_INSTRUCTIONS:-}"
+PI_PROVIDER="${PI_PROVIDER:-}"
+PI_MODEL="${PI_MODEL:-}"
 
 if [[ -z "${ANTHROPIC_API_KEY:-}" && -f "$ROOT_DIR/.env" ]]; then
   set -a
@@ -157,9 +159,18 @@ if [[ -n "$PI_EXTENSION_PATH" && ( -f "$PI_EXTENSION_PATH" || -d "$PI_EXTENSION_
   EXTENSION_FLAGS+=(-e "$PI_EXTENSION_PATH")
 fi
 
+MODEL_FLAGS=()
+if [[ -n "$PI_PROVIDER" ]]; then
+  MODEL_FLAGS+=(--provider "$PI_PROVIDER")
+fi
+if [[ -n "$PI_MODEL" ]]; then
+  MODEL_FLAGS+=(--model "$PI_MODEL")
+fi
+
 set +e
 pi \
   "${WATCH_FLAG[@]}" \
+  "${MODEL_FLAGS[@]}" \
   "${EXTENSION_FLAGS[@]}" \
   --session-dir "$SESSION_DIR" \
   --append-system-prompt "$PROMPT_FILE" \

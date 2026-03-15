@@ -1,0 +1,16 @@
+Starting Mesa World (max 1 players)
+Script: main.lua
+[Lua Error] Failed to load script: runtime error: src/game/lua/runtime.rs:399:23: attempt to index nil with 'new'
+stack traceback:
+	src/game/lua/runtime.rs:399:23: in function <src/game/lua/runtime.rs:399:1>
+[Halted] Instance stopped due to Lua error. Fix the script and restart.
+[Instance] Created 9dca1347-ede6-42d6-9e2e-2b9c7a805823 for game d3daf39d-c32c-414a-87b1-25b08f591b24 (max_players=1)
+Instance: 9dca1347-ede6-42d6-9e2e-2b9c7a805823
+
+Server running on http://localhost:8080
+
+Endpoints:
+  POST /join?name=X  - Join game, returns session token
+  POST /input        - Send input (requires X-Session header)
+  GET  /observe      - Player observation (requires X-Session header)
+  GET  /skill.md     - Game skill definition
