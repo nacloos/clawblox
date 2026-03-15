@@ -201,7 +201,7 @@ def finalize_recording_db(recording: Path) -> None:
 
 
 def run_analyzer(world_dir: Path, recording: Path, analysis_dir: Path, agent_name: str) -> None:
-    analyzer = world_dir / "analyze_recording.py"
+    analyzer = world_dir / "analysis" / "analyze_recording.py"
     uv = shutil.which("uv")
     if uv:
         cmd = [

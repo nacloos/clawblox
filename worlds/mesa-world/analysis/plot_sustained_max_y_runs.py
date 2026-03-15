@@ -5,10 +5,17 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 import pandas as pd
+import seaborn as sns
 
+
+# uv run python analysis/plot_sustained_max_y_runs.py results/20260311T032536Z_run1 results/20260311T141543Z_run2 results/20260311T150153Z_run3 results/20260311T153109Z_run4
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -49,6 +56,17 @@ def parse_args() -> argparse.Namespace:
         default=60.0,
         help="Truncate plot at this time in minutes (default: 60).",
     )
+    parser.add_argument(
+        "--reanalyze",
+        action="store_true",
+        help="Re-run analyze_recording.py for each run before plotting.",
+    )
+    parser.add_argument(
+        "--analyzer-script",
+        type=Path,
+        default=None,
+        help="Path to analysis/analyze_recording.py (default: sibling file).",
+    )
     return parser.parse_args()
 
 
@@ -72,6 +90,42 @@ def agent_csv_for_run(run_dir: Path) -> Path:
     if not matches:
         raise FileNotFoundError(f"No agent_vertical.csv found under run dir: {run_dir}")
     return matches[-1]
+
+
+def latest_recording_for_run(run_dir: Path) -> Path:
+    matches = sorted(run_dir.glob("worlds/world-0/recordings/*.clawrec"))
+    if not matches:
+        raise FileNotFoundError(f"No .clawrec recording found under run dir: {run_dir}")
+    return matches[-1]
+
+
+def run_recording_analysis(analyzer_script: Path, recording: Path) -> None:
+    output_dir = recording.with_name(f"{recording.stem}_analysis")
+    uv = shutil.which("uv")
+    if uv:
+        cmd = [
+            uv,
+            "run",
+            "python",
+            str(analyzer_script),
+            str(recording),
+            "--output-dir",
+            str(output_dir),
+        ]
+    else:
+        cmd = [
+            sys.executable,
+            str(analyzer_script),
+            str(recording),
+            "--output-dir",
+            str(output_dir),
+        ]
+    print(f"[info] Running analyzer for recording: {recording.name}")
+    subprocess.run(
+        cmd,
+        check=True,
+        cwd=str(analyzer_script.parent.parent),
+    )
 
 
 def agent_start_time_s(agent_csv: Path) -> float:
@@ -104,6 +158,14 @@ def load_series(csv_path: Path, t0_s: float) -> tuple[pd.Series, pd.Series]:
 def main() -> None:
     args = parse_args()
     script_dir = Path(__file__).resolve().parent
+    analyzer_script = (
+        args.analyzer_script.resolve()
+        if args.analyzer_script is not None
+        else (script_dir / "analyze_recording.py")
+    )
+    if not analyzer_script.exists():
+        raise FileNotFoundError(f"Analyzer script not found: {analyzer_script}")
+
     output_path = (
         args.output.resolve()
         if args.output is not None
@@ -117,12 +179,24 @@ def main() -> None:
     if not run_dirs:
         raise RuntimeError("No run directories found. Provide them explicitly or check --results-dir.")
 
+    sns.set_theme(style="white", context="paper")
     plt.figure(figsize=tuple(args.figsize))
     run_series = []
 
     for idx, run_dir in enumerate(run_dirs, start=1):
-        sustained_csv = sustained_csv_for_run(run_dir)
-        agent_csv = agent_csv_for_run(run_dir)
+        if args.reanalyze:
+            recording = latest_recording_for_run(run_dir)
+            run_recording_analysis(analyzer_script, recording)
+
+        try:
+            sustained_csv = sustained_csv_for_run(run_dir)
+            agent_csv = agent_csv_for_run(run_dir)
+        except FileNotFoundError:
+            recording = latest_recording_for_run(run_dir)
+            run_recording_analysis(analyzer_script, recording)
+            sustained_csv = sustained_csv_for_run(run_dir)
+            agent_csv = agent_csv_for_run(run_dir)
+
         t0_s = agent_start_time_s(agent_csv)
 
         x, y = load_series(sustained_csv, t0_s=t0_s)
@@ -152,8 +226,8 @@ def main() -> None:
         raise RuntimeError("No runs had plottable sustained-max samples.")
 
     global_end_t = min(max(r["end_t"] for r in run_series), args.max_time_min)
-    # Muted, high-contrast palette (avoids bright default-like tones).
-    palette = ["#264653", "#2A9D8F", "#E76F51", "#6D597A", "#8AB17D", "#457B9D"]
+    cmap = mpl.colormaps["viridis"]
+    n_series = len(run_series)
     plotted = 0
     for i, series in enumerate(run_series):
         x_finite = series["x"][series["y"].notna()].reset_index(drop=True)
@@ -172,7 +246,7 @@ def main() -> None:
             x_finite = pd.concat([x_finite, pd.Series([global_end_t])], ignore_index=True)
             y_finite = pd.concat([y_finite, pd.Series([float(y_finite.iloc[-1])])], ignore_index=True)
 
-        color = palette[i % len(palette)]
+        color = cmap(0.5 if n_series == 1 else i / max(n_series - 1, 1))
         plt.step(
             x_finite,
             y_finite,
@@ -195,8 +269,7 @@ def main() -> None:
     plt.xlabel("Time (min)")
     plt.ylabel("Max height reached")
     ax = plt.gca()
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
+    sns.despine(ax=ax, top=True, right=True)
     ax.set_xlim(0, args.max_time_min)
     plt.legend()
     plt.tight_layout()

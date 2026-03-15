@@ -11,12 +11,17 @@ GENERATION_DURATION="${GENERATION_DURATION:-2h}"
 EXPERIMENT_ID="${EXPERIMENT_ID:-genexp-$(date -u +%Y%m%dT%H%M%SZ)}"
 RUN_PREFIX="${RUN_PREFIX:-$EXPERIMENT_ID}"
 TMUX_PREFIX="${TMUX_PREFIX:-clawblox-gen}"
+RUN_PREFIX_EXPLICIT=0
+TMUX_PREFIX_EXPLICIT=0
 WORLD_DIR="${WORLD_DIR:-worlds/mesa-world}"
 BASE_PORT="${BASE_PORT:-8085}"
 RECORD="${RECORD:-true}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-30}"
 STOP_GRACE_SECONDS="${STOP_GRACE_SECONDS:-5}"
+PORT_WAIT_SECONDS="${PORT_WAIT_SECONDS:-120}"
 SAVE_GRACE_SECONDS="${SAVE_GRACE_SECONDS:-300}"
+RESUME_MODE=0
+RESUME_PRUNE_PARTIAL=0
 SAVE_PROMPT="${SAVE_PROMPT:-}"
 if [[ -z "$SAVE_PROMPT" ]]; then
   SAVE_PROMPT="5 minutes remaining before session stops."
@@ -92,6 +97,13 @@ csv_escape() {
   printf '%s' "$1" | sed 's/"/""/g'
 }
 
+csv_unquote() {
+  local value="$1"
+  value="${value#\"}"
+  value="${value%\"}"
+  printf '%s' "${value//\"\"/\"}"
+}
+
 sleep_until_deadline() {
   local deadline="$1"
   while ((SECONDS < deadline)); do
@@ -138,7 +150,7 @@ Run a single-agent generation chain where each generation uses the previous
 generation workspace as --template for launch_multi.sh.
 
 Options:
-  --generations N               Number of generations to run (default: 5)
+  --generations N               Target generation count (default: 5)
   --generation-duration D       Per-generation runtime (e.g. 3600, 60m, 1h; default: 2h)
   --experiment-id ID            Metadata directory under results/ (default: timestamped)
   --run-prefix PREFIX           Prefix for per-generation run ids (default: experiment id)
@@ -148,17 +160,20 @@ Options:
   --record true|false           Recording toggle forwarded to launch_multi.sh
   --health-timeout SECONDS      Health timeout forwarded to launch_multi.sh
   --stop-grace-seconds N        Graceful stop wait forwarded to launch_multi.sh
+  --port-wait-seconds N         Port wait timeout forwarded to launch_multi.sh (default: 120)
   --save-grace-seconds N        Final save window before stop (default: 300)
   --save-prompt TEXT            Prompt sent by clawblox-agent extension at save window start
   --agent-name-prefix PREFIX    Agent name prefix forwarded to launch_multi.sh
   --goal TEXT                   Objective forwarded to launch_multi.sh
   --template PATH               Initial template directory for generation 1
+  --resume                      Resume an existing experiment id from generation_chain.csv
+  --resume-prune-partial        With --resume, delete existing run dir for next generation before relaunch
   --clawblox-bin PATH           CLAWBLOX_BIN forwarded to launch_multi.sh
   --help                        Show this message
 
 Environment overrides:
   GENERATIONS, GENERATION_DURATION, EXPERIMENT_ID, RUN_PREFIX, TMUX_PREFIX,
-  WORLD_DIR, BASE_PORT, RECORD, HEALTH_TIMEOUT, STOP_GRACE_SECONDS,
+  WORLD_DIR, BASE_PORT, RECORD, HEALTH_TIMEOUT, STOP_GRACE_SECONDS, PORT_WAIT_SECONDS,
   SAVE_GRACE_SECONDS, SAVE_PROMPT, AGENT_NAME_PREFIX, GOAL, INITIAL_TEMPLATE, CLAWBLOX_BIN
 EOF
 }
@@ -192,11 +207,13 @@ while [[ $# -gt 0 ]]; do
     --run-prefix)
       require_value "$1" "${2:-}"
       RUN_PREFIX="$2"
+      RUN_PREFIX_EXPLICIT=1
       shift 2
       ;;
     --tmux-prefix)
       require_value "$1" "${2:-}"
       TMUX_PREFIX="$2"
+      TMUX_PREFIX_EXPLICIT=1
       shift 2
       ;;
     --world-dir)
@@ -224,6 +241,11 @@ while [[ $# -gt 0 ]]; do
       STOP_GRACE_SECONDS="$2"
       shift 2
       ;;
+    --port-wait-seconds)
+      require_value "$1" "${2:-}"
+      PORT_WAIT_SECONDS="$2"
+      shift 2
+      ;;
     --save-grace-seconds)
       require_value "$1" "${2:-}"
       SAVE_GRACE_SECONDS="$2"
@@ -248,6 +270,15 @@ while [[ $# -gt 0 ]]; do
       require_value "$1" "${2:-}"
       INITIAL_TEMPLATE="$2"
       shift 2
+      ;;
+    --resume)
+      RESUME_MODE=1
+      shift
+      ;;
+    --resume-prune-partial)
+      RESUME_MODE=1
+      RESUME_PRUNE_PARTIAL=1
+      shift
       ;;
     --clawblox-bin)
       require_value "$1" "${2:-}"
@@ -282,6 +313,10 @@ if [[ ! "$STOP_GRACE_SECONDS" =~ ^[0-9]+$ ]]; then
   echo "Error: --stop-grace-seconds must be a non-negative integer (got '$STOP_GRACE_SECONDS')."
   exit 1
 fi
+if [[ ! "$PORT_WAIT_SECONDS" =~ ^[0-9]+$ ]]; then
+  echo "Error: --port-wait-seconds must be a non-negative integer (got '$PORT_WAIT_SECONDS')."
+  exit 1
+fi
 if [[ ! "$SAVE_GRACE_SECONDS" =~ ^[0-9]+$ ]]; then
   echo "Error: --save-grace-seconds must be a non-negative integer (got '$SAVE_GRACE_SECONDS')."
   exit 1
@@ -314,17 +349,81 @@ fi
 
 EXPERIMENT_SAFE_ID="$(sanitize_name "$EXPERIMENT_ID")"
 EXPERIMENT_DIR="$WORLD_ABS_DIR/results/$EXPERIMENT_SAFE_ID"
-if [[ -e "$EXPERIMENT_DIR" ]]; then
-  echo "Error: experiment directory already exists: $EXPERIMENT_DIR"
-  echo "Use --experiment-id with a unique value."
-  exit 1
-fi
-mkdir -p "$EXPERIMENT_DIR"
-EXPERIMENT_RUNS_DIR="$EXPERIMENT_DIR/runs"
-mkdir -p "$EXPERIMENT_RUNS_DIR"
-
 CHAIN_CSV="$EXPERIMENT_DIR/generation_chain.csv"
-printf 'generation,run_id,tmux_session,template_in,workspace_out,start_utc,end_utc,duration_seconds\n' >"$CHAIN_CSV"
+EXPERIMENT_RUNS_DIR="$EXPERIMENT_DIR/runs"
+START_GENERATION=1
+COMPLETED_GENERATIONS=0
+
+if ((RESUME_MODE == 1)); then
+  if [[ ! -d "$EXPERIMENT_DIR" ]]; then
+    echo "Error: --resume requested but experiment directory does not exist: $EXPERIMENT_DIR"
+    exit 1
+  fi
+  if [[ ! -f "$CHAIN_CSV" ]]; then
+    echo "Error: --resume requested but metadata CSV is missing: $CHAIN_CSV"
+    exit 1
+  fi
+  if [[ ! -d "$EXPERIMENT_RUNS_DIR" ]]; then
+    echo "Error: --resume requested but runs directory is missing: $EXPERIMENT_RUNS_DIR"
+    exit 1
+  fi
+
+  mapfile -t chain_rows < <(tail -n +2 "$CHAIN_CSV" | sed '/^[[:space:]]*$/d')
+  COMPLETED_GENERATIONS="${#chain_rows[@]}"
+
+  if ((COMPLETED_GENERATIONS > 0)); then
+    last_row="${chain_rows[$((COMPLETED_GENERATIONS - 1))]}"
+    IFS=',' read -r last_gen_raw last_run_id_raw last_tmux_raw _ last_workspace_raw _ _ _ <<<"$last_row"
+
+    if [[ -z "${last_workspace_raw:-}" || -z "${last_tmux_raw:-}" || -z "${last_run_id_raw:-}" || -z "${last_gen_raw:-}" ]]; then
+      echo "Error: failed to parse last CSV row in $CHAIN_CSV"
+      exit 1
+    fi
+
+    last_generation="$(csv_unquote "$last_gen_raw")"
+    if [[ ! "$last_generation" =~ ^[0-9]+$ ]]; then
+      echo "Error: invalid generation value in CSV: '$last_generation'"
+      exit 1
+    fi
+    COMPLETED_GENERATIONS="$last_generation"
+    START_GENERATION=$((COMPLETED_GENERATIONS + 1))
+
+    last_workspace="$(csv_unquote "$last_workspace_raw")"
+    if [[ ! -d "$last_workspace" ]]; then
+      echo "Error: last workspace in CSV does not exist: $last_workspace"
+      exit 1
+    fi
+    CURRENT_TEMPLATE="$last_workspace"
+
+    if ((RUN_PREFIX_EXPLICIT == 0)); then
+      last_run_id="$(csv_unquote "$last_run_id_raw")"
+      inferred_run_prefix="$(printf '%s' "$last_run_id" | sed -E 's/-g[0-9]{3}$//')"
+      if [[ "$inferred_run_prefix" != "$last_run_id" && -n "$inferred_run_prefix" ]]; then
+        RUN_PREFIX="$inferred_run_prefix"
+      fi
+    fi
+    if ((TMUX_PREFIX_EXPLICIT == 0)); then
+      last_tmux_session="$(csv_unquote "$last_tmux_raw")"
+      inferred_tmux_prefix="$(printf '%s' "$last_tmux_session" | sed -E 's/-g[0-9]{3}$//')"
+      if [[ "$inferred_tmux_prefix" != "$last_tmux_session" && -n "$inferred_tmux_prefix" ]]; then
+        TMUX_PREFIX="$inferred_tmux_prefix"
+      fi
+    fi
+
+    if [[ -n "$INITIAL_TEMPLATE" ]]; then
+      echo "Note: ignoring --template in --resume mode because completed generations already exist."
+    fi
+  fi
+else
+  if [[ -e "$EXPERIMENT_DIR" ]]; then
+    echo "Error: experiment directory already exists: $EXPERIMENT_DIR"
+    echo "Use --experiment-id with a unique value or rerun with --resume."
+    exit 1
+  fi
+  mkdir -p "$EXPERIMENT_DIR"
+  mkdir -p "$EXPERIMENT_RUNS_DIR"
+  printf 'generation,run_id,tmux_session,template_in,workspace_out,start_utc,end_utc,duration_seconds\n' >"$CHAIN_CSV"
+fi
 
 CURRENT_SESSION=""
 cleanup_active_session() {
@@ -355,10 +454,21 @@ echo "Starting generation chain"
 echo "  Generations: $GENERATIONS"
 echo "  Duration each: ${GENERATION_DURATION_SECONDS}s"
 echo "  Save grace: ${SAVE_GRACE_SECONDS}s"
+echo "  Resume: $([[ "$RESUME_MODE" -eq 1 ]] && echo "true" || echo "false")"
+if ((RESUME_MODE == 1)); then
+  echo "  Completed: $COMPLETED_GENERATIONS"
+  echo "  Next generation: $START_GENERATION"
+fi
 echo "  Experiment metadata: $EXPERIMENT_DIR"
 echo
 
-for ((gen = 1; gen <= GENERATIONS; gen++)); do
+if ((START_GENERATION > GENERATIONS)); then
+  echo "Nothing to run: completed generations already reach target ($GENERATIONS)."
+  echo "Metadata CSV: $CHAIN_CSV"
+  exit 0
+fi
+
+for ((gen = START_GENERATION; gen <= GENERATIONS; gen++)); do
   gen_tag="$(printf 'g%03d' "$gen")"
   run_id="$(sanitize_name "${RUN_PREFIX}-${gen_tag}")"
   tmux_session="$(sanitize_name "${TMUX_PREFIX}-${gen_tag}")"
@@ -372,6 +482,20 @@ for ((gen = 1; gen <= GENERATIONS; gen++)); do
     echo "  template_in: $template_in"
   else
     echo "  template_in: (none)"
+  fi
+
+  run_dir="$EXPERIMENT_RUNS_DIR/$run_id"
+  if [[ -e "$run_dir" ]]; then
+    if ((RESUME_MODE == 1 && RESUME_PRUNE_PARTIAL == 1 && gen == START_GENERATION)); then
+      echo "  removing partial run directory: $run_dir"
+      rm -rf "$run_dir"
+    else
+      echo "Error: run directory already exists: $run_dir"
+      if ((RESUME_MODE == 1)); then
+        echo "Use --resume-prune-partial to remove this partial directory and continue."
+      fi
+      exit 1
+    fi
   fi
 
   launch_cmd=(
@@ -388,6 +512,7 @@ for ((gen = 1; gen <= GENERATIONS; gen++)); do
     --health-timeout "$HEALTH_TIMEOUT"
     --agent-name-prefix "$AGENT_NAME_PREFIX"
     --stop-grace-seconds "$STOP_GRACE_SECONDS"
+    --port-wait-seconds "$PORT_WAIT_SECONDS"
   )
   if [[ -n "$GOAL" ]]; then
     launch_cmd+=(--goal "$GOAL")
@@ -440,8 +565,6 @@ for ((gen = 1; gen <= GENERATIONS; gen++)); do
   echo "  stopping session: $tmux_session"
   bash "$LAUNCH_SCRIPT" --tmux-session "$tmux_session" --stop --stop-grace-seconds "$STOP_GRACE_SECONDS"
   CURRENT_SESSION=""
-
-  run_dir="$EXPERIMENT_RUNS_DIR/$run_id"
 
   agents_root="$run_dir/worlds/world-0/agents"
   if [[ ! -d "$agents_root" ]]; then
