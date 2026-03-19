@@ -21,6 +21,12 @@ AGENT_NAME_PREFIX="${AGENT_NAME_PREFIX:-mesa}"
 STOP_GRACE_SECONDS="${STOP_GRACE_SECONDS:-5}"
 GOAL="${GOAL:-}"
 TEMPLATE_DIR="${TEMPLATE_DIR:-}"
+RESULTS_ROOT="${RESULTS_ROOT:-}"
+PORT_WAIT_SECONDS="${PORT_WAIT_SECONDS:-120}"
+AGENT_CHECKPOINT_AT_EPOCH="${AGENT_CHECKPOINT_AT_EPOCH:-}"
+AGENT_CHECKPOINT_PROMPT="${AGENT_CHECKPOINT_PROMPT:-}"
+AGENT_CHECKPOINT_TRIGGER_TURN="${AGENT_CHECKPOINT_TRIGGER_TURN:-1}"
+AGENT_CHECKPOINT_DISABLE_AUTO_LOOP="${AGENT_CHECKPOINT_DISABLE_AUTO_LOOP:-0}"
 
 AGENT_SCRIPT="$ROOT_DIR/agent/run_agent.sh"
 if [[ ! -f "$AGENT_SCRIPT" ]]; then
@@ -52,8 +58,10 @@ Options:
   --run-id ID                  Run identifier under results/
   --agent-name-prefix PREFIX   Agent name prefix
   --stop-grace-seconds N       Wait after Ctrl+C before force-killing tmux
+  --port-wait-seconds N        Wait up to N seconds for target ports to free before failing
   --goal TEXT                  Custom startup objective passed to agents
   --template PATH              Agent template directory (relative to project root or absolute)
+  --results-root PATH          Results root directory (default: <world-dir>/results)
   --clawblox-bin PATH          Path or command name for clawblox binary
 
 Environment variables:
@@ -67,8 +75,14 @@ Environment variables:
   RUN_ID            Run identifier under results/ (default: UTC timestamp)
   AGENT_NAME_PREFIX Agent name prefix (default: mesa)
   STOP_GRACE_SECONDS Seconds to wait after Ctrl+C before force-closing tmux (default: 5)
+  PORT_WAIT_SECONDS Seconds to wait for target ports to free before failing (default: 120)
   GOAL              Custom startup objective passed to agents
   TEMPLATE_DIR      Agent template directory (run_agent.sh TEMPLATE_DIR override)
+  RESULTS_ROOT      Results root directory (default: <world-dir>/results)
+  AGENT_CHECKPOINT_AT_EPOCH       Unix epoch seconds when checkpoint prompt should be sent
+  AGENT_CHECKPOINT_PROMPT         Checkpoint message sent from clawblox-agent extension
+  AGENT_CHECKPOINT_TRIGGER_TURN   1/0 trigger a turn when checkpoint prompt is sent (default: 1)
+  AGENT_CHECKPOINT_DISABLE_AUTO_LOOP 1/0 disable continue loop when checkpoint fires (default: 0)
   CLAWBLOX_BIN      Path to clawblox binary (auto-detected)
 EOF
 }
@@ -157,13 +171,17 @@ do_stop() {
     echo "Sending Ctrl+C to panes in tmux session '$TMUX_SESSION'..."
     while IFS= read -r pane_target; do
       tmux send-keys -t "$pane_target" C-c
-    done < <(tmux list-panes -a -t "$TMUX_SESSION" -F "#{session_name}:#{window_name}.#{pane_index}")
+    done < <(tmux list-panes -t "$TMUX_SESSION" -F "#{session_name}:#{window_name}.#{pane_index}")
 
     echo "Waiting ${STOP_GRACE_SECONDS}s for graceful shutdown..."
     sleep "$STOP_GRACE_SECONDS"
 
-    echo "Killing tmux session '$TMUX_SESSION'..."
-    tmux kill-session -t "$TMUX_SESSION"
+    if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+      echo "Killing tmux session '$TMUX_SESSION'..."
+      tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+    else
+      echo "Tmux session '$TMUX_SESSION' already exited."
+    fi
 
     if ((${#recordings[@]} > 0)); then
       echo "Finalizing recording databases..."
@@ -256,6 +274,11 @@ while [[ $# -gt 0 ]]; do
       STOP_GRACE_SECONDS="$2"
       shift 2
       ;;
+    --port-wait-seconds)
+      require_value "$1" "${2:-}"
+      PORT_WAIT_SECONDS="$2"
+      shift 2
+      ;;
     --clawblox-bin)
       require_value "$1" "${2:-}"
       CLAWBLOX_BIN="$2"
@@ -269,6 +292,11 @@ while [[ $# -gt 0 ]]; do
     --template|--template-dir)
       require_value "$1" "${2:-}"
       TEMPLATE_DIR="$2"
+      shift 2
+      ;;
+    --results-root)
+      require_value "$1" "${2:-}"
+      RESULTS_ROOT="$2"
       shift 2
       ;;
     --help|-h)
@@ -285,6 +313,10 @@ done
 
 if ! is_nonnegative_int "$STOP_GRACE_SECONDS"; then
   echo "Error: STOP_GRACE_SECONDS must be a non-negative integer (got '$STOP_GRACE_SECONDS')."
+  exit 1
+fi
+if ! is_nonnegative_int "$PORT_WAIT_SECONDS"; then
+  echo "Error: PORT_WAIT_SECONDS must be a non-negative integer (got '$PORT_WAIT_SECONDS')."
   exit 1
 fi
 
@@ -364,17 +396,15 @@ if [[ -n "$TEMPLATE_DIR" ]]; then
 fi
 
 RUN_SAFE_ID="$(sanitize_name "$RUN_ID")"
-RUN_DIR="$WORLD_ABS_DIR/results/$RUN_SAFE_ID"
-WORLDS_ROOT="$RUN_DIR/worlds"
-
-if [[ -e "$RUN_DIR" ]]; then
-  echo "Error: run directory already exists: $RUN_DIR"
-  echo "Set RUN_ID to a unique value and retry."
-  exit 1
+if [[ -n "$RESULTS_ROOT" ]]; then
+  if [[ "$RESULTS_ROOT" = /* ]]; then
+    RESULTS_ABS_ROOT="$RESULTS_ROOT"
+  else
+    RESULTS_ABS_ROOT="$ROOT_DIR/$RESULTS_ROOT"
+  fi
+else
+  RESULTS_ABS_ROOT="$WORLD_ABS_DIR/results"
 fi
-
-mkdir -p "$WORLDS_ROOT"
-printf '%s\n' "$RUN_DIR" >"$WORLD_ABS_DIR/results/latest_run.txt"
 
 if [[ "$RECORD" == "true" && "$CLAWBLOX_SUPPORTS_RECORD_DIR" -ne 1 ]]; then
   echo "Error: '$CLAWBLOX_BIN run' does not support --record-dir."
@@ -406,22 +436,68 @@ port_is_in_use() {
 }
 
 ensure_ports_available() {
-  local busy=0
-  for ((i = 0; i < NUM_WORLDS; i++)); do
-    local port=$((BASE_PORT + i))
-    if port_is_in_use "$port"; then
-      echo "Error: target port $port is already in use."
-      busy=1
+  local i
+  local port
+  local waited=0
+  local deadline=0
+  local busy_ports=()
+  local pids=()
+
+  while true; do
+    busy_ports=()
+    for ((i = 0; i < NUM_WORLDS; i++)); do
+      port=$((BASE_PORT + i))
+      if port_is_in_use "$port"; then
+        busy_ports+=("$port")
+      fi
+    done
+
+    if ((${#busy_ports[@]} == 0)); then
+      return 0
     fi
+
+    if ((PORT_WAIT_SECONDS == 0)); then
+      break
+    fi
+
+    if ((waited == 0)); then
+      deadline=$((SECONDS + PORT_WAIT_SECONDS))
+      echo "Target ports are busy (${busy_ports[*]}). Waiting up to ${PORT_WAIT_SECONDS}s for release..."
+    fi
+    if ((SECONDS >= deadline)); then
+      break
+    fi
+
+    waited=1
+    sleep 1
   done
 
-  if [[ "$busy" -eq 1 ]]; then
-    echo "Resolve busy ports, then rerun. If these are from a prior launch, run: $(basename "$0") --stop"
-    exit 1
-  fi
+  for port in "${busy_ports[@]}"; do
+    echo "Error: target port $port is already in use."
+    if command -v lsof >/dev/null 2>&1; then
+      mapfile -t pids < <(lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sort -u)
+      if ((${#pids[@]} > 0)); then
+        echo "  listening pids: ${pids[*]}"
+      fi
+    fi
+  done
+  echo "Resolve busy ports, then rerun. If these are from a prior launch, run: $(basename "$0") --stop"
+  exit 1
 }
 
 ensure_ports_available
+
+RUN_DIR="$RESULTS_ABS_ROOT/$RUN_SAFE_ID"
+WORLDS_ROOT="$RUN_DIR/worlds"
+
+if [[ -e "$RUN_DIR" ]]; then
+  echo "Error: run directory already exists: $RUN_DIR"
+  echo "Set RUN_ID to a unique value and retry."
+  exit 1
+fi
+
+mkdir -p "$WORLDS_ROOT"
+printf '%s\n' "$RUN_DIR" >"$RESULTS_ABS_ROOT/latest_run.txt"
 
 echo "Starting $NUM_WORLDS world servers (ports $BASE_PORT-$((BASE_PORT + NUM_WORLDS - 1)))..."
 
@@ -487,6 +563,14 @@ if [[ -n "$TEMPLATE_ABS_DIR" ]]; then
   TEMPLATE_ENV_PREFIX="TEMPLATE_DIR=$(printf '%q' "$TEMPLATE_ABS_DIR") "
 fi
 
+CHECKPOINT_ENV_PREFIX=""
+if [[ -n "$AGENT_CHECKPOINT_AT_EPOCH" ]]; then
+  CHECKPOINT_ENV_PREFIX+="AGENT_CHECKPOINT_AT_EPOCH=$(printf '%q' "$AGENT_CHECKPOINT_AT_EPOCH") "
+  CHECKPOINT_ENV_PREFIX+="AGENT_CHECKPOINT_PROMPT=$(printf '%q' "$AGENT_CHECKPOINT_PROMPT") "
+  CHECKPOINT_ENV_PREFIX+="AGENT_CHECKPOINT_TRIGGER_TURN=$(printf '%q' "$AGENT_CHECKPOINT_TRIGGER_TURN") "
+  CHECKPOINT_ENV_PREFIX+="AGENT_CHECKPOINT_DISABLE_AUTO_LOOP=$(printf '%q' "$AGENT_CHECKPOINT_DISABLE_AUTO_LOOP") "
+fi
+
 for ((i = 0; i < NUM_WORLDS; i++)); do
   port=$((BASE_PORT + i))
   url="http://localhost:${port}"
@@ -523,10 +607,10 @@ EOF
     if [[ -n "$startup_instructions" ]]; then
       startup_instructions_q="$(printf '%q' "$startup_instructions")"
       tmux send-keys -t "${TMUX_SESSION}:agents-$i" \
-        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' ${TEMPLATE_ENV_PREFIX}WORLD_STARTUP_INSTRUCTIONS=${startup_instructions_q} bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
+        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' ${TEMPLATE_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}WORLD_STARTUP_INSTRUCTIONS=${startup_instructions_q} bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
     else
       tmux send-keys -t "${TMUX_SESSION}:agents-$i" \
-        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' ${TEMPLATE_ENV_PREFIX}bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
+        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' ${TEMPLATE_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
     fi
   done
 done
@@ -541,6 +625,7 @@ echo "  Agents:  $TOTAL_AGENTS ($AGENTS_PER_WORLD per world)"
 echo "  Record:  $RECORD"
 echo "  Session: $TMUX_SESSION"
 echo "  Results: $RUN_DIR"
+echo "  Results Root: $RESULTS_ABS_ROOT"
 echo "  World Data: $WORLDS_ROOT"
 echo "========================================"
 echo
