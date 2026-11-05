@@ -581,6 +581,96 @@ impl PhysicsWorld {
             }
         }
 
+        // Wall-wedge recovery. The same degenerate sweep happens against a
+        // vertical face: pressed into a wall, the capsule rests at the
+        // controller's contact offset, so every sweep — even one straight down
+        // or up along the face — returns an immediate toi=0 hit against the
+        // wall's horizontal normal and move_shape applies nothing. The
+        // character hangs on the face mid-air for as long as the push lasts,
+        // and a jump pressed into the face gives no rise (or wedges partway
+        // through a tick's climb). A wall can't legitimately block vertical
+        // motion, so detect any shortfall (vertical motion requested, less
+        // applied, every blocking contact wall-like) and redo the sweep once
+        // from a pose nudged off the face, without the into-wall part of the
+        // motion.
+        let desired_vert = desired.y.abs();
+        if desired_vert > 1.0e-5
+            && movement.translation.y.abs() + 1.0e-4 < desired_vert
+            && !collisions.is_empty()
+            && collisions
+                .iter()
+                .all(|c| c.hit.normal1.y.abs().max(c.hit.normal2.y.abs()) < 0.3)
+            // Kill-switch for faithful replay of recordings made before this
+            // recovery existed (A/B debugging).
+            && std::env::var_os("CLAWBLOX_DISABLE_WALL_WEDGE_RECOVERY").is_none()
+        {
+            // Nudge far enough to restore the contact offset plus a margin:
+            // a shallow, fast descent along a face can also end slightly
+            // inside it, and from there every sweep is blocked.
+            const CONTACT_OFFSET: f32 = 0.05;
+            const MIN_WALL_NUDGE: f32 = 0.02;
+            const MAX_WALL_NUDGE: f32 = 0.5;
+            let mut walls: Vec<(Vector<f32>, f32)> = Vec::new();
+            for c in &collisions {
+                let n = vector![c.hit.normal1.x, 0.0, c.hit.normal1.z];
+                let len = n.norm();
+                if len <= 1.0e-5 {
+                    continue;
+                }
+                let n = n / len;
+                let dist = self
+                    .collider_set
+                    .get(c.handle)
+                    .and_then(|wall| {
+                        rapier3d::parry::query::contact(
+                            &current_pos,
+                            shape,
+                            wall.position(),
+                            wall.shape(),
+                            CONTACT_OFFSET + MAX_WALL_NUDGE,
+                        )
+                        .ok()
+                        .flatten()
+                    })
+                    .map(|contact| contact.dist)
+                    .unwrap_or(CONTACT_OFFSET);
+                let push = (CONTACT_OFFSET + 0.01 - dist).clamp(MIN_WALL_NUDGE, MAX_WALL_NUDGE);
+                match walls.iter_mut().find(|(m, _)| m.dot(&n) > 0.999) {
+                    Some(wall) => wall.1 = wall.1.max(push),
+                    None => walls.push((n, push)),
+                }
+            }
+            if !walls.is_empty() {
+                let nudge: Vector<f32> = walls.iter().map(|(n, push)| *n * *push).sum();
+                let mut along_wall = desired;
+                for (n, _) in &walls {
+                    let into = along_wall.dot(n);
+                    if into < 0.0 {
+                        along_wall -= *n * into;
+                    }
+                }
+                let mut nudged_pos = current_pos;
+                nudged_pos.translation.vector += nudge;
+                let mut nudged_collisions = Vec::new();
+                let nudged_movement = controller.move_shape(
+                    dt,
+                    &self.rigid_body_set,
+                    &self.collider_set,
+                    &self.query_pipeline,
+                    shape,
+                    &nudged_pos,
+                    along_wall,
+                    filter,
+                    |collision| nudged_collisions.push(collision),
+                );
+                if nudged_movement.translation.y.abs() > movement.translation.y.abs() + 1.0e-5 {
+                    movement = nudged_movement;
+                    movement.translation += nudge;
+                    collisions = nudged_collisions;
+                }
+            }
+        }
+
         // Diagnostic trace for wedged horizontal movement (CLAWBLOX_TRACE_MOVE=1).
         if std::env::var_os("CLAWBLOX_TRACE_MOVE").is_some() {
             let want = (desired.x * desired.x + desired.z * desired.z).sqrt();
@@ -636,6 +726,23 @@ impl PhysicsWorld {
             );
         }
 
+        // Steep-edge support. Rapier reports the controller grounded on any
+        // contact less than ~89.9° from up, so a capsule whose lower
+        // hemisphere has caught a ledge's top edge from the side counts as
+        // standing. Grounded characters don't accumulate gravity, so the
+        // character then perches on the lip of a vertical face indefinitely.
+        // Keep the grounded flag only if some support within the controller's
+        // ground prediction is no steeper than its climbable slope.
+        if movement.grounded
+            && std::env::var_os("CLAWBLOX_DISABLE_STEEP_EDGE_SUPPORT_CHECK").is_none()
+        {
+            let end_pos = Translation::from(movement.translation) * current_pos;
+            if !self.has_walkable_support(&end_pos, shape, filter, controller.max_slope_climb_angle)
+            {
+                movement.grounded = false;
+            }
+        }
+
         // Use set_next_kinematic_translation like physics-world
         // This schedules the movement for the next physics step
         let new_pos = current_pos.translation.vector + movement.translation;
@@ -647,6 +754,45 @@ impl PhysicsWorld {
             state.grounded = movement.grounded;
         }
         Some(movement)
+    }
+
+    /// Whether a character shape at `pos` has a support within the
+    /// controller's ground prediction (offset + 0.05, as in Rapier) whose
+    /// contact normal is within `max_slope` of up.
+    fn has_walkable_support(
+        &self,
+        pos: &Isometry<f32>,
+        shape: &dyn Shape,
+        filter: QueryFilter,
+        max_slope: f32,
+    ) -> bool {
+        const GROUND_PREDICTION: f32 = 0.05 + 0.05;
+        let min_up = max_slope.cos();
+        let aabb = shape.compute_aabb(pos).loosened(GROUND_PREDICTION);
+        let mut walkable = false;
+        self.query_pipeline
+            .colliders_with_aabb_intersecting_aabb(&aabb, |handle| {
+                let Some(collider) = self.collider_set.get(*handle) else {
+                    return true;
+                };
+                if !filter.test(&self.rigid_body_set, *handle, collider) {
+                    return true;
+                }
+                if let Ok(Some(contact)) = rapier3d::parry::query::contact(
+                    pos,
+                    shape,
+                    collider.position(),
+                    collider.shape(),
+                    GROUND_PREDICTION,
+                ) {
+                    if contact.normal2.y >= min_up {
+                        walkable = true;
+                        return false;
+                    }
+                }
+                true
+            });
+        walkable
     }
 
     /// Snapshot the speeds of dynamic bodies near any character capsule
