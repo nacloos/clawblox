@@ -25,6 +25,79 @@ pub struct SandboxLayout {
     pub host_shm_dir: Option<PathBuf>,
     pub enable_weaker_nested_sandbox: bool,
     pub unset_env: Vec<String>,
+    /// when set, the sandbox gets no network except these
+    /// endpoints, each bridged in through a unix socket.
+    pub net_bridges: Option<Vec<NetBridge>>,
+}
+
+/// One TCP endpoint reachable from inside a network-isolated sandbox: the sandbox
+/// sees it at 127.0.0.1:`port` (and as `name` in /etc/hosts); outside, the bridge
+/// connects to `host`:`port`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NetBridge {
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+}
+
+impl NetBridge {
+    pub fn new(name: &str, host: &str, port: u16) -> Self {
+        Self {
+            name: name.to_string(),
+            host: host.to_string(),
+            port,
+        }
+    }
+}
+
+/// Host-side dir for one agent's bridge sockets. It lives in the run container's own
+/// temp dir: run dirs may be bind mounts that can't hold unix sockets (Docker Desktop
+/// on macOS), and the sandbox gets a private tmpfs at /tmp, so it can't see this.
+pub fn net_bridge_dir(ctx: &AgentContext) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    agent_dir_from_context(ctx).hash(&mut hasher);
+    std::env::temp_dir().join(format!("clawblox-net-{:016x}", hasher.finish()))
+}
+
+/// Parse `name=host:port[,name=host:port...]`.
+pub fn parse_net_bridges(spec: &str) -> Result<Vec<NetBridge>, String> {
+    let mut bridges = Vec::new();
+    for item in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (name, target) = item
+            .split_once('=')
+            .ok_or_else(|| format!("bad net bridge {item:?}: expected name=host:port"))?;
+        let (host, port) = target
+            .rsplit_once(':')
+            .ok_or_else(|| format!("bad net bridge {item:?}: expected name=host:port"))?;
+        let ok = |v: &str| {
+            !v.is_empty()
+                && v
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'))
+        };
+        if !ok(name) || !ok(host) {
+            return Err(format!("bad net bridge {item:?}"));
+        }
+        let port: u16 = port
+            .parse()
+            .map_err(|_| format!("bad net bridge port in {item:?}"))?;
+        bridges.push(NetBridge::new(name, host, port));
+    }
+    Ok(bridges)
+}
+
+/// `CLAWBLOX_SANDBOX_NETWORK=isolated` with `CLAWBLOX_SANDBOX_NET_BRIDGES`.
+/// `Ok(None)` when isolation isn't requested.
+pub fn net_bridges_from_env() -> Result<Option<Vec<NetBridge>>, String> {
+    match std::env::var("CLAWBLOX_SANDBOX_NETWORK").ok().as_deref() {
+        None | Some("") | Some("shared") => Ok(None),
+        Some("isolated") => parse_net_bridges(
+            &std::env::var("CLAWBLOX_SANDBOX_NET_BRIDGES").unwrap_or_default(),
+        )
+        .map(Some),
+        Some(other) => Err(format!("unknown CLAWBLOX_SANDBOX_NETWORK={other:?}")),
+    }
 }
 
 impl SandboxLayout {
@@ -52,7 +125,13 @@ impl SandboxLayout {
             host_shm_dir: None,
             enable_weaker_nested_sandbox: false,
             unset_env: Vec::new(),
+            net_bridges: None,
         }
+    }
+
+    pub fn with_net_bridges(mut self, bridges: Vec<NetBridge>) -> Self {
+        self.net_bridges = Some(bridges);
+        self
     }
 
     /// Translate a host path to its guest (sandbox) equivalent.
@@ -200,6 +279,14 @@ pub fn detect_sandbox_deps_root(
     }
 }
 
+/// Claude Code user configuration in the sandbox home, read-only.
+pub const CLAUDE_READ_ONLY: &[&str] = &[
+    ".claude/settings.json",
+    ".claude/skills",
+    ".claude/agents",
+    ".claude/commands",
+];
+
 /// Files in the agent's runtime dir that launch or configure it.
 pub const RUNTIME_CONTROL_FILES: &[&str] = &[
     "start.sh",
@@ -321,6 +408,21 @@ fn wrap_command_unchecked(
             layout.guest_logs.join(name).display().to_string(),
         ]);
     }
+    // Claude Code's user configuration is read-only. ~/.claude
+    // is its own mount point, so it can't be renamed aside and replaced; inside it, the
+    // settings and the user skills and agents (which can declare hooks) are read-only.
+    args.extend([
+        "--bind-try".to_string(),
+        layout.host_home_dir.join(".claude").display().to_string(),
+        layout.guest_home.join(".claude").display().to_string(),
+    ]);
+    for rel in CLAUDE_READ_ONLY {
+        args.extend([
+            "--ro-bind-try".to_string(),
+            layout.host_home_dir.join(rel).display().to_string(),
+            layout.guest_home.join(rel).display().to_string(),
+        ]);
+    }
 
     if layout.guest_plugin.is_some() {
         args.extend([
@@ -380,6 +482,8 @@ fn wrap_command_unchecked(
         "--chdir".to_string(),
         layout.guest_workspace.display().to_string(),
         "--die-with-parent".to_string(),
+        // nothing an agent starts outlives its session.
+        "--unshare-pid".to_string(),
     ]);
     if ctx.paths.workspace_dir.join(".venv").is_dir() {
         args.extend([
@@ -406,6 +510,8 @@ fn wrap_command_unchecked(
     for name in &layout.unset_env {
         args.extend(["--unsetenv".to_string(), name.clone()]);
     }
+    // the world's operator credential never enters the sandbox.
+    args.extend(["--unsetenv".to_string(), "WORLD_OPERATOR_TOKEN".to_string()]);
 
     if let Some(root) = &layout.host_deps_root {
         args.extend([
@@ -454,13 +560,92 @@ fn wrap_command_unchecked(
         ]);
     }
 
-    args.push("--".to_string());
-    args.push(command.program.display().to_string());
+    let Some(bridges) = layout.net_bridges.as_ref() else {
+        args.push("--".to_string());
+        args.push(command.program.display().to_string());
+        args.extend(command.args);
+        return CommandSpec {
+            program: PathBuf::from("bwrap"),
+            args,
+            env: command.env,
+            cwd: ctx.paths.workspace_dir.clone(),
+        };
+    };
+
+    // a private network namespace. Outside, one socat per
+    // endpoint listens on a unix socket in a dir only the host can write; inside, one
+    // socat per endpoint listens on 127.0.0.1 and forwards to that socket.
+    let net_dir = net_bridge_dir(ctx);
+    let socat = if Path::new("/usr/bin/socat").is_file() {
+        "/usr/bin/socat"
+    } else {
+        "socat"
+    };
+    args.extend([
+        "--unshare-net".to_string(),
+        "--ro-bind".to_string(),
+        net_dir.display().to_string(),
+        "/net-bridge".to_string(),
+    ]);
+    if let Some(world) = bridges.iter().find(|b| b.name == "world") {
+        args.extend([
+            "--setenv".to_string(),
+            "WORLD_INTERNAL_BASE_URL".to_string(),
+            format!("http://world:{}", world.port),
+        ]);
+    }
+    let mut inner = String::new();
+    for b in bridges {
+        inner.push_str(&format!(
+            "{socat} TCP-LISTEN:{port},bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:/net-bridge/{name}.sock & ",
+            port = b.port,
+            name = b.name
+        ));
+    }
+    // Fail closed: start the agent only once every bridge is listening on loopback.
+    let ports: Vec<String> = bridges.iter().map(|b| format!("{:04X}", b.port)).collect();
+    inner.push_str(&format!(
+        "for p in {}; do n=0; until grep -q \"0100007F:$p 00000000:0000 0A\" /proc/net/tcp; do n=$((n+1)); [ $n -gt 50 ] && {{ echo \"clawblox: sandbox bridge $p not listening\" >&2; exit 1; }}; sleep 0.1; done; done; ",
+        ports.join(" ")
+    ));
+    inner.push_str("exec \"$@\"");
+    args.extend([
+        "--".to_string(),
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        inner,
+        "clawblox-net".to_string(),
+        command.program.display().to_string(),
+    ]);
     args.extend(command.args);
 
+    let quoted_dir = format!("'{}'", net_dir.display().to_string().replace('\'', "'\\''"));
+    let mut outer = format!(
+        "set -u; d={quoted_dir}; mkdir -p \"$d\" && chmod 700 \"$d\" || exit 1; rm -f \"$d\"/*.sock; pids=''; trap 'kill $pids 2>/dev/null' EXIT HUP; "
+    );
+    for b in bridges {
+        outer.push_str(&format!(
+            "{socat} UNIX-LISTEN:\"$d/{name}.sock\",fork,mode=600,unlink-close=0 TCP:{host}:{port} & pids=\"$pids $!\"; ",
+            name = b.name,
+            host = b.host,
+            port = b.port
+        ));
+    }
+    let names: Vec<&str> = bridges.iter().map(|b| b.name.as_str()).collect();
+    outer.push_str(&format!(
+        "for s in {}; do n=0; until [ -S \"$d/$s.sock\" ]; do n=$((n+1)); [ $n -gt 50 ] && {{ echo \"clawblox: bridge $s did not start\" >&2; exit 1; }}; sleep 0.1; done; done; \"$@\"",
+        names.join(" ")
+    ));
+    let mut outer_args = vec![
+        "-c".to_string(),
+        outer,
+        "clawblox-net".to_string(),
+        "bwrap".to_string(),
+    ];
+    outer_args.extend(args);
     CommandSpec {
-        program: PathBuf::from("bwrap"),
-        args,
+        program: PathBuf::from("/bin/sh"),
+        args: outer_args,
         env: command.env,
         cwd: ctx.paths.workspace_dir.clone(),
     }
@@ -530,6 +715,115 @@ mod tests {
     use super::*;
     use crate::agent::{AgentPaths, AgentSettings};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn claude_layout(ctx: &AgentContext) -> SandboxLayout {
+        SandboxLayout::for_agent(ctx, PathBuf::from("/usr/local/bin/claude"), "claude")
+            .with_claude_plugin()
+            .with_hosts_file(ctx.paths.runtime_dir.join("sandbox_hosts"))
+    }
+
+    #[test]
+    fn agent_sandbox_has_its_own_pid_namespace_and_read_only_claude_settings() {
+        // Own pid namespace; read-only Claude Code settings.
+        let root = test_root();
+        let ctx = test_context(root.clone());
+        let layout = claude_layout(&ctx);
+        let wrapped = wrap_command_unchecked(
+            &ctx,
+            &layout,
+            CommandSpec::new("/sandbox-bin/claude", "/workspace"),
+        );
+        assert!(wrapped.args.contains(&"--unshare-pid".to_string()));
+        assert!(has_arg_pair(&wrapped.args, "--unsetenv", "WORLD_OPERATOR_TOKEN"));
+        let host = layout.host_home_dir.join(".claude/settings.json").display().to_string();
+        let home_rw = wrapped
+            .args
+            .windows(3)
+            .position(|w| w[0] == "--bind" && w[2] == "/home/agent")
+            .expect("home bind");
+        let settings_ro = wrapped
+            .args
+            .windows(3)
+            .position(|w| {
+                w[0] == "--ro-bind-try" && w[1] == host && w[2] == "/home/agent/.claude/settings.json"
+            })
+            .expect("no read-only bind for the Claude settings");
+        assert!(settings_ro > home_rw);
+        let claude_dir = wrapped
+            .args
+            .windows(3)
+            .position(|w| w[0] == "--bind-try" && w[2] == "/home/agent/.claude")
+            .expect("~/.claude must be its own mount point");
+        assert!(claude_dir > home_rw && claude_dir < settings_ro);
+        for rel in [".claude/skills", ".claude/agents", ".claude/commands"] {
+            assert!(wrapped.args.windows(3).any(|w| w[0] == "--ro-bind-try"
+                && w[2] == format!("/home/agent/{rel}")));
+        }
+        // Without network isolation configured, the command is plain bwrap.
+        assert_eq!(wrapped.program, PathBuf::from("bwrap"));
+        assert!(!wrapped.args.contains(&"--unshare-net".to_string()));
+    }
+
+    #[test]
+    fn network_isolation_bridges_only_the_configured_endpoints() {
+        // no network inside the sandbox except the
+        // meter and the world proxy, each bridged through a unix socket.
+        let root = test_root();
+        let ctx = test_context(root.clone());
+        let layout = claude_layout(&ctx).with_net_bridges(vec![
+            NetBridge::new("meter", "meter", 8411),
+            NetBridge::new("world", "127.0.0.1", 43210),
+        ]);
+        let wrapped = wrap_command_unchecked(
+            &ctx,
+            &layout,
+            CommandSpec::new("/sandbox-bin/claude", "/workspace").arg("Begin"),
+        );
+        assert_eq!(wrapped.program, PathBuf::from("/bin/sh"));
+        let outer = &wrapped.args[1];
+        assert!(outer.contains("UNIX-LISTEN:"));
+        assert!(outer.contains("meter.sock"));
+        assert!(outer.contains("TCP:meter:8411"));
+        assert!(outer.contains("TCP:127.0.0.1:43210"));
+        assert!(outer.contains("unlink-close=0"));
+        assert!(outer.contains("did not start") && outer.contains("exit 1"));
+        assert!(!outer.contains("TERM"));
+        let bwrap_at = wrapped.args.iter().position(|a| a == "bwrap").expect("bwrap");
+        let bwrap_args = &wrapped.args[bwrap_at + 1..];
+        assert!(bwrap_args.contains(&"--unshare-net".to_string()));
+        let net_dir = net_bridge_dir(&ctx).display().to_string();
+        assert!(!net_dir.starts_with(&root.display().to_string()));
+        assert!(bwrap_args
+            .windows(3)
+            .any(|w| w[0] == "--ro-bind" && w[1] == net_dir && w[2] == "/net-bridge"));
+        assert!(bwrap_args.windows(3).any(|w| w[0] == "--setenv"
+            && w[1] == "WORLD_INTERNAL_BASE_URL"
+            && w[2] == "http://world:43210"));
+        let dash = bwrap_args.iter().position(|a| a == "--").expect("--");
+        assert_eq!(bwrap_args[dash + 1], "/bin/sh");
+        let inner = &bwrap_args[dash + 3];
+        assert!(inner.contains("TCP-LISTEN:8411,bind=127.0.0.1"));
+        assert!(inner.contains("UNIX-CONNECT:/net-bridge/meter.sock"));
+        assert!(inner.contains("TCP-LISTEN:43210,bind=127.0.0.1"));
+        assert!(inner.contains("exec \"$@\""));
+        // 8411 = 0x20DB, 43210 = 0xA8CA: each bridge port must be listening on loopback.
+        assert!(inner.contains("for p in 20DB A8CA;"));
+        assert!(inner.contains("0100007F:$p 00000000:0000 0A"));
+        assert!(inner.contains("not listening") && inner.contains("exit 1"));
+        assert_eq!(bwrap_args.last().unwrap(), "Begin");
+        assert!(bwrap_args.contains(&"/sandbox-bin/claude".to_string()));
+    }
+
+    #[test]
+    fn parses_net_bridge_config() {
+        assert_eq!(
+            parse_net_bridges("meter=meter:8411"),
+            Ok(vec![NetBridge::new("meter", "meter", 8411)])
+        );
+        assert!(parse_net_bridges("meter=meter").is_err());
+        assert!(parse_net_bridges("bad name=meter:1").is_err());
+        assert!(parse_net_bridges("m=h:notaport").is_err());
+    }
 
     #[test]
     fn runtime_control_files_are_read_only_over_the_writable_runtime_bind() {

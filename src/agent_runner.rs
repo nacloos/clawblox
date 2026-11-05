@@ -1119,6 +1119,19 @@ fn build_sandbox_layout(
             .with_add_deps_lib_to_library_path(sandbox_config.add_deps_lib_to_library_path)
             .with_enable_weaker_nested_sandbox(sandbox_config.enable_weaker_nested_sandbox)
             .with_hosts_file(ctx.paths.runtime_dir.join("sandbox_hosts"));
+    // network isolation, fail-closed on a bad config.
+    if let Some(mut bridges) = crate::agent_sandbox::net_bridges_from_env()? {
+        if let Some(port) = ctx
+            .settings
+            .env
+            .iter()
+            .rfind(|(k, _)| k == "CLAWBLOX_WORLD_HTTP_PROXY_PORT")
+            .and_then(|(_, v)| v.parse::<u16>().ok())
+        {
+            bridges.push(crate::agent_sandbox::NetBridge::new("world", "127.0.0.1", port));
+        }
+        layout = layout.with_net_bridges(bridges);
+    }
     if let Some((_, shm_dir)) = ctx.settings.env.iter().rfind(|(k, _)| k == "WORLD_SHM_DIR") {
         // External run-command worlds may need a state-local /dev/shm that is
         // shared with sandboxed agents without exposing the host's global shm.
