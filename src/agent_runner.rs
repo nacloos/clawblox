@@ -1215,6 +1215,8 @@ fn start_tmux_target(
     log_file: &Path,
     env: &[(String, String)],
 ) -> Result<String, String> {
+    prepare_agent_log(log_file)
+        .map_err(|err| format!("failed to prepare agent log {}: {err}", log_file.display()))?;
     let tmux_command = format!("exec {}", shell_quote(&command_file.display().to_string()));
     let mut command = Command::new("tmux");
     if let Some(window) = tmux_window {
@@ -1468,6 +1470,26 @@ fn write_command_file(path: &Path, shell_command: &str) -> std::io::Result<()> {
     make_executable(path)
 }
 
+/// the agent log is appended to from outside the sandbox (tmux's
+/// pipe and start.sh), so it must be a regular file, never a link the agent planted.
+/// An existing regular log is kept.
+pub(crate) fn prepare_agent_log(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_file() => return Ok(()),
+        Ok(meta) if meta.is_dir() => {
+            return Err(std::io::Error::other(format!("{} is a directory", path.display())))
+        }
+        Ok(_) => std::fs::remove_file(path)?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    std::fs::OpenOptions::new().create_new(true).append(true).open(path)?;
+    Ok(())
+}
+
 fn write_agent_command_file(
     path: &Path,
     shell_command: &str,
@@ -1477,7 +1499,7 @@ fn write_agent_command_file(
         std::fs::create_dir_all(parent)?;
     }
     let tmux_session = event.tmux_session.as_deref().unwrap_or("");
-    std::fs::write(
+    crate::agent::write_no_follow(
         path,
         format!(
             "#!/usr/bin/env bash\n\
@@ -1537,7 +1559,7 @@ exit \"$status\"\n",
             log_file = shell_quote(&event.log_file.display().to_string()),
             tmux_session = shell_quote(tmux_session),
             command_file = shell_quote(&event.command_file.display().to_string()),
-        ),
+        ).as_bytes(),
     )?;
     make_executable(path)
 }
@@ -1586,9 +1608,9 @@ fn write_active_agent(ctx: &AgentContext, active: ActiveAgent) -> std::io::Resul
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(
-        path,
-        format!("{}\n", serde_json::to_string_pretty(&active)?),
+    crate::agent::write_no_follow(
+        &path,
+        format!("{}\n", serde_json::to_string_pretty(&active)?).as_bytes(),
     )
 }
 
@@ -1759,6 +1781,75 @@ fn absolutize_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "clawblox-runner-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_writes_replace_a_planted_symlink_instead_of_following_it() {
+        // a symlink the agent planted in an agent-writable dir
+        // must not redirect a host-side write to another file.
+        let dir = temp_dir("symlink");
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, "untouched").unwrap();
+        let path = dir.join("start.sh");
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+
+        crate::agent::write_no_follow(&path, b"new").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        assert!(!std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_writes_rewrite_a_regular_file_in_place() {
+        // A read-only bind held by a leftover sandbox process covers the inode, so
+        // the host must truncate and rewrite, never unlink and recreate.
+        use std::os::unix::fs::MetadataExt;
+        let dir = temp_dir("inplace");
+        let path = dir.join("start.sh");
+        std::fs::write(&path, "old contents").unwrap();
+        let inode = std::fs::metadata(&path).unwrap().ino();
+
+        crate::agent::write_no_follow(&path, b"new").unwrap();
+
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_log_is_a_regular_file_before_the_host_appends_to_it() {
+        let dir = temp_dir("log");
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, "untouched").unwrap();
+        let log = dir.join("logs/agent.log");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&victim, &log).unwrap();
+
+        prepare_agent_log(&log).unwrap();
+
+        let meta = std::fs::symlink_metadata(&log).unwrap();
+        assert!(meta.file_type().is_file());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        // An existing regular log is kept, not truncated.
+        std::fs::write(&log, "earlier lines\n").unwrap();
+        prepare_agent_log(&log).unwrap();
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "earlier lines\n");
+    }
 
     #[test]
     fn shell_quotes_command_specs() {

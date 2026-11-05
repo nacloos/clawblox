@@ -1847,6 +1847,9 @@ fn run_workspace_uv_sync_in_sandbox(
         )
     })?;
     let mut args = Vec::new();
+    // no process started by `uv sync` (a build script) may outlive
+    // it: a private pid namespace dies with its init, and bwrap dies with its parent.
+    args.extend(["--unshare-pid".to_string(), "--die-with-parent".to_string()]);
     if sandbox_config.enable_weaker_nested_sandbox {
         // Match the main agent sandbox: nested Docker mode should not make the
         // guest process root, because Claude bypass mode refuses root.
@@ -1894,6 +1897,17 @@ fn run_workspace_uv_sync_in_sandbox(
         "--bind".to_string(),
         runtime_dir.display().to_string(),
         "/runtime".to_string(),
+    ]);
+    // the same read-only control files as the agent's sandbox,
+    // since an agent-written pyproject.toml decides what runs here.
+    for name in clawblox::agent_sandbox::RUNTIME_CONTROL_FILES {
+        args.extend([
+            "--ro-bind-try".to_string(),
+            runtime_dir.join(name).display().to_string(),
+            format!("/runtime/{name}"),
+        ]);
+    }
+    args.extend([
         "--chdir".to_string(),
         "/workspace".to_string(),
         "--setenv".to_string(),

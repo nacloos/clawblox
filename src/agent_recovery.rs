@@ -21,6 +21,52 @@ pub struct AgentRecoveryConfig {
     pub poll_seconds: u64,
 }
 
+/// the command file as written by clawblox when the agent
+/// started, kept in memory and in a private copy outside the agent-visible runtime
+/// dir. Respawns run the private copy, never `<agent>/runtime/start.sh`.
+#[derive(Clone, Debug)]
+struct TrustedCommand {
+    path: PathBuf,
+    contents: Vec<u8>,
+}
+
+fn recovery_dir(config: &AgentRecoveryConfig) -> PathBuf {
+    config.agent_dir.join("recovery")
+}
+
+fn snapshot_command_file(config: &AgentRecoveryConfig) -> Result<TrustedCommand, String> {
+    let contents = std::fs::read(&config.command_file)
+        .map_err(|err| format!("failed to read {}: {err}", config.command_file.display()))?;
+    let trusted = TrustedCommand {
+        path: recovery_dir(config).join("start.sh"),
+        contents,
+    };
+    ensure_trusted_copy(&trusted)?;
+    Ok(trusted)
+}
+
+/// Rewrite the private copy from memory if it is missing or differs.
+fn ensure_trusted_copy(trusted: &TrustedCommand) -> Result<(), String> {
+    if std::fs::read(&trusted.path).ok().as_deref() == Some(trusted.contents.as_slice()) {
+        return Ok(());
+    }
+    if let Some(parent) = trusted.path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+    }
+    let _ = std::fs::remove_file(&trusted.path);
+    std::fs::write(&trusted.path, &trusted.contents)
+        .map_err(|err| format!("failed to write {}: {err}", trusted.path.display()))
+}
+
+fn command_file_changed(config: &AgentRecoveryConfig, trusted: &TrustedCommand) -> bool {
+    std::fs::read(&config.command_file).ok().as_deref() != Some(trusted.contents.as_slice())
+}
+
+fn respawn_command(trusted: &TrustedCommand) -> String {
+    format!("bash {}", shell_quote(&trusted.path.display().to_string()))
+}
+
 #[derive(Clone, Debug, Serialize)]
 struct AgentRecoveryMetadata {
     pid: u32,
@@ -34,9 +80,10 @@ struct AgentRecoveryMetadata {
 }
 
 pub fn start_agent_recovery_watchdog(config: AgentRecoveryConfig) -> Result<(), String> {
-    let runtime_dir = config.agent_dir.join("runtime");
+    let runtime_dir = recovery_dir(&config);
     std::fs::create_dir_all(&runtime_dir)
-        .map_err(|err| format!("failed to create recovery runtime dir: {err}"))?;
+        .map_err(|err| format!("failed to create recovery dir: {err}"))?;
+    let trusted = snapshot_command_file(&config)?;
     let metadata = AgentRecoveryMetadata {
         pid: std::process::id(),
         pane_id: config.pane_id.clone(),
@@ -54,12 +101,12 @@ pub fn start_agent_recovery_watchdog(config: AgentRecoveryConfig) -> Result<(), 
 
     thread::Builder::new()
         .name(format!("clawblox-recovery-{}", config.pane_id))
-        .spawn(move || watch_recovery(config))
+        .spawn(move || watch_recovery(config, trusted))
         .map_err(|err| format!("failed to start recovery watchdog: {err}"))?;
     Ok(())
 }
 
-fn watch_recovery(config: AgentRecoveryConfig) {
+fn watch_recovery(config: AgentRecoveryConfig, trusted: TrustedCommand) {
     let watch_started = now_epoch();
     log_event(
         &config,
@@ -142,6 +189,7 @@ fn watch_recovery(config: AgentRecoveryConfig) {
             );
             respawn_agent(
                 &config,
+                &trusted,
                 "stop_failure_session_end",
                 &session_id,
                 stop_failure_epoch,
@@ -161,6 +209,7 @@ fn watch_recovery(config: AgentRecoveryConfig) {
             );
             respawn_agent(
                 &config,
+                &trusted,
                 "stop_failure_idle_prompt",
                 &session_id,
                 stop_failure_epoch,
@@ -180,6 +229,7 @@ fn watch_recovery(config: AgentRecoveryConfig) {
             );
             respawn_agent(
                 &config,
+                &trusted,
                 "stop_failure_stalled",
                 &session_id,
                 stop_failure_epoch,
@@ -256,6 +306,7 @@ fn map_runtime_path(config: &AgentRecoveryConfig, path: &str) -> Option<PathBuf>
 
 fn respawn_agent(
     config: &AgentRecoveryConfig,
+    trusted: &TrustedCommand,
     reason: &str,
     session_id: &str,
     stop_failure_epoch: u64,
@@ -265,10 +316,22 @@ fn respawn_agent(
         "respawn_start",
         &format!("reason={reason} session_id={session_id} stop_failure_epoch={stop_failure_epoch}"),
     );
-    let respawn_cmd = format!(
-        "bash {}",
-        shell_quote(&config.command_file.display().to_string())
-    );
+    if command_file_changed(config, trusted) {
+        log_event(
+            config,
+            "command_file_changed",
+            &format!("command_file={} respawning from the private copy", config.command_file.display()),
+        );
+    }
+    if let Err(err) = ensure_trusted_copy(trusted) {
+        log_event(config, "respawn_refused", &err);
+        return;
+    }
+    if let Err(err) = crate::agent_runner::prepare_agent_log(&config.agent_log_file) {
+        log_event(config, "respawn_refused", &format!("agent log: {err}"));
+        return;
+    }
+    let respawn_cmd = respawn_command(trusted);
     let _ = Command::new("tmux")
         .args(["respawn-pane", "-k", "-t", &config.pane_id, &respawn_cmd])
         .status();
@@ -337,7 +400,7 @@ fn read_hook_value(path: &Path, key: &str) -> Option<String> {
 }
 
 fn log_event(config: &AgentRecoveryConfig, event: &str, details: &str) {
-    let path = config.agent_dir.join("runtime/recovery.log");
+    let path = recovery_dir(config).join("recovery.log");
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -379,6 +442,76 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_agent_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "clawblox-recovery-{tag}-{}-{}",
+            std::process::id(),
+            now_epoch()
+        ));
+        std::fs::create_dir_all(dir.join("runtime")).unwrap();
+        dir
+    }
+
+    fn config_for(agent_dir: &Path) -> AgentRecoveryConfig {
+        AgentRecoveryConfig {
+            pane_id: "%1".to_string(),
+            agent_dir: agent_dir.to_path_buf(),
+            command_file: agent_dir.join("runtime/start.sh"),
+            agent_log_file: agent_dir.join("logs/agent.log"),
+            idle_grace_seconds: 1,
+            stall_grace_seconds: 1,
+            restart_backoff_seconds: 1,
+            poll_seconds: 1,
+        }
+    }
+
+    #[test]
+    fn respawn_runs_a_private_copy_not_the_agent_visible_command_file() {
+        // the watchdog re-executes outside the sandbox, so it
+        // must never run a file the agent can reach.
+        let dir = temp_agent_dir("private");
+        let config = config_for(&dir);
+        std::fs::write(&config.command_file, "#!/usr/bin/env bash
+echo trusted\n").unwrap();
+
+        let trusted = snapshot_command_file(&config).unwrap();
+        std::fs::write(&config.command_file, "#!/usr/bin/env bash
+echo tampered\n").unwrap();
+
+        assert!(trusted.path.starts_with(dir.join("recovery")));
+        assert!(!trusted.path.starts_with(dir.join("runtime")));
+        assert!(respawn_command(&trusted).contains(&trusted.path.display().to_string()));
+        assert!(!respawn_command(&trusted).contains("runtime/start.sh"));
+        assert_eq!(
+            std::fs::read_to_string(&trusted.path).unwrap(),
+            "#!/usr/bin/env bash
+echo trusted\n"
+        );
+        assert!(command_file_changed(&config, &trusted));
+    }
+
+    #[test]
+    fn verify_restores_a_deleted_private_copy_and_ignores_an_unchanged_file() {
+        let dir = temp_agent_dir("restore");
+        let config = config_for(&dir);
+        std::fs::write(&config.command_file, "echo ok\n").unwrap();
+        let trusted = snapshot_command_file(&config).unwrap();
+        assert!(!command_file_changed(&config, &trusted));
+
+        std::fs::remove_file(&trusted.path).unwrap();
+        ensure_trusted_copy(&trusted).unwrap();
+        assert_eq!(std::fs::read_to_string(&trusted.path).unwrap(), "echo ok\n");
+    }
+
+    #[test]
+    fn watchdog_state_lives_outside_the_agent_visible_runtime_dir() {
+        let dir = temp_agent_dir("state");
+        let config = config_for(&dir);
+        log_event(&config, "watch_start", "x");
+        assert!(dir.join("recovery/recovery.log").is_file());
+        assert!(!dir.join("runtime/recovery.log").exists());
+    }
 
     #[test]
     fn maps_sandbox_home_paths_to_host() {

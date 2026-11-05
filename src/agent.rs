@@ -903,8 +903,40 @@ fn create_parent_dir(path: &Path) -> AgentResult<()> {
 
 fn write_file(path: &Path, contents: &str) -> AgentResult<()> {
     create_parent_dir(path)?;
-    std::fs::write(path, contents)?;
+    write_no_follow(path, contents.as_bytes())?;
     Ok(())
+}
+
+/// host-side writes into agent-visible directories never follow
+/// a symlink (a planted one is removed and replaced by a regular file), and rewrite a
+/// regular file in place, so a read-only bind over its inode stays in force.
+#[cfg(unix)]
+pub(crate) fn write_no_follow(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            std::fs::remove_file(path)?;
+        }
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    file.write_all(contents)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn write_no_follow(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, contents)
+}
+
+/// A regular file, not a symlink to one.
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|meta| meta.file_type().is_file())
+        .unwrap_or(false)
 }
 
 fn write_executable_file(path: &Path, contents: &str) -> AgentResult<()> {
@@ -1203,7 +1235,8 @@ fn copy_path(source: &Path, target: &Path) -> AgentResult<()> {
             copy_path(&entry.path(), &target.join(entry.file_name()))?;
         }
     } else {
-        std::fs::copy(source, target)?;
+        create_parent_dir(target)?;
+        write_no_follow(target, &std::fs::read(source)?)?;
     }
     Ok(())
 }
@@ -1267,7 +1300,7 @@ fn prepare_claude_sandbox_home(ctx: &AgentContext, layout: &SandboxLayout) -> Ag
 }
 
 fn write_claude_sandbox_autonomous_settings(path: &Path) -> AgentResult<()> {
-    let mut data = if path.is_file() {
+    let mut data = if is_regular_file(&path) {
         serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(path)?)
             .unwrap_or_else(|_| serde_json::json!({}))
     } else {
@@ -1297,7 +1330,7 @@ fn write_claude_sandbox_autonomous_settings(path: &Path) -> AgentResult<()> {
 
 fn write_claude_workspace_trust(_ctx: &AgentContext, layout: &SandboxLayout) -> AgentResult<()> {
     let path = layout.host_home_dir.join(".claude.json");
-    let mut data = if path.is_file() {
+    let mut data = if is_regular_file(&path) {
         serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path)?)
             .unwrap_or_else(|_| serde_json::json!({}))
     } else {

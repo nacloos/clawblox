@@ -200,6 +200,17 @@ pub fn detect_sandbox_deps_root(
     }
 }
 
+/// Files in the agent's runtime dir that launch or configure it.
+pub const RUNTIME_CONTROL_FILES: &[&str] = &[
+    "start.sh",
+    "send.sh",
+    "claude_sandbox_settings.json",
+    "sandbox_hosts",
+    "system_prompt.md",
+    "claude-plugin",
+    "active.json",
+];
+
 pub fn wrap_command(
     ctx: &AgentContext,
     layout: &SandboxLayout,
@@ -291,6 +302,25 @@ fn wrap_command_unchecked(
         ctx.paths.runtime_dir.display().to_string(),
         layout.guest_runtime.display().to_string(),
     ]);
+    // /runtime stays writable for hook state, but the files
+    // that launch or configure the agent are read-only over it. `-try` binds
+    // whatever exists when bwrap starts (start.sh always does: it runs bwrap).
+    // A bound file is also a mount point, so the agent can't unlink or replace it.
+    for name in RUNTIME_CONTROL_FILES {
+        args.extend([
+            "--ro-bind-try".to_string(),
+            ctx.paths.runtime_dir.join(name).display().to_string(),
+            layout.guest_runtime.join(name).display().to_string(),
+        ]);
+    }
+    // The host appends to the agent log from outside the sandbox (tmux pipe, start.sh).
+    if let Some(name) = ctx.paths.log_file.file_name() {
+        args.extend([
+            "--ro-bind-try".to_string(),
+            ctx.paths.log_file.display().to_string(),
+            layout.guest_logs.join(name).display().to_string(),
+        ]);
+    }
 
     if layout.guest_plugin.is_some() {
         args.extend([
@@ -500,6 +530,61 @@ mod tests {
     use super::*;
     use crate::agent::{AgentPaths, AgentSettings};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn runtime_control_files_are_read_only_over_the_writable_runtime_bind() {
+        // the agent must not be able to rewrite the files
+        // that run or configure it (start.sh is re-executed outside the sandbox by
+        // the recovery watchdog; the settings hold the network allowlist).
+        let root = test_root();
+        let ctx = test_context(root.clone());
+        let layout =
+            SandboxLayout::for_agent(&ctx, PathBuf::from("/usr/local/bin/claude"), "claude")
+                .with_claude_plugin()
+                .with_hosts_file(ctx.paths.runtime_dir.join("sandbox_hosts"));
+        let wrapped = wrap_command_unchecked(
+            &ctx,
+            &layout,
+            CommandSpec::new("/sandbox-bin/claude", "/workspace"),
+        );
+        let runtime = ctx.paths.runtime_dir.display().to_string();
+        let rw_index = wrapped
+            .args
+            .windows(3)
+            .position(|w| w[0] == "--bind" && w[1] == runtime && w[2] == "/runtime")
+            .expect("runtime bind");
+        for name in RUNTIME_CONTROL_FILES {
+            let host = ctx.paths.runtime_dir.join(name).display().to_string();
+            let guest = format!("/runtime/{name}");
+            let ro_index = wrapped
+                .args
+                .windows(3)
+                .position(|w| w[0] == "--ro-bind-try" && w[1] == host && w[2] == guest)
+                .unwrap_or_else(|| panic!("no read-only bind for {name}"));
+            assert!(ro_index > rw_index, "{name} must be bound after /runtime");
+        }
+        for name in ["start.sh", "claude_sandbox_settings.json", "sandbox_hosts", "claude-plugin", "active.json"] {
+            assert!(RUNTIME_CONTROL_FILES.contains(&name), "{name} missing");
+        }
+        // The host appends to the agent log from outside the sandbox, so the agent
+        // must not be able to swap it for a symlink either.
+        let log = ctx.paths.log_file.display().to_string();
+        let guest_log = format!(
+            "/logs/{}",
+            ctx.paths.log_file.file_name().unwrap().to_string_lossy()
+        );
+        let logs_rw = wrapped
+            .args
+            .windows(2)
+            .position(|w| w[0] == "--bind" && w[1] == ctx.paths.log_file.parent().unwrap().display().to_string())
+            .expect("logs bind");
+        let log_ro = wrapped
+            .args
+            .windows(3)
+            .position(|w| w[0] == "--ro-bind-try" && w[1] == log && w[2] == guest_log)
+            .expect("no read-only bind for the agent log");
+        assert!(log_ro > logs_rw);
+    }
 
     #[test]
     fn wraps_claude_command_with_expected_mounts_and_guest_paths() {
