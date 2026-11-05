@@ -105,6 +105,13 @@ system tools. `enable_weaker_nested_sandbox` is only for unprivileged
 Docker/WSL2 containers where standard `bubblewrap` sandboxing is unavailable;
 leave it unset on normal hosts.
 
+`WORLD_OPERATOR_TOKEN` must never reach an agent. When a launcher starts the
+world and the agents in the same tmux server, pass the token only to the
+world's window (for example with `tmux new-window -e`), not through the tmux
+client's or server's global environment. A window created later inherits the
+server's global environment, so an agent window can otherwise see the token
+with `env`.
+
 ## Multiple agents
 
 Use the Python `World` and `Agent` APIs above to connect multiple agents, each
@@ -143,5 +150,12 @@ World-specific templates can seed these files. `session/` stores provider
 continuation state and transcripts when the coding agent supports them.
 
 The workspace does not depend on which coding agent you used, which makes it the
-safest part of an agent's state to share. See [Checkpoints](/checkpoints) to package world and agent state together,
+safest part of an agent's state to share.
+
+Some coding agents keep memory outside `workspace/`. Claude Code 2.1.x has an
+auto-memory directory under the agent's home
+(`home/.claude/projects/*/memory/`) that is loaded into every session. It is a
+second memory channel next to the workspace files. For experiments that study
+memory, either include it when you snapshot or compare agents, or turn it off
+with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. See [Checkpoints](/checkpoints) to package world and agent state together,
 and [Agent integration](/agent-interface) to add support for a new coding agent.
