@@ -28,6 +28,8 @@ pub struct SandboxLayout {
     /// when set, the sandbox gets no network except these
     /// endpoints, each bridged in through a unix socket.
     pub net_bridges: Option<Vec<NetBridge>>,
+    /// host programs masked (bound over with /dev/null) inside.
+    pub hide_programs: Vec<PathBuf>,
 }
 
 /// One TCP endpoint reachable from inside a network-isolated sandbox: the sandbox
@@ -126,6 +128,7 @@ impl SandboxLayout {
             enable_weaker_nested_sandbox: false,
             unset_env: Vec::new(),
             net_bridges: None,
+            hide_programs: Vec::new(),
         }
     }
 
@@ -353,6 +356,14 @@ fn wrap_command_unchecked(
         "--dir".to_string(),
         "/sandbox-bin".to_string(),
     ]);
+    // e.g. the clawblox CLI, visible under /usr.
+    for program in &layout.hide_programs {
+        args.extend([
+            "--ro-bind".to_string(),
+            "/dev/null".to_string(),
+            program.display().to_string(),
+        ]);
+    }
     if let Some(shm_dir) = &layout.host_shm_dir {
         args.extend([
             "--bind".to_string(),
@@ -812,6 +823,37 @@ mod tests {
         assert!(inner.contains("not listening") && inner.contains("exit 1"));
         assert_eq!(bwrap_args.last().unwrap(), "Begin");
         assert!(bwrap_args.contains(&"/sandbox-bin/claude".to_string()));
+    }
+
+    #[test]
+    fn hidden_programs_are_masked_inside_the_sandbox() {
+        // the clawblox CLI is not usable inside.
+        let root = test_root();
+        let ctx = test_context(root.clone());
+        let mut layout = claude_layout(&ctx);
+        layout.hide_programs = vec![PathBuf::from("/usr/local/bin/clawblox")];
+        let wrapped = wrap_command_unchecked(
+            &ctx,
+            &layout,
+            CommandSpec::new("/sandbox-bin/claude", "/workspace"),
+        );
+        let usr = wrapped
+            .args
+            .windows(3)
+            .position(|w| w[0] == "--ro-bind" && w[1] == "/usr" && w[2] == "/usr")
+            .expect("/usr bind");
+        let mask = wrapped
+            .args
+            .windows(3)
+            .position(|w| w[0] == "--ro-bind" && w[1] == "/dev/null" && w[2] == "/usr/local/bin/clawblox")
+            .expect("clawblox masked");
+        assert!(mask > usr);
+        let plain = wrap_command_unchecked(
+            &ctx,
+            &claude_layout(&ctx),
+            CommandSpec::new("/sandbox-bin/claude", "/workspace"),
+        );
+        assert!(!plain.args.iter().any(|a| a == "/usr/local/bin/clawblox"));
     }
 
     #[test]

@@ -37,6 +37,33 @@ const ALLOWED_EXACT_PATHS: &[&str] = &[
 ];
 
 const ALLOWED_PREFIXES: &[&str] = &["/renderer-files/", "/assets/", "/static/"];
+
+/// the endpoints a world's API.md documents.
+const API_ONLY_PATHS: &[&str] = &["/observe", "/input", "/chat", "/chat/messages", "/api.md"];
+
+/// Which paths the proxy passes. The default is upstream's list. `api_only` narrows it
+/// to the documented API, with `/observe/image` only when `allow_image` (a sighted run).
+/// Set from `CLAWBLOX_PROXY_API_ONLY=1` and `CLAWBLOX_PROXY_ALLOW_IMAGE=1`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PathPolicy {
+    pub api_only: bool,
+    pub allow_image: bool,
+}
+
+impl PathPolicy {
+    pub fn from_env() -> Self {
+        let flag = |name: &str| std::env::var(name).map(|v| v == "1").unwrap_or(false);
+        Self {
+            api_only: flag("CLAWBLOX_PROXY_API_ONLY"),
+            allow_image: flag("CLAWBLOX_PROXY_ALLOW_IMAGE"),
+        }
+    }
+}
+
+fn path_policy() -> PathPolicy {
+    static POLICY: std::sync::OnceLock<PathPolicy> = std::sync::OnceLock::new();
+    *POLICY.get_or_init(PathPolicy::from_env)
+}
 const DENIED_PREFIXES: &[&str] = &["/api/", "/replay/", "/sessions/"];
 
 #[derive(Clone, Debug)]
@@ -183,7 +210,7 @@ fn handle_client(
         );
         return Ok(());
     };
-    if !validate_path(&path_with_query) {
+    if !validate_path_with(&path_policy(), &path_with_query) {
         let _ = write_json_response(
             &mut stream,
             403,
@@ -462,13 +489,21 @@ fn parse_proxy_target(request: &HttpRequest, public_host: &str) -> Option<String
     })
 }
 
+#[cfg(test)]
 fn validate_path(path_with_query: &str) -> bool {
+    validate_path_with(&PathPolicy::default(), path_with_query)
+}
+
+fn validate_path_with(policy: &PathPolicy, path_with_query: &str) -> bool {
     let path = path_with_query.split('?').next().unwrap_or("/");
     if DENIED_PREFIXES
         .iter()
         .any(|prefix| path == prefix.trim_end_matches('/') || path.starts_with(prefix))
     {
         return false;
+    }
+    if policy.api_only {
+        return API_ONLY_PATHS.contains(&path) || (policy.allow_image && path == "/observe/image");
     }
     ALLOWED_EXACT_PATHS.contains(&path)
         || ALLOWED_PREFIXES
@@ -565,6 +600,33 @@ mod tests {
         };
 
         assert_eq!(parse_proxy_target(&request, "world"), None);
+    }
+
+    #[test]
+    fn api_only_policy_allows_exactly_the_documented_endpoints() {
+        // for new runs, only API.md's endpoints,
+        // and the image endpoint only when the run has vision.
+        let blind = PathPolicy { api_only: true, allow_image: false };
+        for ok in ["/observe", "/input", "/chat", "/chat/messages?after=1", "/api.md"] {
+            assert!(validate_path_with(&blind, ok), "{ok} should be allowed");
+        }
+        for no in [
+            "/observe/image",
+            "/renderer/manifest",
+            "/renderer-files/index.js",
+            "/assets/player.glb",
+            "/static/x",
+            "/skill.md",
+            "/api/admin",
+        ] {
+            assert!(!validate_path_with(&blind, no), "{no} should be refused");
+        }
+        let sighted = PathPolicy { api_only: true, allow_image: true };
+        assert!(validate_path_with(&sighted, "/observe/image?width=320"));
+        assert!(!validate_path_with(&sighted, "/assets/player.glb"));
+        // The default (upstream) policy is unchanged.
+        assert!(validate_path_with(&PathPolicy::default(), "/assets/player.glb"));
+        assert!(validate_path_with(&PathPolicy::default(), "/observe/image"));
     }
 
     #[test]
