@@ -256,6 +256,11 @@ pub struct ClaudeAgent {
     pub binary: PathBuf,
     pub bare: bool,
     pub disallowed_tools: Option<String>,
+    /// Sandboxed runs only: load user settings alone (`--setting-sources user`), so a project or
+    /// local settings file or a workspace `CLAUDE.md` the agent writes is not loaded. Off by
+    /// default because it changes behaviour for anyone relying on a workspace `CLAUDE.md`;
+    /// `CLAWBLOX_CLAUDE_USER_SETTINGS_ONLY=1` turns it on.
+    pub user_settings_only: bool,
 }
 
 impl Default for ClaudeAgent {
@@ -264,8 +269,19 @@ impl Default for ClaudeAgent {
             binary: PathBuf::from("claude"),
             bare: false,
             disallowed_tools: Some("WebFetch,WebSearch".to_string()),
+            user_settings_only: user_settings_only_from_env(),
         }
     }
+}
+
+fn user_settings_only_from_env() -> bool {
+    matches!(
+        std::env::var("CLAWBLOX_CLAUDE_USER_SETTINGS_ONLY")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 impl Agent for ClaudeAgent {
@@ -459,11 +475,12 @@ impl ClaudeAgent {
             command = command
                 .arg("--settings")
                 .arg("/runtime/claude_sandbox_settings.json")
-                // ignore project and local settings files
-                // and MCP servers from config files, which the agent could write.
-                .arg("--setting-sources")
-                .arg("user")
+                // ignore MCP servers from config files, which the agent could write.
                 .arg("--strict-mcp-config");
+            if self.user_settings_only {
+                // opt-in: ignore project and local settings files and a workspace CLAUDE.md too.
+                command = command.arg("--setting-sources").arg("user");
+            }
             if let Some(disallowed_tools) = &self.disallowed_tools {
                 if !disallowed_tools.trim().is_empty() {
                     command = command.arg("--disallowedTools").arg(disallowed_tools);
@@ -1991,7 +2008,8 @@ fn unquote_shell_value(value: &str) -> String {
 /// interpreters resolve from system dirs and Python ignores the user site dir,
 /// both of which the agent could otherwise write.
 #[cfg(test)]
-const HOOK_COMMAND_PREFIX: &str = "/usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 ";
+const HOOK_COMMAND_PREFIX: &str =
+    "/usr/bin/env PATH=/sandbox-deps/bin:/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 ";
 
 const CLAUDE_HOOKS_JSON: &str = r#"{
   "hooks": {
@@ -2000,7 +2018,7 @@ const CLAUDE_HOOKS_JSON: &str = r#"{
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/session_start.sh\""
+            "command": "/usr/bin/env PATH=/sandbox-deps/bin:/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/session_start.sh\""
           }
         ]
       }
@@ -2010,7 +2028,7 @@ const CLAUDE_HOOKS_JSON: &str = r#"{
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/user_prompt_submit.sh\""
+            "command": "/usr/bin/env PATH=/sandbox-deps/bin:/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/user_prompt_submit.sh\""
           }
         ]
       }
@@ -2020,7 +2038,7 @@ const CLAUDE_HOOKS_JSON: &str = r#"{
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/post_tool_use_chat.py\""
+            "command": "/usr/bin/env PATH=/sandbox-deps/bin:/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/post_tool_use_chat.py\""
           }
         ]
       }
@@ -2030,7 +2048,7 @@ const CLAUDE_HOOKS_JSON: &str = r#"{
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/stop.sh\""
+            "command": "/usr/bin/env PATH=/sandbox-deps/bin:/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/stop.sh\""
           }
         ]
       }
@@ -2040,7 +2058,7 @@ const CLAUDE_HOOKS_JSON: &str = r#"{
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/stop_failure.sh\""
+            "command": "/usr/bin/env PATH=/sandbox-deps/bin:/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/stop_failure.sh\""
           }
         ]
       }
@@ -2051,7 +2069,7 @@ const CLAUDE_HOOKS_JSON: &str = r#"{
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/notification.sh\""
+            "command": "/usr/bin/env PATH=/sandbox-deps/bin:/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/notification.sh\""
           }
         ]
       }
@@ -2061,7 +2079,7 @@ const CLAUDE_HOOKS_JSON: &str = r#"{
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/session_end.sh\""
+            "command": "/usr/bin/env PATH=/sandbox-deps/bin:/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/session_end.sh\""
           }
         ]
       }
@@ -2602,6 +2620,7 @@ mod tests {
             binary: PathBuf::from("/bin/echo"),
             bare: true,
             disallowed_tools: Some("WebFetch,WebSearch".to_string()),
+            user_settings_only: false,
         };
 
         agent.configure_auto_continue(&ctx).unwrap();
@@ -2705,6 +2724,7 @@ mod tests {
             binary: PathBuf::from("/bin/echo"),
             bare: false,
             disallowed_tools: Some("WebFetch,WebSearch".to_string()),
+            user_settings_only: true,
         };
 
         agent.configure_auto_continue(&ctx).unwrap();
@@ -2718,13 +2738,27 @@ mod tests {
             .args
             .windows(2)
             .any(|window| window == ["--settings", "/runtime/claude_sandbox_settings.json"]));
-        // only user settings (read-only) and --settings;
-        // no project or local settings, no MCP servers from config files.
+        // user_settings_only (opt-in): only user settings (read-only) and --settings,
+        // so no project or local settings and no workspace CLAUDE.md.
         assert!(start
             .args
             .windows(2)
             .any(|window| window == ["--setting-sources", "user"]));
+        // always: no MCP servers from config files.
         assert!(start.args.contains(&"--strict-mcp-config".to_string()));
+        // off (the default): setting sources are left to Claude Code.
+        let default_sources = ClaudeAgent {
+            user_settings_only: false,
+            ..ClaudeAgent::default()
+        }
+        .start(&ctx)
+        .unwrap();
+        assert!(!default_sources
+            .args
+            .contains(&"--setting-sources".to_string()));
+        assert!(default_sources
+            .args
+            .contains(&"--strict-mcp-config".to_string()));
         assert!(start
             .env
             .contains(&("CLAWBLOX_CLAUDE_LOG_DIR".to_string(), "/logs".to_string())));
@@ -2886,6 +2920,7 @@ mod tests {
             binary: PathBuf::from("/bin/echo"),
             bare: false,
             disallowed_tools: Some("WebFetch,WebSearch".to_string()),
+            user_settings_only: false,
         };
 
         agent.configure_auto_continue(&ctx).unwrap();
