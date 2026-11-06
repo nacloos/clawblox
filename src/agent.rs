@@ -3111,7 +3111,12 @@ mod tests {
     #[test]
     fn copy_path_keeps_the_source_mode_and_does_not_follow_a_planted_symlink() {
         use std::os::unix::fs::PermissionsExt;
-        let root = test_context().paths.workspace_dir.parent().unwrap().to_path_buf();
+        let root = test_context()
+            .paths
+            .workspace_dir
+            .parent()
+            .unwrap()
+            .to_path_buf();
         let source = root.join("skills/tool/run.sh");
         std::fs::create_dir_all(source.parent().unwrap()).unwrap();
         std::fs::write(&source, "#!/bin/sh\necho ok\n").unwrap();
@@ -3129,9 +3134,15 @@ mod tests {
         std::fs::remove_file(&target).unwrap();
         std::os::unix::fs::symlink(&outside, &target).unwrap();
         copy_path(&source, &target).unwrap();
-        assert!(!std::fs::symlink_metadata(&target).unwrap().file_type().is_symlink());
+        assert!(!std::fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
-        assert_eq!(std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

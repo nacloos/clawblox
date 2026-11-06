@@ -320,7 +320,10 @@ fn respawn_agent(
         log_event(
             config,
             "command_file_changed",
-            &format!("command_file={} respawning from the private copy", config.command_file.display()),
+            &format!(
+                "command_file={} respawning from the private copy",
+                config.command_file.display()
+            ),
         );
     }
     if let Err(err) = ensure_trusted_copy(trusted) {
@@ -472,12 +475,20 @@ mod tests {
         // must never run a file the agent can reach.
         let dir = temp_agent_dir("private");
         let config = config_for(&dir);
-        std::fs::write(&config.command_file, "#!/usr/bin/env bash
-echo trusted\n").unwrap();
+        std::fs::write(
+            &config.command_file,
+            "#!/usr/bin/env bash
+echo trusted\n",
+        )
+        .unwrap();
 
         let trusted = snapshot_command_file(&config).unwrap();
-        std::fs::write(&config.command_file, "#!/usr/bin/env bash
-echo tampered\n").unwrap();
+        std::fs::write(
+            &config.command_file,
+            "#!/usr/bin/env bash
+echo tampered\n",
+        )
+        .unwrap();
 
         assert!(trusted.path.starts_with(dir.join("recovery")));
         assert!(!trusted.path.starts_with(dir.join("runtime")));

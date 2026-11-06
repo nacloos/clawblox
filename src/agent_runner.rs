@@ -1480,13 +1480,19 @@ pub(crate) fn prepare_agent_log(path: &Path) -> std::io::Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_file() => return Ok(()),
         Ok(meta) if meta.is_dir() => {
-            return Err(std::io::Error::other(format!("{} is a directory", path.display())))
+            return Err(std::io::Error::other(format!(
+                "{} is a directory",
+                path.display()
+            )))
         }
         Ok(_) => std::fs::remove_file(path)?,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(err) => return Err(err),
     }
-    std::fs::OpenOptions::new().create_new(true).append(true).open(path)?;
+    std::fs::OpenOptions::new()
+        .create_new(true)
+        .append(true)
+        .open(path)?;
     Ok(())
 }
 
@@ -1809,7 +1815,10 @@ mod tests {
         crate::agent::write_no_follow(&path, b"new").unwrap();
 
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
-        assert!(!std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+        assert!(!std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
     }
 

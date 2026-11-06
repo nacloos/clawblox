@@ -563,7 +563,13 @@ mod tests {
                 .unwrap_or_else(|| panic!("no read-only bind for {name}"));
             assert!(ro_index > rw_index, "{name} must be bound after /runtime");
         }
-        for name in ["start.sh", "claude_sandbox_settings.json", "sandbox_hosts", "claude-plugin", "active.json"] {
+        for name in [
+            "start.sh",
+            "claude_sandbox_settings.json",
+            "sandbox_hosts",
+            "claude-plugin",
+            "active.json",
+        ] {
             assert!(RUNTIME_CONTROL_FILES.contains(&name), "{name} missing");
         }
         // The host appends to the agent log from outside the sandbox, so the agent
@@ -576,7 +582,10 @@ mod tests {
         let logs_rw = wrapped
             .args
             .windows(2)
-            .position(|w| w[0] == "--bind" && w[1] == ctx.paths.log_file.parent().unwrap().display().to_string())
+            .position(|w| {
+                w[0] == "--bind"
+                    && w[1] == ctx.paths.log_file.parent().unwrap().display().to_string()
+            })
             .expect("logs bind");
         let log_ro = wrapped
             .args
