@@ -8,6 +8,11 @@ pub struct MotionPlan {
 }
 
 /// Build desired translation and updated vertical velocity for a character this tick.
+///
+/// `legacy_motion` selects the mesa-island-era rules used for the paper runs
+/// (`clawblox.player_object_physics = false`): jumps only start from the
+/// ground, there is no terminal fall speed, and vertical velocity keeps
+/// integrating gravity while the character is supported.
 pub fn build_motion_plan(
     current_pos: [f32; 3],
     target: Option<[f32; 3]>,
@@ -21,14 +26,18 @@ pub fn build_motion_plan(
     jump_power: Option<f32>,
     platform_velocity: Option<[f32; 3]>,
     contact_velocity: Option<[f32; 3]>,
+    legacy_motion: bool,
 ) -> MotionPlan {
     let mut new_vertical_velocity = vertical_velocity + gravity * dt;
-    if new_vertical_velocity < -physics_consts::CHARACTER_TERMINAL_FALL_SPEED {
+    if !legacy_motion && new_vertical_velocity < -physics_consts::CHARACTER_TERMINAL_FALL_SPEED {
         new_vertical_velocity = -physics_consts::CHARACTER_TERMINAL_FALL_SPEED;
     }
-    if let Some(jump) = jump_power {
-        let max_launch_speed = (2.0 * gravity.abs() * humanoid_consts::DEFAULT_JUMP_HEIGHT).sqrt();
-        new_vertical_velocity = jump.max(0.0).min(max_launch_speed);
+    if grounded || !legacy_motion {
+        if let Some(jump) = jump_power {
+            let max_launch_speed =
+                (2.0 * gravity.abs() * humanoid_consts::DEFAULT_JUMP_HEIGHT).sqrt();
+            new_vertical_velocity = jump.max(0.0).min(max_launch_speed);
+        }
     }
 
     let mut dx = 0.0f32;
@@ -74,7 +83,9 @@ pub fn build_motion_plan(
     let mut desired_y = if (grounded || carry_by_platform) && new_vertical_velocity <= 0.0 {
         // Supported: do not bank gravity. Storing it while the support holds
         // the capsule in place discharges as a plunge when the support goes.
-        new_vertical_velocity = 0.0;
+        if !legacy_motion {
+            new_vertical_velocity = 0.0;
+        }
         0.0
     } else {
         new_vertical_velocity * dt
@@ -102,11 +113,15 @@ pub fn build_motion_plan(
 }
 
 /// Resolve vertical velocity after the character controller applies movement constraints.
+///
+/// `legacy_motion` keeps the mesa-island-era rule set (see [`build_motion_plan`]):
+/// a blocked descent does not reset vertical velocity.
 pub fn resolve_vertical_velocity_after_move(
     new_vertical_velocity: f32,
     desired_y: f32,
     applied_y: f32,
     grounded: bool,
+    legacy_motion: bool,
 ) -> f32 {
     let mut v = new_vertical_velocity;
     if grounded && v < 0.0 {
@@ -120,7 +135,7 @@ pub fn resolve_vertical_velocity_after_move(
     // Without this, vertical velocity keeps integrating gravity while the
     // capsule is wedged and discharges as a huge plunge or launch the moment
     // the path frees up.
-    if desired_y < -1.0e-4 && applied_y > desired_y + 1.0e-4 {
+    if !legacy_motion && desired_y < -1.0e-4 && applied_y > desired_y + 1.0e-4 {
         v = 0.0;
     }
     v
@@ -147,6 +162,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         assert!(
@@ -179,6 +195,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         assert!(plan.desired[0] > 0.0, "grounded MoveTo should steer X");
@@ -203,6 +220,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         assert!(
@@ -216,6 +234,89 @@ mod tests {
         assert!(
             plan.new_horizontal_velocity[1] < 16.0,
             "air control should not instantly reach full target speed"
+        );
+    }
+
+    #[test]
+    fn legacy_motion_keeps_mesa_island_era_vertical_rules() {
+        let dt = 1.0 / 60.0;
+        let supported = |legacy| {
+            build_motion_plan(
+                [0.0, 3.0, 0.0],
+                None,
+                16.0,
+                -1.0,
+                -200.0,
+                dt,
+                [0.0, 0.0],
+                true,
+                false,
+                None,
+                None,
+                None,
+                legacy,
+            )
+        };
+        // Current rules: a supported character does not bank gravity.
+        assert_eq!(supported(false).new_vertical_velocity, 0.0);
+        // Legacy rules: it does (and resolve clears it once grounded).
+        assert!(supported(true).new_vertical_velocity < -1.0);
+
+        // Jumps only start from the ground under legacy rules.
+        let airborne_jump = |legacy| {
+            build_motion_plan(
+                [0.0, 10.0, 0.0],
+                None,
+                16.0,
+                -5.0,
+                -200.0,
+                dt,
+                [0.0, 0.0],
+                false,
+                false,
+                Some(50.0),
+                None,
+                None,
+                legacy,
+            )
+            .new_vertical_velocity
+        };
+        assert!(airborne_jump(false) > 0.0);
+        assert!(airborne_jump(true) < 0.0);
+
+        // No terminal fall speed under legacy rules.
+        let falling = |legacy| {
+            build_motion_plan(
+                [0.0, 100.0, 0.0],
+                None,
+                16.0,
+                -500.0,
+                -200.0,
+                dt,
+                [0.0, 0.0],
+                false,
+                false,
+                None,
+                None,
+                None,
+                legacy,
+            )
+            .new_vertical_velocity
+        };
+        assert_eq!(
+            falling(false),
+            -physics_consts::CHARACTER_TERMINAL_FALL_SPEED
+        );
+        assert!(falling(true) < -500.0);
+
+        // A blocked descent resets vertical velocity only under current rules.
+        assert_eq!(
+            resolve_vertical_velocity_after_move(-8.0, -0.1, 0.0, false, false),
+            0.0
+        );
+        assert_eq!(
+            resolve_vertical_velocity_after_move(-8.0, -0.1, 0.0, false, true),
+            -8.0
         );
     }
 }

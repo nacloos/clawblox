@@ -546,7 +546,10 @@ impl PhysicsWorld {
         let applied_horiz = (movement.translation.x * movement.translation.x
             + movement.translation.z * movement.translation.z)
             .sqrt();
-        if desired_horiz > 1.0e-5
+        // Not part of the mesa-island compatibility mode
+        // (`player_object_physics = false`), which predates it.
+        if player_object_physics
+            && desired_horiz > 1.0e-5
             && applied_horiz < desired_horiz * 0.05
             && !collisions.is_empty()
             && collisions

@@ -140,6 +140,10 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             )
         };
 
+        // `player_object_physics = false` is the mesa-island compatibility
+        // mode: it reproduces the character physics used for the paper runs,
+        // so every later character-motion change below is gated on it.
+        let legacy_motion = !instance.player_object_physics();
         let walk_speed = instance
             .physics
             .get_character_walk_speed(hrp_id)
@@ -191,7 +195,7 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             .filter(|_| support_outside_capsule || !ground_sample.support_is_dynamic)
             .map(|v| {
                 let speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-                if speed > MAX_CARRY_SPEED {
+                if !legacy_motion && speed > MAX_CARRY_SPEED {
                     let scale = MAX_CARRY_SPEED / speed;
                     [v[0] * scale, v[1] * scale, v[2] * scale]
                 } else {
@@ -211,6 +215,7 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             jump_power,
             platform_velocity,
             contact_velocity,
+            legacy_motion,
         );
         // Overlapping a dynamic support (it is inside the capsule, not under
         // it): hold height instead of grinding downward. Contacts with the
@@ -219,7 +224,8 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
         // gets ratcheted below the surface tick by tick, buoyancy never
         // winning. Holding height lets the body settle against the capsule
         // and the character step or jump off.
-        let penetrating_support = ground_sample.support_is_dynamic
+        let penetrating_support = !legacy_motion
+            && ground_sample.support_is_dynamic
             && ground_sample
                 .support_distance
                 .map(|d| d < capsule_half_extent - 0.1)
@@ -269,6 +275,7 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
                 motion_plan.desired[1],
                 movement.translation.y,
                 movement.grounded,
+                legacy_motion,
             );
             post_move_grounded = movement.grounded;
             // A mostly-blocked downward move means something below holds the
@@ -277,7 +284,8 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             // standing so the next tick doesn't retry the descent: repeated
             // micro-descents slide off oblique edges and ratchet one-way
             // contacts (and anything buoyant under them) below the surface.
-            if motion_plan.desired[1] < -1.0e-4
+            if !legacy_motion
+                && motion_plan.desired[1] < -1.0e-4
                 && movement.translation.y > motion_plan.desired[1] * 0.5
             {
                 post_move_grounded = true;
@@ -295,7 +303,7 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
                 state.horizontal_velocity = motion_plan.new_horizontal_velocity;
             }
         }
-        if post_move_grounded {
+        if post_move_grounded && !legacy_motion {
             apply_character_support_load(instance, hrp_id, controller_config.ground_query_distance);
         }
         if motion_plan.reached_move_to {
