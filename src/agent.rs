@@ -917,6 +917,17 @@ fn write_file(path: &Path, contents: &str) -> AgentResult<()> {
 /// regular file in place, so a read-only bind over its inode stays in force.
 #[cfg(unix)]
 pub(crate) fn write_no_follow(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    write_no_follow_with_mode(path, contents, None)
+}
+
+/// `write_no_follow`, then set `mode` through the open file (fchmod), so the change can't
+/// follow a symlink planted after the write.
+#[cfg(unix)]
+pub(crate) fn write_no_follow_with_mode(
+    path: &Path,
+    contents: &[u8],
+    mode: Option<std::fs::Permissions>,
+) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     if let Ok(meta) = std::fs::symlink_metadata(path) {
         if meta.file_type().is_symlink() {
@@ -929,12 +940,29 @@ pub(crate) fn write_no_follow(path: &Path, contents: &[u8]) -> std::io::Result<(
         .truncate(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)?;
-    file.write_all(contents)
+    file.write_all(contents)?;
+    if let Some(mode) = mode {
+        file.set_permissions(mode)?;
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
 pub(crate) fn write_no_follow(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     std::fs::write(path, contents)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn write_no_follow_with_mode(
+    path: &Path,
+    contents: &[u8],
+    mode: Option<std::fs::Permissions>,
+) -> std::io::Result<()> {
+    std::fs::write(path, contents)?;
+    if let Some(mode) = mode {
+        std::fs::set_permissions(path, mode)?;
+    }
+    Ok(())
 }
 
 /// A regular file, not a symlink to one.
@@ -1241,7 +1269,9 @@ fn copy_path(source: &Path, target: &Path) -> AgentResult<()> {
         }
     } else {
         create_parent_dir(target)?;
-        write_no_follow(target, &std::fs::read(source)?)?;
+        // keep the source's mode, as std::fs::copy did, so copied scripts stay executable
+        let mode = std::fs::metadata(source)?.permissions();
+        write_no_follow_with_mode(target, &std::fs::read(source)?, Some(mode))?;
     }
     Ok(())
 }
@@ -3134,5 +3164,45 @@ mod tests {
         assert_eq!(count(&fires), 2, "each turn-end appends another fire line");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_path_keeps_the_source_mode_and_does_not_follow_a_planted_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = test_context()
+            .paths
+            .workspace_dir
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let source = root.join("skills/tool/run.sh");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "#!/bin/sh\necho ok\n").unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let target = root.join("home/skills/tool/run.sh");
+        copy_path(&source, &target).unwrap();
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "a copied script stays executable");
+
+        // a symlink planted at the target is replaced, and its own target keeps its mode
+        let outside = root.join("outside.txt");
+        std::fs::write(&outside, "keep").unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::remove_file(&target).unwrap();
+        std::os::unix::fs::symlink(&outside, &target).unwrap();
+        copy_path(&source, &target).unwrap();
+        assert!(!std::fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
+        assert_eq!(
+            std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
