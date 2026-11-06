@@ -90,3 +90,89 @@ fn compat_mode_matches_mesa_island_engine() {
         );
     }
 }
+
+/// A block placed on its edge at exactly 45 degrees is balanced but unstable.
+/// The mesa-island engine released placed parts with the motion of their
+/// placement animation, so they tipped over; compat mode must too.
+#[test]
+fn compat_mode_block_placed_on_edge_falls_flat() {
+    let world_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("worlds/mesa-island");
+    let (_, source) = load_world_and_entry_script(&world_dir).unwrap();
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+    instance.load_script(&source);
+    instance.set_player_object_physics(false);
+    let lua = |instance: &GameInstance, code: &str| {
+        let _: () = instance
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .lua()
+            .load(code)
+            .exec()
+            .unwrap();
+    };
+    let tilt = |instance: &GameInstance| -> f64 {
+        instance
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .lua()
+            .load(
+                r#"local cf = Workspace.EdgeProbe.CFrame
+                local m = math.max(math.abs(cf.UpVector.Y), math.abs(cf.RightVector.Y), math.abs(cf.LookVector.Y))
+                return math.deg(math.acos(math.min(1, m)))"#,
+            )
+            .eval()
+            .unwrap()
+    };
+
+    // A 1-stud cube on open ground; Place anchors it, eases it to the target
+    // over 0.3 s (18 ticks), then unanchors it.
+    lua(
+        &instance,
+        r#"
+        local b = Instance.new("Part")
+        b.Name = "EdgeProbe"
+        b.Size = Vector3.new(1, 1, 1)
+        b.Position = Vector3.new(-5, 3, -40)
+        b.Parent = Workspace"#,
+    );
+    for _ in 0..180 {
+        instance.tick();
+    }
+    lua(
+        &instance,
+        r#"
+        local b = Workspace.EdgeProbe
+        local floor = b.Position.Y - 0.5
+        b.Anchored = true
+        b.CanCollide = false
+        _G.edgeTarget = CFrame.new(-5, floor + math.sqrt(0.5) + 0.001, -40) * CFrame.Angles(0, 0, math.rad(45))
+        _G.edgeStart = CFrame.new(_G.edgeTarget.Position + Vector3.new(0, 1.5, 0))
+        b.CFrame = _G.edgeStart"#,
+    );
+    instance.tick();
+    for k in 1..=18 {
+        lua(
+            &instance,
+            &format!(
+                r#"local a = {k} / 18
+                local t = 1 - (1 - a) * (1 - a)
+                Workspace.EdgeProbe.CFrame = _G.edgeStart:Lerp(_G.edgeTarget, t)"#
+            ),
+        );
+        instance.tick();
+    }
+    lua(
+        &instance,
+        "local b = Workspace.EdgeProbe; b.Anchored = false; b.CanCollide = true",
+    );
+    for _ in 0..300 {
+        instance.tick();
+    }
+    let final_tilt = tilt(&instance);
+    assert!(
+        final_tilt < 1.0,
+        "block placed on its edge should tip over and lie flat, still tilted {final_tilt:.1} deg"
+    );
+}

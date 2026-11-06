@@ -171,6 +171,10 @@ pub struct PhysicsWorld {
     align_joints: HashMap<u64, align_motors::AlignJointEntry>,
     /// Lazily created fixed body that world-space align targets attach to.
     world_anchor_body: Option<RigidBodyHandle>,
+    /// Mesa-island compatibility (`player_object_physics = false`): a part
+    /// released from Anchored keeps the motion of its kinematic body, as the
+    /// mesa-island engine's in-place body-type switch did.
+    pub legacy_unanchor_momentum: bool,
 }
 
 fn part_isometry(position: [f32; 3], rotation: &[[f32; 3]; 3]) -> Isometry<Real> {
@@ -644,6 +648,7 @@ impl PhysicsWorld {
             align_joints: HashMap::new(),
             world_anchor_body: None,
             pending_body_removals: Vec::new(),
+            legacy_unanchor_momentum: false,
         }
     }
 

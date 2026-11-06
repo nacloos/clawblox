@@ -107,7 +107,8 @@ solver_iterations = 4
 reproduces the character physics used for the paper runs (branch
 `nacloos/mesa-island`): characters don't push or ride loose parts, and the
 later character-motion changes (wedge recovery, terminal fall speed, the
-vertical-velocity resets, support load) are off. Use it to compare against
+vertical-velocity resets, support load) are off. Parts released from
+`Anchored` keep the motion they had, as before. Use it to compare against
 the paper's results or replay its recordings.
 
 ## Examples
