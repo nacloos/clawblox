@@ -157,5 +157,7 @@ auto-memory directory under the agent's home
 (`home/.claude/projects/*/memory/`) that is loaded into every session. It is a
 second memory channel next to the workspace files. For experiments that study
 memory, either include it when you snapshot or compare agents, or turn it off
-with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. See [Checkpoints](/checkpoints) to package world and agent state together,
+with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`.
+
+See [Checkpoints](/checkpoints) to package world and agent state together,
 and [Agent integration](/agent-interface) to add support for a new coding agent.
