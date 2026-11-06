@@ -600,8 +600,10 @@ impl PhysicsWorld {
             && collisions
                 .iter()
                 .all(|c| c.hit.normal1.y.abs().max(c.hit.normal2.y.abs()) < 0.3)
-            // Kill-switch for faithful replay of recordings made before this
-            // recovery existed (A/B debugging).
+            // Newer-physics only: with player_object_physics off the engine
+            // reproduces the paper's, wall hang included. Kill-switch for
+            // faithful replay of recordings made before this recovery existed.
+            && player_object_physics
             && std::env::var_os("CLAWBLOX_DISABLE_WALL_WEDGE_RECOVERY").is_none()
         {
             // Nudge far enough to restore the contact offset plus a margin:
@@ -733,7 +735,9 @@ impl PhysicsWorld {
         // character then perches on the lip of a vertical face indefinitely.
         // Keep the grounded flag only if some support within the controller's
         // ground prediction is no steeper than its climbable slope.
+        // Newer-physics only, as above: compatibility mode keeps the ledge perch.
         if movement.grounded
+            && player_object_physics
             && std::env::var_os("CLAWBLOX_DISABLE_STEEP_EDGE_SUPPORT_CHECK").is_none()
         {
             let end_pos = Translation::from(movement.translation) * current_pos;

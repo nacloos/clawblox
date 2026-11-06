@@ -17,9 +17,15 @@ struct Probe {
 
 impl Probe {
     fn new() -> Self {
+        Self::with_object_physics(true)
+    }
+
+    /// `player_object_physics = false` is the compatibility mode that reproduces the paper's engine.
+    fn with_object_physics(enabled: bool) -> Self {
         let world_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("worlds/mesa-island");
         let (_, source) = load_world_and_entry_script(&world_dir).unwrap();
         let mut instance = GameInstance::new(Uuid::new_v4(), None);
+        instance.set_player_object_physics(enabled);
         instance.load_script(&source);
         let agent_id = Uuid::new_v4();
         assert!(instance.add_player(agent_id, "WallProbe"));
@@ -128,5 +134,24 @@ fn character_does_not_perch_on_ledge_lip() {
     assert!(
         end[1] < standing_y + 0.1 || end[0] > -30.0,
         "character should slide off the lip (or climb onto the top), not perch on it: {end:?}"
+    );
+}
+
+#[test]
+fn compatibility_mode_keeps_the_paper_engine_ledge_perch() {
+    // With player_object_physics off, neither fix applies: the capsule still
+    // perches on TallMesa's lip, as on the paper's engine.
+    let mut p = Probe::with_object_physics(false);
+    let pressed = p.press([-36.0, 4.0, -18.0], [-20.0, 3.0, -18.0]);
+    let standing_y = pressed[1];
+    p.instance
+        .physics
+        .set_character_position(p.hrp_id, [pressed[0], 7.70, -18.0]);
+    p.input("MoveTo", json!({ "position": [-20.0, 3.0, -18.0] }));
+    p.ticks(120);
+    let end = p.pos();
+    assert!(
+        end[1] > standing_y + 0.1 && end[0] <= -30.0,
+        "compatibility mode should keep the old perch, unchanged: {end:?}"
     );
 }
