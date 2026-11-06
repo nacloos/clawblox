@@ -28,9 +28,10 @@ mod workspace_physics;
 pub use observation::{
     BillboardGuiJson, BillboardLabelJson, EntityAabb, EntityObb, GameEvent, GuiElement, MapInfo,
     OtherPlayerInfo, PlayerCameraPose, PlayerInfo, PlayerObservation, ReplicationObservationUpdate,
-    SpectatorEntity, SpectatorObservation, SpectatorPlayerAnimation, SpectatorPlayerInfo,
-    SpectatorRender, SpectatorReplicatedEvent, SpectatorSound, UDim2Json, VisibleEntity,
-    WorldEntity, WorldInfo, PLAYER_EYE_HEIGHT,
+    SpectatorEntity,
+    SpectatorObservation, SpectatorPlayerAnimation, SpectatorPlayerInfo, SpectatorRender,
+    SpectatorReplicatedEvent, SpectatorSound, UDim2Json, VisibleEntity, WorldEntity, WorldInfo,
+    PLAYER_EYE_HEIGHT,
 };
 
 /// Default AFK timeout in seconds (5 minutes)
