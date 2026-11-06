@@ -256,6 +256,11 @@ pub struct ClaudeAgent {
     pub binary: PathBuf,
     pub bare: bool,
     pub disallowed_tools: Option<String>,
+    /// Sandboxed runs only: load user settings alone (`--setting-sources user`), so a project or
+    /// local settings file or a workspace `CLAUDE.md` the agent writes is not loaded. Off by
+    /// default because it changes behaviour for anyone relying on a workspace `CLAUDE.md`;
+    /// `CLAWBLOX_CLAUDE_USER_SETTINGS_ONLY=1` turns it on.
+    pub user_settings_only: bool,
 }
 
 impl Default for ClaudeAgent {
@@ -264,8 +269,19 @@ impl Default for ClaudeAgent {
             binary: PathBuf::from("claude"),
             bare: false,
             disallowed_tools: Some("WebFetch,WebSearch".to_string()),
+            user_settings_only: user_settings_only_from_env(),
         }
     }
+}
+
+fn user_settings_only_from_env() -> bool {
+    matches!(
+        std::env::var("CLAWBLOX_CLAUDE_USER_SETTINGS_ONLY")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 impl Agent for ClaudeAgent {
@@ -459,11 +475,12 @@ impl ClaudeAgent {
             command = command
                 .arg("--settings")
                 .arg("/runtime/claude_sandbox_settings.json")
-                // ignore project and local settings files
-                // and MCP servers from config files, which the agent could write.
-                .arg("--setting-sources")
-                .arg("user")
+                // ignore MCP servers from config files, which the agent could write.
                 .arg("--strict-mcp-config");
+            if self.user_settings_only {
+                // opt-in: ignore project and local settings files and a workspace CLAUDE.md too.
+                command = command.arg("--setting-sources").arg("user");
+            }
             if let Some(disallowed_tools) = &self.disallowed_tools {
                 if !disallowed_tools.trim().is_empty() {
                     command = command.arg("--disallowedTools").arg(disallowed_tools);
@@ -917,6 +934,17 @@ fn write_file(path: &Path, contents: &str) -> AgentResult<()> {
 /// regular file in place, so a read-only bind over its inode stays in force.
 #[cfg(unix)]
 pub(crate) fn write_no_follow(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    write_no_follow_with_mode(path, contents, None)
+}
+
+/// `write_no_follow`, then set `mode` through the open file (fchmod), so the change can't
+/// follow a symlink planted after the write.
+#[cfg(unix)]
+pub(crate) fn write_no_follow_with_mode(
+    path: &Path,
+    contents: &[u8],
+    mode: Option<std::fs::Permissions>,
+) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     if let Ok(meta) = std::fs::symlink_metadata(path) {
         if meta.file_type().is_symlink() {
@@ -929,12 +957,29 @@ pub(crate) fn write_no_follow(path: &Path, contents: &[u8]) -> std::io::Result<(
         .truncate(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)?;
-    file.write_all(contents)
+    file.write_all(contents)?;
+    if let Some(mode) = mode {
+        file.set_permissions(mode)?;
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
 pub(crate) fn write_no_follow(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     std::fs::write(path, contents)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn write_no_follow_with_mode(
+    path: &Path,
+    contents: &[u8],
+    mode: Option<std::fs::Permissions>,
+) -> std::io::Result<()> {
+    std::fs::write(path, contents)?;
+    if let Some(mode) = mode {
+        std::fs::set_permissions(path, mode)?;
+    }
+    Ok(())
 }
 
 /// A regular file, not a symlink to one.
@@ -1241,7 +1286,9 @@ fn copy_path(source: &Path, target: &Path) -> AgentResult<()> {
         }
     } else {
         create_parent_dir(target)?;
-        write_no_follow(target, &std::fs::read(source)?)?;
+        // keep the source's mode, as std::fs::copy did, so copied scripts stay executable
+        let mode = std::fs::metadata(source)?.permissions();
+        write_no_follow_with_mode(target, &std::fs::read(source)?, Some(mode))?;
     }
     Ok(())
 }
@@ -1961,7 +2008,8 @@ fn unquote_shell_value(value: &str) -> String {
 /// interpreters resolve from system dirs and Python ignores the user site dir,
 /// both of which the agent could otherwise write.
 #[cfg(test)]
-const HOOK_COMMAND_PREFIX: &str = "/usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 ";
+const HOOK_COMMAND_PREFIX: &str =
+    "/usr/bin/env PATH=/sandbox-deps/bin:/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 ";
 
 const CLAUDE_HOOKS_JSON: &str = r#"{
   "hooks": {
@@ -1970,7 +2018,7 @@ const CLAUDE_HOOKS_JSON: &str = r#"{
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/session_start.sh\""
+            "command": "/usr/bin/env PATH=/sandbox-deps/bin:/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/session_start.sh\""
           }
         ]
       }
@@ -1980,7 +2028,7 @@ const CLAUDE_HOOKS_JSON: &str = r#"{
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/user_prompt_submit.sh\""
+            "command": "/usr/bin/env PATH=/sandbox-deps/bin:/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/user_prompt_submit.sh\""
           }
         ]
       }
@@ -1990,7 +2038,7 @@ const CLAUDE_HOOKS_JSON: &str = r#"{
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/post_tool_use_chat.py\""
+            "command": "/usr/bin/env PATH=/sandbox-deps/bin:/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/post_tool_use_chat.py\""
           }
         ]
       }
@@ -2000,7 +2048,7 @@ const CLAUDE_HOOKS_JSON: &str = r#"{
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/stop.sh\""
+            "command": "/usr/bin/env PATH=/sandbox-deps/bin:/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/stop.sh\""
           }
         ]
       }
@@ -2010,7 +2058,7 @@ const CLAUDE_HOOKS_JSON: &str = r#"{
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/stop_failure.sh\""
+            "command": "/usr/bin/env PATH=/sandbox-deps/bin:/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/stop_failure.sh\""
           }
         ]
       }
@@ -2021,7 +2069,7 @@ const CLAUDE_HOOKS_JSON: &str = r#"{
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/notification.sh\""
+            "command": "/usr/bin/env PATH=/sandbox-deps/bin:/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/notification.sh\""
           }
         ]
       }
@@ -2031,7 +2079,7 @@ const CLAUDE_HOOKS_JSON: &str = r#"{
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/session_end.sh\""
+            "command": "/usr/bin/env PATH=/sandbox-deps/bin:/usr/local/bin:/usr/bin:/bin PYTHONNOUSERSITE=1 \"${CLAUDE_PLUGIN_ROOT}/bin/session_end.sh\""
           }
         ]
       }
@@ -2572,6 +2620,7 @@ mod tests {
             binary: PathBuf::from("/bin/echo"),
             bare: true,
             disallowed_tools: Some("WebFetch,WebSearch".to_string()),
+            user_settings_only: false,
         };
 
         agent.configure_auto_continue(&ctx).unwrap();
@@ -2675,6 +2724,7 @@ mod tests {
             binary: PathBuf::from("/bin/echo"),
             bare: false,
             disallowed_tools: Some("WebFetch,WebSearch".to_string()),
+            user_settings_only: true,
         };
 
         agent.configure_auto_continue(&ctx).unwrap();
@@ -2688,13 +2738,27 @@ mod tests {
             .args
             .windows(2)
             .any(|window| window == ["--settings", "/runtime/claude_sandbox_settings.json"]));
-        // only user settings (read-only) and --settings;
-        // no project or local settings, no MCP servers from config files.
+        // user_settings_only (opt-in): only user settings (read-only) and --settings,
+        // so no project or local settings and no workspace CLAUDE.md.
         assert!(start
             .args
             .windows(2)
             .any(|window| window == ["--setting-sources", "user"]));
+        // always: no MCP servers from config files.
         assert!(start.args.contains(&"--strict-mcp-config".to_string()));
+        // off (the default): setting sources are left to Claude Code.
+        let default_sources = ClaudeAgent {
+            user_settings_only: false,
+            ..ClaudeAgent::default()
+        }
+        .start(&ctx)
+        .unwrap();
+        assert!(!default_sources
+            .args
+            .contains(&"--setting-sources".to_string()));
+        assert!(default_sources
+            .args
+            .contains(&"--strict-mcp-config".to_string()));
         assert!(start
             .env
             .contains(&("CLAWBLOX_CLAUDE_LOG_DIR".to_string(), "/logs".to_string())));
@@ -2856,6 +2920,7 @@ mod tests {
             binary: PathBuf::from("/bin/echo"),
             bare: false,
             disallowed_tools: Some("WebFetch,WebSearch".to_string()),
+            user_settings_only: false,
         };
 
         agent.configure_auto_continue(&ctx).unwrap();
@@ -3134,5 +3199,45 @@ mod tests {
         assert_eq!(count(&fires), 2, "each turn-end appends another fire line");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_path_keeps_the_source_mode_and_does_not_follow_a_planted_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = test_context()
+            .paths
+            .workspace_dir
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let source = root.join("skills/tool/run.sh");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "#!/bin/sh\necho ok\n").unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let target = root.join("home/skills/tool/run.sh");
+        copy_path(&source, &target).unwrap();
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "a copied script stays executable");
+
+        // a symlink planted at the target is replaced, and its own target keeps its mode
+        let outside = root.join("outside.txt");
+        std::fs::write(&outside, "keep").unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::remove_file(&target).unwrap();
+        std::os::unix::fs::symlink(&outside, &target).unwrap();
+        copy_path(&source, &target).unwrap();
+        assert!(!std::fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
+        assert_eq!(
+            std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
