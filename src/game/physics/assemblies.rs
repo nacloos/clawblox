@@ -518,7 +518,10 @@ impl PhysicsWorld {
         local_frames: &[Isometry<Real>],
     ) {
         // Capture the root part's old body motion before tearing the bodies
-        // down, so the assembly keeps its momentum across the rebuild.
+        // down, so the assembly keeps its momentum across the rebuild. A
+        // kinematic (anchored) body's motion is dropped, except in mesa-island
+        // compatibility mode, where a released part keeps it.
+        let legacy_unanchor_momentum = self.legacy_unanchor_momentum;
         let carry_over = self
             .lua_to_body
             .get(&spec.root_id)
@@ -528,8 +531,18 @@ impl PhysicsWorld {
                     .find_map(|part| self.lua_to_body.get(&part.lua_id))
             })
             .and_then(|&handle| self.rigid_body_set.get(handle))
-            .filter(|body| body.is_dynamic())
-            .map(|body| (*body.linvel(), *body.angvel(), *body.center_of_mass()));
+            .filter(|body| body.is_dynamic() || (legacy_unanchor_momentum && body.is_kinematic()))
+            .map(|body| {
+                // Rapier only refreshes world_com for simulated bodies; a
+                // kinematic body's is stale (where it last was dynamic or
+                // created), so derive it from the current pose.
+                let com = if body.is_kinematic() {
+                    body.position() * body.local_center_of_mass()
+                } else {
+                    *body.center_of_mass()
+                };
+                (*body.linvel(), *body.angvel(), com)
+            });
         let mut old_roots: Vec<u64> = spec
             .parts
             .iter()

@@ -124,6 +124,14 @@ solver_iterations = 4
 
 `solver_iterations` must be between `1` and `32`.
 
+`player_object_physics = false` is the mesa-island compatibility mode. It
+reproduces the character physics used for the paper runs (branch
+`nacloos/mesa-island`): characters don't push or ride loose parts, and the
+later character-motion changes (wedge recovery, terminal fall speed, the
+vertical-velocity resets, support load) are off. Parts released from
+`Anchored` keep the motion they had, as before. Use it to compare against
+the paper's results or replay its recordings.
+
 ## Agent API and sandbox
 
 ```toml

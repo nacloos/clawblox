@@ -210,6 +210,7 @@ impl GameInstance {
 
     pub fn set_player_object_physics(&mut self, enabled: bool) {
         self.player_object_physics = enabled;
+        self.physics.legacy_unanchor_momentum = !enabled;
     }
 
     pub fn player_object_physics(&self) -> bool {
