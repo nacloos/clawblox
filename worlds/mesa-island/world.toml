@@ -19,3 +19,8 @@ radius = 40000
 
 [agent_api]
 vision = true
+
+# Same world as the paper runs (mesa-small-world-3 on nacloos/mesa-island).
+# Compatibility mode reproduces that engine's physics; see docs/physics.md.
+[clawblox]
+player_object_physics = false

@@ -178,3 +178,11 @@ fn compat_mode_block_placed_on_edge_falls_flat() {
         &end[0..3]
     );
 }
+
+/// The shipped Mesa World is the paper's world, so it runs in compatibility mode.
+#[test]
+fn mesa_world_config_uses_compat_mode() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("worlds/mesa-island/world.toml");
+    let config = clawblox::config::WorldConfig::from_file(&path).unwrap();
+    assert!(!config.clawblox.player_object_physics);
+}
