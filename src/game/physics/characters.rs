@@ -624,6 +624,25 @@ impl PhysicsWorld {
         // part that comes to rest against the capsule (and then falls
         // asleep) walls the character in permanently.
         if player_object_physics && !collisions.is_empty() {
+            // Shove only: never transfer the capsule's upward motion. Rapier
+            // gives the body the full remaining translation along the contact
+            // normal as velocity, so a jump blocked by a part resting on the
+            // head handed the part the whole launch (clamped to
+            // CHARACTER_CONTACT_SPEED_GAIN_CAP) while the blocked character
+            // rose nothing — a free launch for anything balanced on a head.
+            let push_collisions: Vec<_> =
+                if std::env::var_os("CLAWBLOX_DISABLE_UPWARD_PUSH_FILTER").is_some() {
+                    collisions.clone()
+                } else {
+                    collisions
+                        .iter()
+                        .map(|c| {
+                            let mut c = *c;
+                            c.translation_remaining.y = c.translation_remaining.y.min(0.0);
+                            c
+                        })
+                        .collect()
+                };
             controller.solve_character_collision_impulses(
                 dt,
                 &mut self.rigid_body_set,
@@ -631,7 +650,7 @@ impl PhysicsWorld {
                 &self.query_pipeline,
                 shape,
                 consts::CHARACTER_PUSH_MASS,
-                collisions.iter(),
+                push_collisions.iter(),
                 filter,
             );
         }
