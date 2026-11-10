@@ -93,7 +93,8 @@ fn compat_mode_matches_mesa_island_engine() {
 
 /// A block placed on its edge at exactly 45 degrees is balanced but unstable.
 /// The mesa-island engine released placed parts with the motion of their
-/// placement animation, so they tipped over; compat mode must too.
+/// placement animation, so they tipped over. Uses the world's real Pickup and
+/// Place; the expected pose was recorded on the mesa-island engine.
 #[test]
 fn compat_mode_block_placed_on_edge_falls_flat() {
     let world_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("worlds/mesa-island");
@@ -101,78 +102,79 @@ fn compat_mode_block_placed_on_edge_falls_flat() {
     let mut instance = GameInstance::new(Uuid::new_v4(), None);
     instance.load_script(&source);
     instance.set_player_object_physics(false);
-    let lua = |instance: &GameInstance, code: &str| {
-        let _: () = instance
-            .lua_runtime
-            .as_ref()
-            .unwrap()
-            .lua()
-            .load(code)
-            .exec()
-            .unwrap();
-    };
-    let tilt = |instance: &GameInstance| -> f64 {
-        instance
+    let agent_id = Uuid::new_v4();
+    assert!(instance.add_player(agent_id, "EdgeProbe"));
+    let user_id = instance.players[&agent_id];
+    let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+    for _ in 0..10 {
+        instance.tick();
+    }
+    let lua = instance.lua_runtime.as_ref().unwrap().lua();
+    let _: () = lua
+        .load(
+            r#"local b = Workspace.Block_3
+            b.CFrame = CFrame.new(-1, 0.38, -36)
+            b.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            b.AssemblyAngularVelocity = Vector3.new(0, 0, 0)"#,
+        )
+        .exec()
+        .unwrap();
+    instance
+        .physics
+        .set_character_position(hrp_id, [-2.0, 4.0, -40.0]);
+    for _ in 0..60 {
+        instance.tick();
+    }
+    let block = |instance: &GameInstance| -> Vec<f64> {
+        let s: String = instance
             .lua_runtime
             .as_ref()
             .unwrap()
             .lua()
             .load(
-                r#"local cf = Workspace.EdgeProbe.CFrame
-                local m = math.max(math.abs(cf.UpVector.Y), math.abs(cf.RightVector.Y), math.abs(cf.LookVector.Y))
-                return math.deg(math.acos(math.min(1, m)))"#,
+                r#"local cf = Workspace.Block_3.CFrame
+                local u = cf.UpVector
+                return string.format("%f %f %f %f %f %f", cf.X, cf.Y, cf.Z, u.X, u.Y, u.Z)"#,
             )
             .eval()
-            .unwrap()
+            .unwrap();
+        s.split(' ').map(|x| x.parse().unwrap()).collect()
     };
+    let rest = block(&instance);
+    instance.queue_agent_input(
+        user_id,
+        "Pickup".to_string(),
+        json!({ "position": [rest[0], rest[1], rest[2]] }),
+    );
+    for _ in 0..10 {
+        instance.tick();
+    }
+    instance.queue_agent_input(
+        user_id,
+        "Place".to_string(),
+        json!({
+            "position": [-1.0, 0.54, -38.0],
+            "rotation": { "yaw": 0, "pitch": 0, "roll": 45 }
+        }),
+    );
+    for _ in 0..200 {
+        instance.tick();
+    }
 
-    // A 1-stud cube on open ground; Place anchors it, eases it to the target
-    // over 0.3 s (18 ticks), then unanchors it.
-    lua(
-        &instance,
-        r#"
-        local b = Instance.new("Part")
-        b.Name = "EdgeProbe"
-        b.Size = Vector3.new(1, 1, 1)
-        b.Position = Vector3.new(-5, 3, -40)
-        b.Parent = Workspace"#,
-    );
-    for _ in 0..180 {
-        instance.tick();
-    }
-    lua(
-        &instance,
-        r#"
-        local b = Workspace.EdgeProbe
-        local floor = b.Position.Y - 0.5
-        b.Anchored = true
-        b.CanCollide = false
-        _G.edgeTarget = CFrame.new(-5, floor + math.sqrt(0.5) + 0.001, -40) * CFrame.Angles(0, 0, math.rad(45))
-        _G.edgeStart = CFrame.new(_G.edgeTarget.Position + Vector3.new(0, 1.5, 0))
-        b.CFrame = _G.edgeStart"#,
-    );
-    instance.tick();
-    for k in 1..=18 {
-        lua(
-            &instance,
-            &format!(
-                r#"local a = {k} / 18
-                local t = 1 - (1 - a) * (1 - a)
-                Workspace.EdgeProbe.CFrame = _G.edgeStart:Lerp(_G.edgeTarget, t)"#
-            ),
-        );
-        instance.tick();
-    }
-    lua(
-        &instance,
-        "local b = Workspace.EdgeProbe; b.Anchored = false; b.CanCollide = true",
-    );
-    for _ in 0..300 {
-        instance.tick();
-    }
-    let final_tilt = tilt(&instance);
+    // Mesa-island engine: lies flat at (-0.6141, 0.3737, -37.9835).
+    let end = block(&instance);
     assert!(
-        final_tilt < 1.0,
-        "block placed on its edge should tip over and lie flat, still tilted {final_tilt:.1} deg"
+        end[4] > 0.999,
+        "block placed on its edge should tip over and lie flat, up vector {:?}",
+        &end[3..6]
+    );
+    let expected = [-0.6141, 0.3737, -37.9835];
+    let dev = (0..3)
+        .map(|i| (end[i] - expected[i]).abs())
+        .fold(0.0, f64::max);
+    assert!(
+        dev < 0.02,
+        "block should settle where the mesa-island engine puts it {expected:?}, got {:?}",
+        &end[0..3]
     );
 }

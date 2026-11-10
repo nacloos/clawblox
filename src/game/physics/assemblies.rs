@@ -532,7 +532,17 @@ impl PhysicsWorld {
             })
             .and_then(|&handle| self.rigid_body_set.get(handle))
             .filter(|body| body.is_dynamic() || (legacy_unanchor_momentum && body.is_kinematic()))
-            .map(|body| (*body.linvel(), *body.angvel(), *body.center_of_mass()));
+            .map(|body| {
+                // Rapier only refreshes world_com for simulated bodies; a
+                // kinematic body's is stale (where it last was dynamic or
+                // created), so derive it from the current pose.
+                let com = if body.is_kinematic() {
+                    body.position() * body.local_center_of_mass()
+                } else {
+                    *body.center_of_mass()
+                };
+                (*body.linvel(), *body.angvel(), com)
+            });
         let mut old_roots: Vec<u64> = spec
             .parts
             .iter()
