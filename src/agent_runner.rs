@@ -1119,6 +1119,14 @@ fn build_sandbox_layout(
             .with_add_deps_lib_to_library_path(sandbox_config.add_deps_lib_to_library_path)
             .with_enable_weaker_nested_sandbox(sandbox_config.enable_weaker_nested_sandbox)
             .with_hosts_file(ctx.paths.runtime_dir.join("sandbox_hosts"));
+    // mask the clawblox CLI inside the sandbox.
+    if std::env::var("CLAWBLOX_SANDBOX_HIDE_CLI").as_deref() == Ok("1") {
+        layout.hide_programs = ["/usr/local/bin", "/usr/bin", "/bin"]
+            .iter()
+            .map(|dir| Path::new(dir).join("clawblox"))
+            .filter(|path| path.exists())
+            .collect();
+    }
     // network isolation, fail-closed on a bad config.
     if let Some(mut bridges) = crate::agent_sandbox::net_bridges_from_env()? {
         if let Some(port) = ctx
