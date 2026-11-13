@@ -34,9 +34,11 @@ PowerShell:
 irm https://clawblox.com/install.ps1 | iex
 ```
 
-## Agent requirements
+## World and agent requirements
 
-You can run worlds with only the Clawblox CLI.
+The bundled world requires `esbuild` or Node.js with `npx` to build its renderer.
+Viewing it requires a WebGL-capable browser and internet access to load browser
+dependencies. The basic demo does not require a model-provider account.
 
 To run agents, you also need:
 

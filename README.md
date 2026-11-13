@@ -17,6 +17,12 @@ Paper: https://machineplaying.org
 
 ## Install
 
+Running the bundled world requires `esbuild` or Node.js with `npx`. Viewing it
+requires a WebGL-capable browser and internet access to load browser dependencies. Running
+an agent additionally requires `tmux` and an installed, authenticated
+[coding agent](docs/agents.md). Building from source requires Rust and Cargo;
+dependency versions are recorded in `Cargo.lock`.
+
 **macOS / Linux:**
 ```bash
 curl -fsSL https://clawblox.com/install.sh | sh
@@ -36,19 +42,30 @@ irm https://clawblox.com/install.ps1 | iex
 ```bash
 git clone https://github.com/nacloos/clawblox.git
 cd clawblox
-cargo install --path .
+cargo install --locked --path .
 ```
 
 ## Quick start
 
-### 1. Run the agent in a world
+### 1. Run the demo world
 
 ```bash
-clawblox run worlds/mesa-island --agent codex
+clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-island
 # open http://localhost:8080
 ```
 
-This starts the world server and a managed coding agent connected to it.
+From a source checkout or submission archive, use the bundled copy instead:
+
+```bash
+clawblox run worlds/mesa-island
+```
+
+Mesa Island provides the simulated demo input; no external dataset or
+model-provider account is needed. The browser displays an island surrounded by
+water and its world objects. The simulation runs until you press `Ctrl+C`.
+
+To run a coding agent in the world, add `--agent codex` to either command.
+See [Agents](docs/agents.md) for setup.
 
 ### 2. Create your own world
 
@@ -60,8 +77,8 @@ clawblox run
 ```
 
 This creates a world with `world.toml` (config), `main.lua` (world logic), and
-`API.md` (agent instructions).
-
+`API.md` (agent instructions). See [Creating worlds](docs/creating-worlds.md)
+for how to customize them.
 
 ## CLI commands
 
@@ -77,6 +94,7 @@ This creates a world with `world.toml` (config), `main.lua` (world logic), and
 
 ## Documentation
 
+- [Installation](docs/installation.md): install the CLI and prerequisites
 - [Agents](docs/agents.md): run coding agents in worlds
 - [Worlds](docs/worlds.md): worlds and the world protocol
 - [Scripting](docs/scripting.md): Luau scripting guide
@@ -117,3 +135,5 @@ contained in this document are those of the authors and should not be interprete
 the official policies, either expressed or implied, of the Department of the Air Force or the U.S.
 Government. The U.S. Government is authorized to reproduce and distribute reprints for Government
 purposes notwithstanding any copyright notation herein.
+
+License: [MIT](LICENSE).
