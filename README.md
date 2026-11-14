@@ -15,6 +15,8 @@ by Roblox, and natively support multi-agent
 
 Paper: https://machineplaying.org
 
+Data: [Paper supplementary data on Hugging Face](https://huggingface.co/datasets/nacloos/machine-playing-paper)
+
 ## Install
 
 Running the bundled world requires `esbuild` or Node.js with `npx`. Viewing it
